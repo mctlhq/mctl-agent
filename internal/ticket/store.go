@@ -144,7 +144,7 @@ func (s *Store) ListAll() ([]*Ticket, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	return s.scanTickets(rows)
 }
 
@@ -167,7 +167,7 @@ func (s *Store) listByStatus(statuses ...string) ([]*Ticket, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 	return s.scanTickets(rows)
 }
 
@@ -233,7 +233,7 @@ func (s *Store) loadEvidence(ticketID string) ([]Evidence, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var evs []Evidence
 	for rows.Next() {

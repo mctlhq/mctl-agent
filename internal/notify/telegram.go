@@ -211,7 +211,7 @@ func (tg *Telegram) sendMessage(text string) error {
 	if err != nil {
 		return fmt.Errorf("telegram send: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)

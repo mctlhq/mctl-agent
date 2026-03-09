@@ -32,7 +32,7 @@ func main() {
 		slog.Error("failed to initialize ticket store", "error", err, "path", cfg.DBPath)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer store.Close() //nolint:errcheck
 
 	// Initialize components.
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)

@@ -180,7 +180,7 @@ func (a *Analyzer) callClaude(ctx context.Context, t *ticket.Ticket) (*Diagnosis
 	if err != nil {
 		return nil, fmt.Errorf("claude API request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
