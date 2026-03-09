@@ -1,0 +1,199 @@
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/pipeline"
+	"github.com/mctlhq/mctl-agent/internal/ticket"
+)
+
+// Options holds all dependencies for the API router.
+type Options struct {
+	Store    *ticket.Store
+	Pipeline *pipeline.Pipeline
+	Telegram *notify.Telegram
+	GitHub   *fixer.GitHubFixer
+	// OnAlert is called when AlertManager sends an alert.
+	OnAlert func(w http.ResponseWriter, r *http.Request)
+}
+
+// NewRouter creates the HTTP router.
+func NewRouter(opts Options) http.Handler {
+	r := chi.NewRouter()
+
+	r.Use(middleware.RequestID)
+	r.Use(middleware.RealIP)
+	r.Use(middleware.Recoverer)
+
+	// Health checks.
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ready"}`))
+	})
+
+	// AlertManager webhook.
+	r.Post("/api/v1/alerts", opts.OnAlert)
+
+	// Telegram webhook.
+	r.Post("/api/v1/telegram", telegramWebhookHandler(opts))
+
+	// Ticket list.
+	r.Get("/api/v1/tickets", ticketListHandler(opts.Store))
+
+	return r
+}
+
+func ticketListHandler(store *ticket.Store) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		tickets, err := store.ListAll()
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"items": tickets,
+			"count": len(tickets),
+		})
+	}
+}
+
+func telegramWebhookHandler(opts Options) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "failed to read body", http.StatusBadRequest)
+			return
+		}
+
+		var update notify.TelegramUpdate
+		if err := json.Unmarshal(body, &update); err != nil {
+			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if update.Message == nil || update.Message.Text == "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		cmd := notify.ParseCommand(update.Message.Text)
+		if cmd == nil {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		handleTelegramCommand(cmd, opts)
+		w.WriteHeader(http.StatusOK)
+	}
+}
+
+func handleTelegramCommand(cmd *notify.TelegramCommand, opts Options) {
+	switch cmd.Command {
+	case "status":
+		tickets, err := opts.Store.ListOpen()
+		if err != nil {
+			slog.Error("failed to list tickets for /status", "error", err)
+			return
+		}
+		_ = opts.Telegram.SendStatus(tickets)
+
+	case "ticket":
+		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		if t == nil {
+			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			return
+		}
+		_ = opts.Telegram.SendTicketDetail(t)
+
+	case "approve":
+		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		if t == nil {
+			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			return
+		}
+		if t.PRNumber == 0 {
+			_ = opts.Telegram.SendText("No PR associated with ticket " + cmd.TicketID)
+			return
+		}
+		if err := opts.GitHub.MergePR(context.Background(), t.PRNumber); err != nil {
+			_ = opts.Telegram.SendText("Failed to merge PR: " + err.Error())
+			return
+		}
+		t.Status = ticket.StatusFixApplied
+		_ = opts.Store.Update(t)
+		_ = opts.Telegram.SendText("PR #" + strings.TrimSpace(fmt.Sprint(t.PRNumber)) + " merged for " + t.Service)
+
+	case "reject":
+		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		if t == nil {
+			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			return
+		}
+		if t.PRNumber > 0 {
+			_ = opts.GitHub.ClosePR(context.Background(), t.PRNumber, cmd.Reason)
+		}
+		t.Status = ticket.StatusSuppressed
+		_ = opts.Store.Update(t)
+		_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " rejected: " + cmd.Reason)
+
+	case "ignore":
+		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		if t == nil {
+			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			return
+		}
+		t.Status = ticket.StatusSuppressed
+		_ = opts.Store.Update(t)
+		_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " suppressed")
+
+	case "pause":
+		opts.Pipeline.Pause()
+		_ = opts.Telegram.SendText("Pipeline paused. Use /resume to restart.")
+
+	case "resume":
+		opts.Pipeline.Resume()
+		_ = opts.Telegram.SendText("Pipeline resumed.")
+	}
+}
+
+// findTicketByPrefix finds a ticket by the first 8 chars of its ID.
+func findTicketByPrefix(store *ticket.Store, prefix string) *ticket.Ticket {
+	// Try exact match first.
+	t, err := store.Get(prefix)
+	if err == nil {
+		return t
+	}
+
+	// Search by prefix in open tickets.
+	tickets, err := store.ListAll()
+	if err != nil {
+		return nil
+	}
+	for _, t := range tickets {
+		if strings.HasPrefix(t.ID, prefix) {
+			return t
+		}
+	}
+	return nil
+}
+
+func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
