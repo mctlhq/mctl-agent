@@ -68,6 +68,29 @@ func (p *Pipeline) Resume() { p.paused.Store(false) }
 // IsPaused returns whether processing is paused.
 func (p *Pipeline) IsPaused() bool { return p.paused.Load() }
 
+// TriggerAnalysis creates a synthetic ticket for the given team/service and
+// processes it through the pipeline. Used for manual MCP-triggered analysis.
+func (p *Pipeline) TriggerAnalysis(ctx context.Context, team, service, reason string) (*ticket.Ticket, error) {
+	t := &ticket.Ticket{
+		Source:   ticket.SourceManual,
+		Type:     ticket.TypeArgoCDDegraded,
+		Tenant:   team,
+		Service:  service,
+		Summary:  reason,
+		Severity: "info",
+		Status:   ticket.StatusOpen,
+	}
+
+	if err := p.store.Create(t); err != nil {
+		return nil, fmt.Errorf("creating ticket: %w", err)
+	}
+
+	// Process asynchronously.
+	p.ProcessTicket(t)
+
+	return t, nil
+}
+
 // ProcessTicket runs the full pipeline for a single ticket.
 func (p *Pipeline) ProcessTicket(t *ticket.Ticket) {
 	if p.paused.Load() {
