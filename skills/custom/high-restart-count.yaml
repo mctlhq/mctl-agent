@@ -1,0 +1,22 @@
+name: high-restart-count
+version: "1.0"
+description: "Detects containers with excessive restart counts"
+
+trigger:
+  alert_types:
+    - pod_crashloop
+  log_patterns:
+    - "BackOff restarting failed container"
+    - "restart count.*exceeded"
+
+diagnosis:
+  template: |
+    Container in {{.Tenant}}/{{.Service}} is restarting frequently.
+    Likely causes: misconfigured command, failing health check, or missing dependency.
+    Review container logs and startup command.
+  confidence: LOW
+  fixable: false
+
+capabilities:
+  - read_logs
+  - send_notification
