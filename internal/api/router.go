@@ -54,6 +54,10 @@ func NewRouter(opts Options) http.Handler {
 	// Ticket list.
 	r.Get("/api/v1/tickets", ticketListHandler(opts.Store))
 
+	// Skill endpoints.
+	r.Get("/api/v1/skills", skillListHandler(opts.Pipeline))
+	r.Get("/api/v1/skills/{name}/metrics", skillMetricsHandler(opts.Pipeline))
+
 	return r
 }
 
@@ -195,5 +199,32 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func skillListHandler(pipe *pipeline.Pipeline) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		skills := pipe.Registry().List()
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"items": skills,
+			"count": len(skills),
+		})
+	}
+}
+
+func skillMetricsHandler(pipe *pipeline.Pipeline) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := chi.URLParam(r, "name")
+		if name == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "skill name required"})
+			return
+		}
+		m := pipe.Metrics()
+		if m == nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "metrics not enabled"})
+			return
+		}
+		snap := m.GetSnapshot(name)
+		writeJSON(w, http.StatusOK, snap)
+	}
 }
 

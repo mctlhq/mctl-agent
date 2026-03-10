@@ -47,11 +47,18 @@ func main() {
 
 	slog.Info("skills registered", "count", registry.Count())
 
+	// Initialize skill metrics and circuit breaker.
+	skillMetrics, err := skill.NewMetrics(store.DB(), 0.3, 10)
+	if err != nil {
+		slog.Error("failed to initialize skill metrics", "error", err)
+		os.Exit(1)
+	}
+
 	// Initialize capability provider.
 	capProvider := capability.NewProvider(mctlClient, githubFixer, telegram, store)
 
 	// Pipeline wires everything together.
-	pipe := pipeline.NewPipeline(store, registry, capProvider, mctlClient, githubFixer, telegram, cfg.DryRun)
+	pipe := pipeline.NewPipeline(store, registry, skillMetrics, capProvider, mctlClient, githubFixer, telegram, cfg.DryRun)
 
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
