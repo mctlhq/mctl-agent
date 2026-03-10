@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync/atomic"
+	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/capability"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
@@ -18,6 +19,7 @@ import (
 type Pipeline struct {
 	store     *ticket.Store
 	registry  *skill.Registry
+	metrics   *skill.Metrics
 	provider  *capability.Provider
 	apiClient *mctlclient.Client
 	github    *fixer.GitHubFixer
@@ -31,6 +33,7 @@ type Pipeline struct {
 func NewPipeline(
 	store *ticket.Store,
 	registry *skill.Registry,
+	metrics *skill.Metrics,
 	provider *capability.Provider,
 	apiClient *mctlclient.Client,
 	github *fixer.GitHubFixer,
@@ -40,6 +43,7 @@ func NewPipeline(
 	return &Pipeline{
 		store:     store,
 		registry:  registry,
+		metrics:   metrics,
 		provider:  provider,
 		apiClient: apiClient,
 		github:    github,
@@ -48,6 +52,12 @@ func NewPipeline(
 		sem:       make(chan struct{}, 3), // Max 3 concurrent analyses.
 	}
 }
+
+// Metrics returns the pipeline's metrics tracker (can be nil).
+func (p *Pipeline) Metrics() *skill.Metrics { return p.metrics }
+
+// Registry returns the pipeline's skill registry.
+func (p *Pipeline) Registry() *skill.Registry { return p.registry }
 
 // Pause stops processing new tickets.
 func (p *Pipeline) Pause()  { p.paused.Store(true) }
@@ -116,10 +126,23 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			"confidence", rs.Result.Confidence,
 			"reason", rs.Result.Reason)
 
+		// Record match.
+		if p.metrics != nil {
+			p.metrics.RecordMatch(rs.Skill.Name(), t.ID)
+		}
+
+		diagStart := time.Now()
 		diag, err := rs.Skill.Diagnose(ctx, t, ev)
+		diagDur := time.Since(diagStart)
 		if err != nil {
+			if p.metrics != nil {
+				p.metrics.RecordDiagnosis(rs.Skill.Name(), t.ID, false, diagDur, err.Error())
+			}
 			log.Warn("skill diagnosis failed, trying next", "skill", rs.Skill.Name(), "error", err)
 			continue
+		}
+		if p.metrics != nil {
+			p.metrics.RecordDiagnosis(rs.Skill.Name(), t.ID, true, diagDur, diag.Diagnosis)
 		}
 
 		// Update ticket with analysis.
@@ -166,14 +189,26 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 }
 
 func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, s skill.Skill, diag *skill.DiagnosisResult, log *slog.Logger) {
+	fixStart := time.Now()
 	fixResult, err := s.Fix(ctx, t, diag)
+	fixDur := time.Since(fixStart)
 	if err != nil || fixResult == nil {
+		if p.metrics != nil {
+			detail := ""
+			if err != nil {
+				detail = err.Error()
+			}
+			p.metrics.RecordFix(s.Name(), t.ID, false, fixDur, detail)
+		}
 		log.Warn("skill fix generation failed", "skill", s.Name(), "error", err)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
 		return
+	}
+	if p.metrics != nil {
+		p.metrics.RecordFix(s.Name(), t.ID, true, fixDur, fixResult.Summary)
 	}
 
 	filePath := fixResult.FilePath

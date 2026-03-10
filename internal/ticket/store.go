@@ -274,6 +274,11 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DB returns the underlying database connection for shared use (e.g., skill metrics).
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // EvidenceJSON marshals v to JSON for storing as evidence content.
 func EvidenceJSON(v interface{}) string {
 	b, _ := json.Marshal(v)
