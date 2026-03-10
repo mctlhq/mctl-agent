@@ -15,15 +15,17 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/mcp"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
+	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
 // Options holds all dependencies for the API router.
 type Options struct {
-	Store    *ticket.Store
-	Pipeline *pipeline.Pipeline
-	Telegram *notify.Telegram
-	GitHub   *fixer.GitHubFixer
+	Store         *ticket.Store
+	Pipeline      *pipeline.Pipeline
+	Telegram      *notify.Telegram
+	GitHub        *fixer.GitHubFixer
+	RemoteManager *remote.Manager
 	// OnAlert is called when AlertManager sends an alert.
 	OnAlert func(w http.ResponseWriter, r *http.Request)
 }
@@ -58,6 +60,13 @@ func NewRouter(opts Options) http.Handler {
 	// Skill endpoints.
 	r.Get("/api/v1/skills", skillListHandler(opts.Pipeline))
 	r.Get("/api/v1/skills/{name}/metrics", skillMetricsHandler(opts.Pipeline))
+
+	// Remote skill registration.
+	if opts.RemoteManager != nil {
+		r.Post("/api/v1/skills/register", remoteSkillRegisterHandler(opts.RemoteManager))
+		r.Delete("/api/v1/skills/{name}", remoteSkillUnregisterHandler(opts.RemoteManager))
+		r.Get("/api/v1/skills/remote", remoteSkillListHandler(opts.RemoteManager))
+	}
 
 	// MCP endpoint — JSON-RPC over HTTP POST.
 	mcpServer := mcp.NewServer(opts.Pipeline)
@@ -230,6 +239,46 @@ func skillMetricsHandler(pipe *pipeline.Pipeline) http.HandlerFunc {
 		}
 		snap := m.GetSnapshot(name)
 		writeJSON(w, http.StatusOK, snap)
+	}
+}
+
+func remoteSkillRegisterHandler(mgr *remote.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var reg remote.Registration
+		if err := json.NewDecoder(r.Body).Decode(&reg); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			return
+		}
+		if err := mgr.Register(reg); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusCreated, map[string]string{
+			"status":  "registered",
+			"name":    reg.Name,
+			"message": "Remote skill registered successfully",
+		})
+	}
+}
+
+func remoteSkillUnregisterHandler(mgr *remote.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		name := chi.URLParam(r, "name")
+		if !mgr.Unregister(name) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "remote skill not found: " + name})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "unregistered", "name": name})
+	}
+}
+
+func remoteSkillListHandler(mgr *remote.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		regs := mgr.List()
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"items": regs,
+			"count": len(regs),
+		})
 	}
 }
 
