@@ -6,38 +6,42 @@ import (
 	"log/slog"
 	"sync/atomic"
 
-	"github.com/mctlhq/mctl-agent/internal/diagnosis"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
-// Pipeline orchestrates the ticket → diagnosis → fix → notify flow.
+// Pipeline orchestrates the ticket → evidence → skill match → diagnosis → fix → notify flow.
 type Pipeline struct {
-	store    *ticket.Store
-	analyzer *diagnosis.Analyzer
-	github   *fixer.GitHubFixer
-	telegram *notify.Telegram
-	dryRun   bool
-	paused   atomic.Bool
-	sem      chan struct{}
+	store     *ticket.Store
+	registry  *skill.Registry
+	apiClient *mctlclient.Client
+	github    *fixer.GitHubFixer
+	telegram  *notify.Telegram
+	dryRun    bool
+	paused    atomic.Bool
+	sem       chan struct{}
 }
 
 // NewPipeline creates a new pipeline orchestrator.
 func NewPipeline(
 	store *ticket.Store,
-	analyzer *diagnosis.Analyzer,
+	registry *skill.Registry,
+	apiClient *mctlclient.Client,
 	github *fixer.GitHubFixer,
 	telegram *notify.Telegram,
 	dryRun bool,
 ) *Pipeline {
 	return &Pipeline{
-		store:    store,
-		analyzer: analyzer,
-		github:   github,
-		telegram: telegram,
-		dryRun:   dryRun,
-		sem:      make(chan struct{}, 3), // Max 3 concurrent analyses.
+		store:     store,
+		registry:  registry,
+		apiClient: apiClient,
+		github:    github,
+		telegram:  telegram,
+		dryRun:    dryRun,
+		sem:       make(chan struct{}, 3), // Max 3 concurrent analyses.
 	}
 }
 
@@ -80,54 +84,100 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		return
 	}
 
-	// Run diagnosis.
-	diag, err := p.analyzer.Analyze(ctx, t)
+	// Collect evidence.
+	p.collectEvidence(ctx, t)
+
+	// Reload ticket with evidence.
+	t, err := p.store.Get(t.ID)
 	if err != nil {
-		log.Error("diagnosis failed", "error", err)
-		_ = p.telegram.SendDiagnosis(t, "Diagnosis failed: "+err.Error(), ticket.ConfidenceLow, "Manual review required")
+		log.Error("failed to reload ticket", "error", err)
 		return
 	}
 
-	// Update ticket with analysis.
-	t.Analysis = diag.Diagnosis
-	t.Confidence = diag.Confidence
+	ev := skill.NewEvidenceSet(t.Evidence)
 
-	log.Info("diagnosis complete",
-		"confidence", diag.Confidence,
-		"fixable", diag.Fixable,
-		"pattern", diag.FromPattern)
-
-	// Infrastructure alerts — never auto-fix.
-	if isInfraAlert(t) {
-		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "Infrastructure alert — manual review only")
+	// Match skills.
+	ranked := p.registry.Match(ctx, t, ev)
+	if len(ranked) == 0 {
+		log.Info("no skills matched ticket")
+		_ = p.telegram.SendDiagnosis(t, "No skill matched this ticket type. Manual review required.", ticket.ConfidenceLow, "No auto-diagnosis available")
 		_ = p.store.Update(t)
 		return
 	}
 
-	// HIGH confidence + fixable → create PR.
-	if diag.Confidence == ticket.ConfidenceHigh && diag.Fixable {
-		p.handleHighConfidenceFix(ctx, t, diag, log)
+	// Try skills in ranked order.
+	for _, rs := range ranked {
+		log.Info("running skill",
+			"skill", rs.Skill.Name(),
+			"confidence", rs.Result.Confidence,
+			"reason", rs.Result.Reason)
+
+		diag, err := rs.Skill.Diagnose(ctx, t, ev)
+		if err != nil {
+			log.Warn("skill diagnosis failed, trying next", "skill", rs.Skill.Name(), "error", err)
+			continue
+		}
+
+		// Update ticket with analysis.
+		t.Analysis = diag.Diagnosis
+		t.Confidence = diag.Confidence
+
+		log.Info("diagnosis complete",
+			"skill", rs.Skill.Name(),
+			"confidence", diag.Confidence,
+			"fixable", diag.Fixable)
+
+		// Infrastructure alerts — never auto-fix.
+		if isInfraAlert(t) {
+			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "Infrastructure alert — manual review only")
+			_ = p.store.Update(t)
+			return
+		}
+
+		// HIGH confidence + fixable → create PR.
+		if diag.Confidence == ticket.ConfidenceHigh && diag.Fixable {
+			p.handleHighConfidenceFix(ctx, t, rs.Skill, diag, log)
+			return
+		}
+
+		// MEDIUM confidence + fixable → suggest in Telegram.
+		if diag.Confidence == ticket.ConfidenceMedium && diag.Fixable {
+			action := fmt.Sprintf("Fixable but MEDIUM confidence (skill: %s) — sending suggestion to Telegram for review", rs.Skill.Name())
+			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
+			t.Status = ticket.StatusFixProposed
+			_ = p.store.Update(t)
+			return
+		}
+
+		// LOW / not fixable → notify and stop.
+		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, fmt.Sprintf("No auto-fix available (skill: %s)", rs.Skill.Name()))
+		_ = p.store.Update(t)
 		return
 	}
 
-	// MEDIUM confidence + fixable → suggest in Telegram.
-	if diag.Confidence == ticket.ConfidenceMedium && diag.Fixable {
-		action := "Fixable but MEDIUM confidence — sending suggestion to Telegram for review"
-		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
+	// All skills failed.
+	log.Warn("all matched skills failed to diagnose")
+	_ = p.telegram.SendDiagnosis(t, "All matched skills failed to produce a diagnosis. Manual review required.", ticket.ConfidenceLow, "Manual review required")
+	_ = p.store.Update(t)
+}
+
+func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, s skill.Skill, diag *skill.DiagnosisResult, log *slog.Logger) {
+	fixResult, err := s.Fix(ctx, t, diag)
+	if err != nil || fixResult == nil {
+		log.Warn("skill fix generation failed", "skill", s.Name(), "error", err)
+		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+			"Fix identified but generation failed: "+fmt.Sprint(err))
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
 		return
 	}
 
-	// LOW / not fixable → notify only.
-	_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "No auto-fix available")
-	_ = p.store.Update(t)
-}
+	filePath := fixResult.FilePath
+	if filePath == "" {
+		filePath = fixer.DetectFilePath(t.Tenant, t.Service)
+	}
 
-func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, diag *diagnosis.DiagnosisResult, log *slog.Logger) {
-	filePath := fixer.DetectFilePath(t.Tenant, t.Service)
-
-	// Get current file content.
+	// Get current file content from GitOps repo.
 	content, err := p.github.GetFileContent(ctx, filePath, "main")
 	if err != nil {
 		log.Error("failed to get file content", "path", filePath, "error", err)
@@ -137,22 +187,25 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		return
 	}
 
-	// Generate patch.
+	// Generate the actual patch based on fix type.
 	var newContent, summary string
 	var patchErr error
 
-	if diag.FromPattern {
-		switch diag.PatternFixType {
-		case "bump_memory":
-			newContent, summary, patchErr = fixer.GenerateMemoryBump(content)
-		case "rollback_image":
-			// TODO: detect previous tag from audit/history.
-			patchErr = fmt.Errorf("image rollback requires previous tag — not yet implemented")
-		default:
-			patchErr = fmt.Errorf("unknown pattern fix type: %s", diag.PatternFixType)
+	switch diag.FixType {
+	case "bump_memory":
+		newContent, summary, patchErr = fixer.GenerateMemoryBump(content)
+	case "rollback_image":
+		patchErr = fmt.Errorf("image rollback requires previous tag — not yet implemented")
+	default:
+		// For LLM-generated fixes, try to apply from diagnosis fields.
+		if diag.CurrentValue != "" && diag.SuggestedValue != "" {
+			newContent, summary, patchErr = fixer.GenerateFromDiagnosis(content, toLegacyDiag(diag))
+		} else if fixResult.NewContent != "" {
+			newContent = fixResult.NewContent
+			summary = fixResult.Summary
+		} else {
+			patchErr = fmt.Errorf("no applicable fix strategy for type: %s", diag.FixType)
 		}
-	} else {
-		newContent, summary, patchErr = fixer.GenerateFromDiagnosis(content, diag)
 	}
 
 	if patchErr != nil {
@@ -201,9 +254,23 @@ func isInfraAlert(t *ticket.Ticket) bool {
 	if t.Type != ticket.TypeResourceLimit {
 		return false
 	}
-	// Infrastructure alerts have no tenant service (node-level or vault).
-	if t.Service == "" {
-		return true
-	}
-	return false
+	return t.Service == ""
 }
+
+// toLegacyDiag converts a skill.DiagnosisResult to the legacy diagnosis format
+// needed by fixer.GenerateFromDiagnosis.
+func toLegacyDiag(d *skill.DiagnosisResult) *legacyDiag {
+	return &legacyDiag{
+		Diagnosis:      d.Diagnosis,
+		Confidence:     d.Confidence,
+		Fixable:        d.Fixable,
+		YAMLPath:       d.YAMLPath,
+		YAMLField:      d.YAMLField,
+		CurrentValue:   d.CurrentValue,
+		SuggestedValue: d.SuggestedValue,
+		Reasoning:      d.Reasoning,
+	}
+}
+
+// legacyDiag mirrors diagnosis.DiagnosisResult for backward compatibility with fixer.
+type legacyDiag = fixer.DiagnosisCompat
