@@ -19,6 +19,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/skill/builtin"
+	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	yamlskill "github.com/mctlhq/mctl-agent/internal/skill/yaml"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -72,13 +73,17 @@ func main() {
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
 	poller := monitor.NewPoller(mctlClient, store, pipe.ProcessTicket)
 
+	// Remote skill manager.
+	remoteMgr := remote.NewManager(registry)
+
 	// Router.
 	router := agentapi.NewRouter(agentapi.Options{
-		Store:    store,
-		Pipeline: pipe,
-		Telegram: telegram,
-		GitHub:   githubFixer,
-		OnAlert:  alertHandler.ServeHTTP,
+		Store:         store,
+		Pipeline:      pipe,
+		Telegram:      telegram,
+		GitHub:        githubFixer,
+		RemoteManager: remoteMgr,
+		OnAlert:       alertHandler.ServeHTTP,
 	})
 
 	srv := &http.Server{
