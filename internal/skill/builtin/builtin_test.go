@@ -198,8 +198,8 @@ func TestAllSkillsRegistered(t *testing.T) {
 	RegisterAll(reg, "test-key")
 
 	infos := reg.List()
-	if len(infos) != 5 {
-		t.Fatalf("expected 5 skills, got %d", len(infos))
+	if len(infos) != 9 {
+		t.Fatalf("expected 9 skills, got %d", len(infos))
 	}
 
 	names := map[string]bool{}
@@ -213,10 +213,131 @@ func TestAllSkillsRegistered(t *testing.T) {
 		}
 	}
 
-	expected := []string{"oomkilled", "imagepull", "post_deploy_rollback", "argocd_drift", "llm_diagnosis"}
+	expected := []string{
+		"oomkilled", "imagepull", "post_deploy_rollback", "argocd_drift",
+		"llm_diagnosis", "probe_fix", "cpu_throttle", "quota_adjust", "scale_up",
+	}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("missing skill: %s", name)
 		}
+	}
+}
+
+func TestProbeFixSkillMatch(t *testing.T) {
+	s := NewProbeFixSkill()
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		logs    string
+		matched bool
+	}{
+		{"liveness probe failed", "Liveness probe failed: connection refused", true},
+		{"readiness probe failed", "Readiness probe failed: HTTP 503", true},
+		{"generic probe failed", "probe failed with status 500", true},
+		{"no probe issue", "normal pod running fine", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := skill.NewEvidenceSet([]ticket.Evidence{
+				{Type: "logs", Content: tt.logs},
+			})
+			result := s.Match(ctx, &ticket.Ticket{}, ev)
+			if result.Matched != tt.matched {
+				t.Errorf("Match() = %v, want %v", result.Matched, tt.matched)
+			}
+		})
+	}
+}
+
+func TestCPUThrottleSkillMatch(t *testing.T) {
+	s := NewCPUThrottleSkill()
+	ctx := context.Background()
+
+	// Match on resource_limit ticket with CPU in summary.
+	tk := &ticket.Ticket{Type: ticket.TypeResourceLimit, Summary: "TenantCPUQuotaHigh in billing"}
+	result := s.Match(ctx, tk, skill.NewEvidenceSet(nil))
+	if !result.Matched {
+		t.Error("should match resource_limit + CPU summary")
+	}
+
+	// Match on throttling in logs.
+	tk2 := &ticket.Ticket{Type: ticket.TypePodCrashloop}
+	ev := skill.NewEvidenceSet([]ticket.Evidence{
+		{Type: "logs", Content: "CPUThrottlingHigh detected on pod"},
+	})
+	result = s.Match(ctx, tk2, ev)
+	if !result.Matched {
+		t.Error("should match CPUThrottlingHigh in logs")
+	}
+
+	// No match on unrelated ticket.
+	tk3 := &ticket.Ticket{Type: ticket.TypePodCrashloop, Summary: "random crash"}
+	result = s.Match(ctx, tk3, skill.NewEvidenceSet(nil))
+	if result.Matched {
+		t.Error("should not match unrelated ticket")
+	}
+}
+
+func TestQuotaAdjustSkillMatch(t *testing.T) {
+	s := NewQuotaAdjustSkill()
+	ctx := context.Background()
+
+	// Match on resource_limit with service and quota in summary.
+	tk := &ticket.Ticket{Type: ticket.TypeResourceLimit, Service: "app-1", Summary: "Memory quota high"}
+	result := s.Match(ctx, tk, skill.NewEvidenceSet(nil))
+	if !result.Matched {
+		t.Error("should match resource_limit with quota in summary")
+	}
+
+	// Should not auto-fix.
+	diag, err := s.Diagnose(ctx, tk, skill.NewEvidenceSet(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if diag.Fixable {
+		t.Error("quota adjustments should not be auto-fixable")
+	}
+}
+
+func TestScaleUpSkillMatch(t *testing.T) {
+	s := NewScaleUpSkill()
+	ctx := context.Background()
+
+	tests := []struct {
+		name    string
+		logs    string
+		status  string
+		matched bool
+	}{
+		{"max replicas reached", "max replicas reached for deployment", "", true},
+		{"ScaleUpLimited", "ScaleUpLimited: desired=10, max=5", "", true},
+		{"degraded + timeouts", "upstream connect error", `{"health":"Degraded"}`, true},
+		{"healthy no issues", "all pods running", `{"health":"Healthy"}`, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evs := []ticket.Evidence{{Type: "logs", Content: tt.logs}}
+			if tt.status != "" {
+				evs = append(evs, ticket.Evidence{Type: "argocd_status", Content: tt.status})
+			}
+			ev := skill.NewEvidenceSet(evs)
+			result := s.Match(ctx, &ticket.Ticket{}, ev)
+			if result.Matched != tt.matched {
+				t.Errorf("Match() = %v, want %v", result.Matched, tt.matched)
+			}
+		})
+	}
+
+	// Should suggest chaining to quota_adjust.
+	fix, err := s.Fix(ctx, &ticket.Ticket{Tenant: "t", Service: "s"}, &skill.DiagnosisResult{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fix.NextSkills) == 0 || fix.NextSkills[0] != "quota_adjust" {
+		t.Error("expected NextSkills to include quota_adjust")
 	}
 }
