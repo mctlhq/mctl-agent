@@ -4,9 +4,20 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/mctlhq/mctl-agent/internal/diagnosis"
 )
+
+// DiagnosisCompat provides the fields needed by GenerateFromDiagnosis,
+// decoupling fixer from the diagnosis package.
+type DiagnosisCompat struct {
+	Diagnosis      string `json:"diagnosis"`
+	Confidence     string `json:"confidence"`
+	Fixable        bool   `json:"fixable"`
+	YAMLPath       string `json:"yaml_path"`
+	YAMLField      string `json:"yaml_field"`
+	CurrentValue   string `json:"current_value"`
+	SuggestedValue string `json:"suggested_value"`
+	Reasoning      string `json:"reasoning"`
+}
 
 // PlatformServices that use inline values in apps/templates/.
 var PlatformServices = map[string]bool{
@@ -89,7 +100,7 @@ func GenerateImageRollback(content, previousTag string) (string, string, error) 
 }
 
 // GenerateFromDiagnosis applies a Claude-suggested fix.
-func GenerateFromDiagnosis(content string, diag *diagnosis.DiagnosisResult) (string, string, error) {
+func GenerateFromDiagnosis(content string, diag *DiagnosisCompat) (string, string, error) {
 	if diag.YAMLField == "" || diag.SuggestedValue == "" {
 		return content, "", fmt.Errorf("diagnosis missing yaml_field or suggested_value")
 	}

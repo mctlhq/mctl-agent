@@ -11,12 +11,13 @@ import (
 
 	agentapi "github.com/mctlhq/mctl-agent/internal/api"
 	"github.com/mctlhq/mctl-agent/internal/config"
-	"github.com/mctlhq/mctl-agent/internal/diagnosis"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/monitor"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
+	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/skill/builtin"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -36,12 +37,17 @@ func main() {
 
 	// Initialize components.
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)
-	analyzer := diagnosis.NewAnalyzer(mctlClient, store, cfg.AnthropicAPIKey)
 	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun)
 	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID)
 
+	// Initialize skill registry.
+	registry := skill.NewRegistry()
+	builtin.RegisterAll(registry, cfg.AnthropicAPIKey)
+
+	slog.Info("skills registered", "count", registry.Count())
+
 	// Pipeline wires everything together.
-	pipe := pipeline.NewPipeline(store, analyzer, githubFixer, telegram, cfg.DryRun)
+	pipe := pipeline.NewPipeline(store, registry, mctlClient, githubFixer, telegram, cfg.DryRun)
 
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
