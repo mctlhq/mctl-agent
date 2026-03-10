@@ -19,6 +19,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/skill/builtin"
+	yamlskill "github.com/mctlhq/mctl-agent/internal/skill/yaml"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -46,6 +47,13 @@ func main() {
 	builtin.RegisterAll(registry, cfg.AnthropicAPIKey)
 
 	slog.Info("skills registered", "count", registry.Count())
+
+	// Load YAML-defined skills.
+	yamlLoader := yamlskill.NewLoader("skills/custom", registry)
+	yamlCount := yamlLoader.LoadAll()
+	if yamlCount > 0 {
+		slog.Info("yaml skills loaded", "count", yamlCount)
+	}
 
 	// Initialize skill metrics and circuit breaker.
 	skillMetrics, err := skill.NewMetrics(store.DB(), 0.3, 10)

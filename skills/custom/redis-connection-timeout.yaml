@@ -1,0 +1,29 @@
+name: redis-connection-timeout
+version: "1.0"
+description: "Detects Redis connection timeouts in application logs"
+
+trigger:
+  alert_types:
+    - pod_crashloop
+    - argocd_app_degraded
+  log_patterns:
+    - "redis.*connection.*timeout"
+    - "ETIMEDOUT.*6379"
+    - "RedisConnectionError"
+
+diagnosis:
+  template: |
+    Service {{.Tenant}}/{{.Service}} is experiencing Redis connection timeouts.
+    This typically means:
+    1. Redis instance is down or overloaded
+    2. Network policy blocking port 6379
+    3. Redis connection pool exhausted
+  confidence: MEDIUM
+  fixable: false
+
+notification:
+  extra_context: "Check Redis health: kubectl exec -n {{.Tenant}} redis-0 -- redis-cli ping"
+
+capabilities:
+  - read_logs
+  - send_notification
