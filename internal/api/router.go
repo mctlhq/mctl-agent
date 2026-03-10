@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/mcp"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
@@ -57,6 +58,10 @@ func NewRouter(opts Options) http.Handler {
 	// Skill endpoints.
 	r.Get("/api/v1/skills", skillListHandler(opts.Pipeline))
 	r.Get("/api/v1/skills/{name}/metrics", skillMetricsHandler(opts.Pipeline))
+
+	// MCP endpoint — JSON-RPC over HTTP POST.
+	mcpServer := mcp.NewServer(opts.Pipeline)
+	r.Post("/mcp", mcpServer.ServeHTTP)
 
 	return r
 }
