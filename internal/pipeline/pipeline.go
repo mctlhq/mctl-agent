@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 
+	"github.com/mctlhq/mctl-agent/internal/capability"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/notify"
@@ -17,6 +18,7 @@ import (
 type Pipeline struct {
 	store     *ticket.Store
 	registry  *skill.Registry
+	provider  *capability.Provider
 	apiClient *mctlclient.Client
 	github    *fixer.GitHubFixer
 	telegram  *notify.Telegram
@@ -29,6 +31,7 @@ type Pipeline struct {
 func NewPipeline(
 	store *ticket.Store,
 	registry *skill.Registry,
+	provider *capability.Provider,
 	apiClient *mctlclient.Client,
 	github *fixer.GitHubFixer,
 	telegram *notify.Telegram,
@@ -37,6 +40,7 @@ func NewPipeline(
 	return &Pipeline{
 		store:     store,
 		registry:  registry,
+		provider:  provider,
 		apiClient: apiClient,
 		github:    github,
 		telegram:  telegram,

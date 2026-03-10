@@ -10,6 +10,7 @@ import (
 	"time"
 
 	agentapi "github.com/mctlhq/mctl-agent/internal/api"
+	"github.com/mctlhq/mctl-agent/internal/capability"
 	"github.com/mctlhq/mctl-agent/internal/config"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
@@ -46,8 +47,11 @@ func main() {
 
 	slog.Info("skills registered", "count", registry.Count())
 
+	// Initialize capability provider.
+	capProvider := capability.NewProvider(mctlClient, githubFixer, telegram, store)
+
 	// Pipeline wires everything together.
-	pipe := pipeline.NewPipeline(store, registry, mctlClient, githubFixer, telegram, cfg.DryRun)
+	pipe := pipeline.NewPipeline(store, registry, capProvider, mctlClient, githubFixer, telegram, cfg.DryRun)
 
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
