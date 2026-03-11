@@ -1,0 +1,23 @@
+# Example AlertManager configuration for routing alerts to mctl-agent.
+#
+# Add this to your AlertManager config (typically managed by
+# kube-prometheus-stack Helm values under alertmanager.config).
+
+route:
+  receiver: default
+  routes:
+    # Route mctl-supported alerts to the agent webhook
+    - receiver: mctl-agent
+      matchers:
+        - alertname=~"PodCrashLooping|KubePodNotReady|PodNotReady|TenantCPUQuotaHigh|TenantMemoryQuotaHigh|ArgoWorkflowFailed|ArgoWorkflowHighFailureRate|NodeHighCPU|NodeHighMemory|NodeDiskPressure|VaultSealed"
+      continue: true  # also send to default receiver
+
+receivers:
+  - name: default
+    # your default receiver (email, Slack, PagerDuty, etc.)
+
+  - name: mctl-agent
+    webhook_configs:
+      - url: http://mctl-agent.admins.svc.cluster.local:8081/api/v1/alerts
+        send_resolved: true
+        max_alerts: 10

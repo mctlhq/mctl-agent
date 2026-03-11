@@ -79,6 +79,27 @@ go test ./...
 go build -o bin/mctl-agent cmd/agent/main.go
 ```
 
+## AlertManager Setup
+
+Example Prometheus alerting rules and AlertManager routing config are in [`examples/`](examples/):
+
+- [`alertmanager-rules.yaml`](examples/alertmanager-rules.yaml) -- PrometheusRule with all supported alert types
+- [`alertmanager-config.yaml`](examples/alertmanager-config.yaml) -- AlertManager route + webhook receiver config
+
+Apply the rules to your monitoring namespace:
+
+```bash
+kubectl apply -f examples/alertmanager-rules.yaml
+```
+
+Then add the webhook receiver from `alertmanager-config.yaml` to your AlertManager config.
+
+## Telegram Notifications
+
+Optional Telegram integration for incident alerts, diagnosis results, and PR approval commands.
+
+See [`examples/telegram-setup.md`](examples/telegram-setup.md) for step-by-step instructions.
+
 ## Deployment
 
 The agent runs as a Kubernetes deployment in the `admins` namespace. GitHub App tokens are auto-rotated every 45 minutes via a CronWorkflow.

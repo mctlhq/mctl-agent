@@ -1,3 +1,17 @@
+// Copyright 2025 MCTL Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package pipeline
 
 import (
@@ -227,6 +241,16 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		t.Status = ticket.StatusFixProposed
+		_ = p.store.Update(t)
+		return
+	}
+	if !fixResult.Applied {
+		if p.metrics != nil {
+			p.metrics.RecordFix(s.Name(), t.ID, false, fixDur, "fix not applied by skill")
+		}
+		log.Info("skill returned fix with Applied=false, skipping PR", "skill", s.Name())
+		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+			fmt.Sprintf("Skill %s declined to apply fix: %s", s.Name(), fixResult.Summary))
 		_ = p.store.Update(t)
 		return
 	}
