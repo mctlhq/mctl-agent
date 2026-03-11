@@ -84,14 +84,14 @@ jobs:
           sarif_file: trivy-results.sarif
 
       # On semver tag: pin the new image version in GitOps repo
-      - name: Update mctl-core image tag
+      - name: Update mctl-gitops image tag
         if: github.ref_type == 'tag'
         env:
           GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-          git clone https://x-access-token:${GITOPS_TOKEN}@github.com/mctlhq/mctl-core.git /tmp/mctl-core
-          cd /tmp/mctl-core
+          git clone https://x-access-token:${GITOPS_TOKEN}@github.com/mctlhq/mctl-gitops.git /tmp/mctl-gitops
+          cd /tmp/mctl-gitops
           python3 - <<'PYEOF'
           import re, os
           f = 'platform-gitops/services/admins/mctl-agent/values.yaml'

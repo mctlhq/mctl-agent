@@ -57,7 +57,7 @@ func Load() Config {
 		AnthropicAPIKey:  os.Getenv("ANTHROPIC_API_KEY"),
 		GitHubToken:      os.Getenv("GITHUB_TOKEN"),
 		GitHubOwner:      envOr("GITHUB_OWNER", "mctlhq"),
-		GitHubRepo:       envOr("GITHUB_REPO", "mctl-core"),
+		GitHubRepo:       envOr("GITHUB_REPO", "mctl-gitops"),
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
 		PollInterval:     pollInterval,
