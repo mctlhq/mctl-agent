@@ -14,12 +14,12 @@ func setupTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 
 func TestMetricsRecordAndSnapshot(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
 
 	m, err := NewMetrics(db, 0.3, 5)
 	if err != nil {
@@ -64,7 +64,6 @@ func TestMetricsRecordAndSnapshot(t *testing.T) {
 
 func TestMetricsCircuitBreaker(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
 
 	// Threshold: 30% success rate over last 5 resolutions.
 	m, err := NewMetrics(db, 0.3, 5)
@@ -99,7 +98,6 @@ func TestMetricsCircuitBreaker(t *testing.T) {
 
 func TestMetricsCheckAndDisable(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
 
 	m, err := NewMetrics(db, 0.3, 3)
 	if err != nil {
@@ -133,7 +131,6 @@ func TestMetricsCheckAndDisable(t *testing.T) {
 
 func TestMetricsGetAllSnapshots(t *testing.T) {
 	db := setupTestDB(t)
-	defer db.Close()
 
 	m, err := NewMetrics(db, 0.3, 5)
 	if err != nil {

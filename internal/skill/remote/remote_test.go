@@ -16,21 +16,21 @@ func TestRemoteSkillMatchAndDiagnose(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/match":
-			json.NewEncoder(w).Encode(matchResponse{
+			_ = json.NewEncoder(w).Encode(matchResponse{
 				Matched:    true,
 				Confidence: 0.9,
 				Priority:   100,
 				Reason:     "test match",
 			})
 		case "/diagnose":
-			json.NewEncoder(w).Encode(diagnoseResponse{
+			_ = json.NewEncoder(w).Encode(diagnoseResponse{
 				Diagnosis:  "Test diagnosis result",
 				Confidence: "HIGH",
 				Fixable:    true,
 				FixType:    "test_fix",
 			})
 		case "/fix":
-			json.NewEncoder(w).Encode(fixResponse{
+			_ = json.NewEncoder(w).Encode(fixResponse{
 				Applied: true,
 				Summary: "Applied test fix",
 			})
@@ -86,7 +86,7 @@ func TestRemoteSkillMatchAndDiagnose(t *testing.T) {
 
 func TestRemoteSkillAlertTypeFilter(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(matchResponse{Matched: true, Confidence: 0.8})
+		_ = json.NewEncoder(w).Encode(matchResponse{Matched: true, Confidence: 0.8})
 	}))
 	defer srv.Close()
 
@@ -118,7 +118,7 @@ func TestRemoteSkillAlertTypeFilter(t *testing.T) {
 func TestRemoteSkillServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer srv.Close()
 
