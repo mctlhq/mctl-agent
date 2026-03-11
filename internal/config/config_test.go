@@ -1,7 +1,6 @@
 package config
 
 import (
-	"os"
 	"testing"
 	"time"
 )
@@ -12,7 +11,6 @@ func TestLoadDefaults(t *testing.T) {
 		"POLL_INTERVAL", "DRY_RUN", "DB_PATH", "MAX_PR_PER_HOUR", "MAX_PR_PER_DAY"}
 	for _, k := range envVars {
 		t.Setenv(k, "")
-		os.Unsetenv(k)
 	}
 
 	cfg := Load()
