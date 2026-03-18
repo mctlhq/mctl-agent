@@ -76,6 +76,8 @@ func (s *CPUThrottleSkill) Diagnose(_ context.Context, _ *ticket.Ticket, _ skill
 	}, nil
 }
 
+func (s *CPUThrottleSkill) AutoMergeSafe() bool { return true }
+
 func (s *CPUThrottleSkill) Fix(_ context.Context, t *ticket.Ticket, _ *skill.DiagnosisResult) (*skill.FixResult, error) {
 	return &skill.FixResult{
 		Applied:  true,

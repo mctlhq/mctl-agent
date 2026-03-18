@@ -72,6 +72,8 @@ func (s *ProbeFixSkill) Diagnose(_ context.Context, _ *ticket.Ticket, ev skill.E
 	}, nil
 }
 
+func (s *ProbeFixSkill) AutoMergeSafe() bool { return true }
+
 func (s *ProbeFixSkill) Fix(_ context.Context, t *ticket.Ticket, diag *skill.DiagnosisResult) (*skill.FixResult, error) {
 	return &skill.FixResult{
 		Applied:  true,

@@ -55,7 +55,7 @@ func main() {
 	// Initialize components.
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)
 	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun)
-	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID)
+	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.OpenClawBotUsername)
 
 	// Initialize skill registry.
 	registry := skill.NewRegistry()
@@ -81,24 +81,35 @@ func main() {
 	capProvider := capability.NewProvider(mctlClient, githubFixer, telegram, store)
 
 	// Pipeline wires everything together.
-	pipe := pipeline.NewPipeline(store, registry, skillMetrics, capProvider, mctlClient, githubFixer, telegram, cfg.DryRun)
+	pipe := pipeline.NewPipeline(store, registry, skillMetrics, capProvider, mctlClient, githubFixer, telegram, cfg.DryRun, cfg.AutoMergeEnabled, cfg.EscalationTag)
 
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
 	poller := monitor.NewPoller(mctlClient, store, pipe.ProcessTicket)
 
+	// GitHub Actions webhook handler (optional — enabled when GITHUB_WEBHOOK_SECRET is set).
+	var ghWebhookHandler *monitor.GitHubWebhookHandler
+	if cfg.GitHubWebhookSecret != "" {
+		ghWebhookHandler = monitor.NewGitHubWebhookHandler(store, cfg.GitHubWebhookSecret, pipe.ProcessTicket)
+		slog.Info("GitHub Actions webhook handler enabled")
+	}
+
 	// Remote skill manager.
 	remoteMgr := remote.NewManager(registry)
 
 	// Router.
-	router := agentapi.NewRouter(agentapi.Options{
+	routerOpts := agentapi.Options{
 		Store:         store,
 		Pipeline:      pipe,
 		Telegram:      telegram,
 		GitHub:        githubFixer,
 		RemoteManager: remoteMgr,
 		OnAlert:       alertHandler.ServeHTTP,
-	})
+	}
+	if ghWebhookHandler != nil {
+		routerOpts.OnGitHubWebhook = ghWebhookHandler.ServeHTTP
+	}
+	router := agentapi.NewRouter(routerOpts)
 
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,

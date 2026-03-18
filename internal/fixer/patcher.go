@@ -131,6 +131,120 @@ func GenerateFromDiagnosis(content string, diag *DiagnosisCompat) (string, strin
 	return content, "", fmt.Errorf("could not apply suggested fix for field %s", diag.YAMLField)
 }
 
+// GenerateCPUBump creates a patch that increases CPU limit by 50%.
+func GenerateCPUBump(content string) (string, string, error) {
+	lines := strings.Split(content, "\n")
+	var modified []string
+	var summary string
+
+	inLimits := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "limits:") {
+			inLimits = true
+		} else if inLimits && trimmed != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inLimits = false
+		}
+
+		if inLimits && strings.HasPrefix(trimmed, "cpu:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				current := strings.TrimSpace(parts[1])
+				current = strings.Trim(current, "\"'")
+				newVal := bumpCPU(current)
+				if newVal != current {
+					indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+					modified = append(modified, indent+"cpu: "+newVal)
+					summary = fmt.Sprintf("Bump CPU limit from %s to %s", current, newVal)
+					continue
+				}
+			}
+		}
+		modified = append(modified, line)
+	}
+
+	if summary == "" {
+		return content, "", fmt.Errorf("could not find CPU limit to bump")
+	}
+
+	return strings.Join(modified, "\n"), summary, nil
+}
+
+// GenerateProbeFix creates a patch that increases initialDelaySeconds for a probe.
+func GenerateProbeFix(content string, probeField string) (string, string, error) {
+	// probeField is like "livenessProbe.initialDelaySeconds" or "readinessProbe.initialDelaySeconds"
+	probeType := "livenessProbe"
+	if strings.HasPrefix(probeField, "readiness") {
+		probeType = "readinessProbe"
+	} else if strings.HasPrefix(probeField, "liveness/readiness") {
+		probeType = "livenessProbe"
+	}
+
+	lines := strings.Split(content, "\n")
+	var modified []string
+	var summary string
+
+	inProbe := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, probeType+":") {
+			inProbe = true
+		} else if inProbe && trimmed != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			// Left the indented probe block.
+			inProbe = false
+		}
+
+		if inProbe && strings.HasPrefix(trimmed, "initialDelaySeconds:") {
+			parts := strings.SplitN(trimmed, ":", 2)
+			if len(parts) == 2 {
+				currentStr := strings.TrimSpace(parts[1])
+				current, err := strconv.Atoi(currentStr)
+				if err != nil {
+					modified = append(modified, line)
+					continue
+				}
+				newVal := 30
+				if current >= 30 {
+					newVal = current + 15
+				}
+				indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+				modified = append(modified, fmt.Sprintf("%sinitialDelaySeconds: %d", indent, newVal))
+				summary = fmt.Sprintf("Increase %s initialDelaySeconds from %d to %d", probeType, current, newVal)
+				continue
+			}
+		}
+		modified = append(modified, line)
+	}
+
+	if summary == "" {
+		return content, "", fmt.Errorf("could not find initialDelaySeconds under %s", probeType)
+	}
+
+	return strings.Join(modified, "\n"), summary, nil
+}
+
+// bumpCPU increases a Kubernetes CPU string by 50%.
+func bumpCPU(cpu string) string {
+	cpu = strings.TrimSpace(cpu)
+	cpu = strings.Trim(cpu, "\"'")
+
+	if strings.HasSuffix(cpu, "m") {
+		val := strings.TrimSuffix(cpu, "m")
+		if n, err := strconv.Atoi(val); err == nil {
+			newVal := n + n/2
+			return fmt.Sprintf("%dm", newVal)
+		}
+	}
+
+	// Whole-core values like "1", "2".
+	if f, err := strconv.ParseFloat(cpu, 64); err == nil {
+		newMillis := int(f * 1500)
+		return fmt.Sprintf("%dm", newMillis)
+	}
+
+	return cpu
+}
+
 // bumpMemory increases a Kubernetes memory string by 50%.
 func bumpMemory(mem string) string {
 	mem = strings.TrimSpace(mem)
