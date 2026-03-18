@@ -18,19 +18,21 @@ import "time"
 
 // Ticket types.
 const (
-	TypeArgoCDDegraded   = "argocd_app_degraded"
-	TypeWorkflowFailed   = "workflow_failed"
-	TypePodCrashloop     = "pod_crashloop"
-	TypeResourceLimit    = "resource_limit"
-	TypeDeploymentFailed = "deployment_failed"
+	TypeArgoCDDegraded      = "argocd_app_degraded"
+	TypeWorkflowFailed      = "workflow_failed"
+	TypePodCrashloop        = "pod_crashloop"
+	TypeResourceLimit       = "resource_limit"
+	TypeDeploymentFailed    = "deployment_failed"
+	TypeGitHubActionsFailed = "github_actions_failed"
 )
 
 // Ticket sources.
 const (
-	SourceAlertManager = "alertmanager"
-	SourcePolling      = "polling"
-	SourceGitHub       = "github"
-	SourceManual       = "manual"
+	SourceAlertManager  = "alertmanager"
+	SourcePolling       = "polling"
+	SourceGitHub        = "github"
+	SourceGitHubWebhook = "github_webhook"
+	SourceManual        = "manual"
 )
 
 // Ticket statuses.

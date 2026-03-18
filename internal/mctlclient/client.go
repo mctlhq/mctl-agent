@@ -15,11 +15,15 @@
 package mctlclient
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
 // Client communicates with the mctl-api REST API.
@@ -174,6 +178,118 @@ func (c *Client) ListAudit() ([]AuditEntry, error) {
 		return nil, fmt.Errorf("parsing audit: %w", err)
 	}
 	return resp.Items, nil
+}
+
+// PublishAlert sends a new incident to mctl-api.
+func (c *Client) PublishAlert(t *ticket.Ticket) {
+	body := map[string]interface{}{
+		"id":          t.ID,
+		"source":      t.Source,
+		"type":        t.Type,
+		"tenant":      t.Tenant,
+		"service":     t.Service,
+		"summary":     t.Summary,
+		"severity":    t.Severity,
+		"status":      t.Status,
+		"analysis":    t.Analysis,
+		"proposed_fix": t.ProposedFix,
+		"pr_url":      t.PRURL,
+		"pr_number":   t.PRNumber,
+		"confidence":  t.Confidence,
+		"created_at":  t.CreatedAt,
+		"updated_at":  t.UpdatedAt,
+	}
+	if t.ResolvedAt != nil {
+		body["resolved_at"] = t.ResolvedAt
+	}
+
+	var evidence []map[string]interface{}
+	for _, ev := range t.Evidence {
+		evidence = append(evidence, map[string]interface{}{
+			"type":         ev.Type,
+			"content":      ev.Content,
+			"collected_at": ev.CollectedAt,
+		})
+	}
+	if len(evidence) > 0 {
+		body["evidence"] = evidence
+	}
+
+	if err := c.doPost("/api/v1/incidents", body); err != nil {
+		slog.Error("failed to publish alert to mctl-api", "id", t.ID, "error", err)
+	}
+}
+
+// UpdateAlert sends an incident update to mctl-api.
+func (c *Client) UpdateAlert(t *ticket.Ticket) {
+	body := map[string]interface{}{
+		"status":       t.Status,
+		"analysis":     t.Analysis,
+		"proposed_fix": t.ProposedFix,
+		"pr_url":       t.PRURL,
+		"pr_number":    t.PRNumber,
+		"confidence":   t.Confidence,
+	}
+
+	if err := c.doPatch("/api/v1/incidents/"+t.ID, body); err != nil {
+		slog.Error("failed to update alert in mctl-api", "id", t.ID, "error", err)
+	}
+}
+
+func (c *Client) doPost(path string, body interface{}) error {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshaling body: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", c.baseURL+path, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("mctl-api request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("mctl-api returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
+}
+
+func (c *Client) doPatch(path string, body interface{}) error {
+	jsonBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshaling body: %w", err)
+	}
+
+	req, err := http.NewRequest("PATCH", c.baseURL+path, bytes.NewReader(jsonBody))
+	if err != nil {
+		return fmt.Errorf("creating request: %w", err)
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("mctl-api request failed: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("mctl-api returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 func (c *Client) doGet(path string) ([]byte, error) {

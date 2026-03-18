@@ -42,6 +42,8 @@ type Options struct {
 	RemoteManager *remote.Manager
 	// OnAlert is called when AlertManager sends an alert.
 	OnAlert func(w http.ResponseWriter, r *http.Request)
+	// OnGitHubWebhook handles GitHub webhook events (optional).
+	OnGitHubWebhook func(w http.ResponseWriter, r *http.Request)
 }
 
 // NewRouter creates the HTTP router.
@@ -64,6 +66,11 @@ func NewRouter(opts Options) http.Handler {
 
 	// AlertManager webhook.
 	r.Post("/api/v1/alerts", opts.OnAlert)
+
+	// GitHub Actions webhook.
+	if opts.OnGitHubWebhook != nil {
+		r.Post("/api/v1/github-webhook", opts.OnGitHubWebhook)
+	}
 
 	// Telegram webhook.
 	r.Post("/api/v1/telegram", telegramWebhookHandler(opts))
