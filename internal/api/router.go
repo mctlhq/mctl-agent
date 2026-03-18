@@ -206,6 +206,16 @@ func handleTelegramCommand(cmd *notify.TelegramCommand, opts Options) {
 	case "resume":
 		opts.Pipeline.Resume()
 		_ = opts.Telegram.SendText("Pipeline resumed.")
+
+	case "digest":
+		open, err := opts.Store.ListOpen()
+		if err != nil {
+			_ = opts.Telegram.SendText("Failed to load tickets: " + err.Error())
+			return
+		}
+		resolved, _ := opts.Store.CountResolvedInWindow(24)
+		prs, _ := opts.Store.CountPRsInWindow(24)
+		_ = opts.Telegram.SendDailyDigest(open, resolved, prs)
 	}
 }
 

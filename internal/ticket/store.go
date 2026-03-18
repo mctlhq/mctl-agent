@@ -271,6 +271,36 @@ func (s *Store) CountPRsInWindow(hours int) (int, error) {
 	return count, err
 }
 
+// CountResolvedInWindow counts tickets resolved in the last N hours.
+func (s *Store) CountResolvedInWindow(hours int) (int, error) {
+	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
+	var count int
+	err := s.db.QueryRow(`
+		SELECT COUNT(*) FROM tickets
+		WHERE status=? AND resolved_at > ?`, StatusResolved, since,
+	).Scan(&count)
+	return count, err
+}
+
+// FindSimilar returns resolved tickets of the same type, most recent first.
+// Used to inject historical context into LLM diagnosis.
+func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket, error) {
+	since := time.Now().UTC().Add(-90 * 24 * time.Hour)
+	rows, err := s.db.Query(`
+		SELECT id, source, type, tenant, service, summary, severity, status,
+			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
+		FROM tickets
+		WHERE type=? AND status=? AND id != ? AND created_at > ?
+		ORDER BY created_at DESC LIMIT ?`,
+		ticketType, StatusResolved, excludeID, since, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	return s.scanTickets(rows)
+}
+
 // ResolveByTenantService resolves open tickets matching tenant+service.
 func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
 	now := time.Now().UTC()

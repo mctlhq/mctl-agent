@@ -162,6 +162,38 @@ func (tg *Telegram) SendTicketDetail(t *ticket.Ticket) error {
 	return tg.sendMessage(sb.String())
 }
 
+// SendDailyDigest sends a morning summary of ticket and PR activity.
+func (tg *Telegram) SendDailyDigest(open []*ticket.Ticket, resolved24h, prsMerged24h int) error {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "<b>Daily Digest</b>\n\n")
+	fmt.Fprintf(&sb, "Open incidents: <b>%d</b>\n", len(open))
+	fmt.Fprintf(&sb, "Resolved (24h): <b>%d</b>\n", resolved24h)
+	fmt.Fprintf(&sb, "PRs merged (24h): <b>%d</b>\n", prsMerged24h)
+
+	critical := 0
+	for _, t := range open {
+		if t.Severity == ticket.SeverityCritical {
+			critical++
+		}
+	}
+	if critical > 0 {
+		fmt.Fprintf(&sb, "Critical: <b>%d</b>\n", critical)
+	}
+
+	if len(open) > 0 {
+		fmt.Fprintf(&sb, "\n<b>Active:</b>\n")
+		for _, t := range open {
+			icon := severityIcon(t.Severity)
+			fmt.Fprintf(&sb, "%s <code>%s</code> %s/%s — %s\n",
+				icon, t.ID[:8], t.Tenant, t.Service, t.Type)
+		}
+	} else {
+		fmt.Fprintf(&sb, "\nAll clear — no open incidents.")
+	}
+
+	return tg.sendMessage(sb.String())
+}
+
 // SendText sends a plain text message.
 func (tg *Telegram) SendText(text string) error {
 	return tg.sendMessage(escapeHTML(text))
@@ -207,6 +239,8 @@ func ParseCommand(text string) *TelegramCommand {
 		return &TelegramCommand{Command: "ignore", TicketID: parts[1]}
 	case "status":
 		return &TelegramCommand{Command: "status"}
+	case "digest":
+		return &TelegramCommand{Command: "digest"}
 	case "pause":
 		return &TelegramCommand{Command: "pause"}
 	case "resume":

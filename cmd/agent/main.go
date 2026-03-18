@@ -124,6 +124,9 @@ func main() {
 	defer cancel()
 	go poller.Run(ctx, cfg.PollInterval)
 
+	// Daily digest at 09:00 UTC.
+	go runDailyDigest(ctx, store, telegram)
+
 	// Start server.
 	go func() {
 		slog.Info("mctl-agent starting",
@@ -150,5 +153,35 @@ func main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+}
+
+// runDailyDigest sends a summary to Telegram at 09:00 UTC every day.
+func runDailyDigest(ctx context.Context, store *ticket.Store, tg *notify.Telegram) {
+	for {
+		now := time.Now().UTC()
+		next := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, time.UTC)
+		if !next.After(now) {
+			next = next.Add(24 * time.Hour)
+		}
+		select {
+		case <-time.After(time.Until(next)):
+			sendDigest(store, tg)
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+func sendDigest(store *ticket.Store, tg *notify.Telegram) {
+	open, err := store.ListOpen()
+	if err != nil {
+		slog.Error("daily digest: failed to list open tickets", "error", err)
+		return
+	}
+	resolved, _ := store.CountResolvedInWindow(24)
+	prs, _ := store.CountPRsInWindow(24)
+	if err := tg.SendDailyDigest(open, resolved, prs); err != nil {
+		slog.Error("daily digest: failed to send", "error", err)
 	}
 }

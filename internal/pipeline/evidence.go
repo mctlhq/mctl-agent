@@ -16,6 +16,8 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/ticket"
@@ -70,4 +72,34 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 			CollectedAt: now,
 		})
 	}
+}
+
+// collectHistoricalEvidence adds resolved similar incidents as evidence,
+// giving the LLM context on how this type of issue has been handled before.
+func (p *Pipeline) collectHistoricalEvidence(t *ticket.Ticket) {
+	similar, err := p.store.FindSimilar(t.Type, t.ID, 3)
+	if err != nil || len(similar) == 0 {
+		return
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Similar past incidents (last 90 days, same type):\n\n")
+	for _, past := range similar {
+		fmt.Fprintf(&sb, "- %s | %s/%s\n", past.CreatedAt.Format("2006-01-02"), past.Tenant, past.Service)
+		if past.Analysis != "" {
+			fmt.Fprintf(&sb, "  Diagnosis: %s\n", past.Analysis)
+		}
+		if past.ProposedFix != "" {
+			fmt.Fprintf(&sb, "  Fix applied: %s\n", past.ProposedFix)
+		}
+		if past.Confidence != "" {
+			fmt.Fprintf(&sb, "  Confidence: %s\n", past.Confidence)
+		}
+	}
+
+	_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+		Type:        "history",
+		Content:     sb.String(),
+		CollectedAt: time.Now().UTC(),
+	})
 }

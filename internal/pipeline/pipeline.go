@@ -146,6 +146,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 
 	// Collect evidence.
 	p.collectEvidence(ctx, t)
+	p.collectHistoricalEvidence(t)
 
 	// Reload ticket with evidence.
 	t, err := p.store.Get(t.ID)
