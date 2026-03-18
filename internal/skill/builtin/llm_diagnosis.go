@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/mctlhq/mctl-agent/internal/runbook"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -113,7 +114,8 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 	}
 
 	// Route to model based on ticket type.
-	model := "claude-sonnet-4-20250514"
+	// Fast + cheap for well-understood types; Sonnet for generic/complex.
+	model := "claude-sonnet-4-6"
 	if t.Type == ticket.TypePodCrashloop || t.Type == ticket.TypeResourceLimit {
 		model = "claude-haiku-4-5-20251001"
 	}
@@ -210,8 +212,11 @@ func buildUserMessage(t *ticket.Ticket, ev skill.EvidenceSet) string {
 	fmt.Fprintf(&sb, "- Summary: %s\n", t.Summary)
 	fmt.Fprintf(&sb, "- Source: %s\n\n", t.Source)
 
+	// Inject the relevant runbook so the LLM follows documented procedures.
+	fmt.Fprintf(&sb, "## Runbook\n%s\n\n", runbook.Get(t.Type))
+
 	for k, v := range ev.All() {
-		fmt.Fprintf(&sb, "## Evidence: %s\n```json\n%s\n```\n\n", k, v)
+		fmt.Fprintf(&sb, "## Evidence: %s\n```\n%s\n```\n\n", k, v)
 	}
 
 	return sb.String()

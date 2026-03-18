@@ -35,7 +35,7 @@ func TestClassifyAlert(t *testing.T) {
 		{"ArgoWorkflowFailed", ticket.TypeWorkflowFailed, ticket.SeverityWarning},
 		{"VaultSealed", ticket.TypeResourceLimit, ticket.SeverityCritical},
 		{"NodeHighCPU", ticket.TypeResourceLimit, ticket.SeverityWarning},
-		{"UnknownAlert", "", ""},
+		{"UnknownAlert", ticket.TypeGeneric, ticket.SeverityWarning},
 	}
 
 	for _, tt := range tests {
@@ -247,7 +247,8 @@ func TestAlertHandlerUnknownAlert(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	if callCount != 0 {
-		t.Error("expected no callback for unknown alert type")
+	// Unknown alerts are now routed as TypeGeneric — callback must fire.
+	if callCount != 1 {
+		t.Errorf("expected 1 callback for unknown alert (generic routing), got %d", callCount)
 	}
 }
