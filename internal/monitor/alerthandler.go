@@ -78,10 +78,6 @@ func (h *AlertHandler) processAlert(a alert) {
 	pod := a.Labels["pod"]
 
 	tType, severity := classifyAlert(alertName)
-	if tType == "" {
-		slog.Debug("ignoring unclassified alert", "alertname", alertName)
-		return
-	}
 
 	tenant := namespace
 	service := extractService(pod)
@@ -156,7 +152,7 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 	case "VaultSealed":
 		return ticket.TypeResourceLimit, ticket.SeverityCritical
 	default:
-		return "", ""
+		return ticket.TypeGeneric, ticket.SeverityWarning
 	}
 }
 

@@ -24,6 +24,7 @@ const (
 	TypeResourceLimit       = "resource_limit"
 	TypeDeploymentFailed    = "deployment_failed"
 	TypeGitHubActionsFailed = "github_actions_failed"
+	TypeGeneric             = "generic"
 )
 
 // Ticket sources.
