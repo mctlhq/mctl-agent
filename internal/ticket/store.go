@@ -35,10 +35,9 @@ func NewStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite: %w", err)
 	}
-	// WAL mode for concurrent reads.
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		return nil, fmt.Errorf("setting WAL mode: %w", err)
-	}
+	// WAL mode for better read concurrency — best-effort, non-fatal.
+	// Some filesystems (e.g. Hetzner block storage) may not support it.
+	_, _ = db.Exec("PRAGMA journal_mode=WAL")
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("migrating: %w", err)
