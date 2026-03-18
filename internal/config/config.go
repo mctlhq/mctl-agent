@@ -21,20 +21,24 @@ import (
 )
 
 type Config struct {
-	Port             string
-	MctlAPIURL       string
-	MctlAPIToken     string
-	AnthropicAPIKey  string
-	GitHubToken      string
-	GitHubOwner      string
-	GitHubRepo       string
-	TelegramBotToken string
-	TelegramChatID   string
-	PollInterval     time.Duration
-	DryRun           bool
-	DBPath           string
-	MaxPRPerHour     int
-	MaxPRPerDay      int
+	Port                string
+	MctlAPIURL          string
+	MctlAPIToken        string
+	AnthropicAPIKey     string
+	GitHubToken         string
+	GitHubOwner         string
+	GitHubRepo          string
+	GitHubWebhookSecret string
+	TelegramBotToken    string
+	TelegramChatID      string
+	OpenClawBotUsername string
+	PollInterval        time.Duration
+	DryRun              bool
+	DBPath              string
+	MaxPRPerHour        int
+	MaxPRPerDay         int
+	AutoMergeEnabled    bool
+	EscalationTag       string
 }
 
 func Load() Config {
@@ -64,21 +68,30 @@ func Load() Config {
 		}
 	}
 
+	autoMergeEnabled := true
+	if v := os.Getenv("AUTO_MERGE_ENABLED"); v == "false" {
+		autoMergeEnabled = false
+	}
+
 	return Config{
-		Port:             envOr("PORT", "8081"),
-		MctlAPIURL:       envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
-		MctlAPIToken:     os.Getenv("MCTL_API_TOKEN"),
-		AnthropicAPIKey:  os.Getenv("ANTHROPIC_API_KEY"),
-		GitHubToken:      os.Getenv("GITHUB_TOKEN"),
-		GitHubOwner:      envOr("GITHUB_OWNER", "mctlhq"),
-		GitHubRepo:       envOr("GITHUB_REPO", "mctl-gitops"),
-		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
-		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
-		PollInterval:     pollInterval,
-		DryRun:           dryRun,
-		DBPath:           envOr("DB_PATH", "/data/mctl-agent.db"),
-		MaxPRPerHour:     maxPRPerHour,
-		MaxPRPerDay:      maxPRPerDay,
+		Port:                envOr("PORT", "8081"),
+		MctlAPIURL:          envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
+		MctlAPIToken:        os.Getenv("MCTL_API_TOKEN"),
+		AnthropicAPIKey:     os.Getenv("ANTHROPIC_API_KEY"),
+		GitHubToken:         os.Getenv("GITHUB_TOKEN"),
+		GitHubOwner:         envOr("GITHUB_OWNER", "mctlhq"),
+		GitHubRepo:          envOr("GITHUB_REPO", "mctl-gitops"),
+		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:      os.Getenv("TELEGRAM_CHAT_ID"),
+		OpenClawBotUsername: envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
+		PollInterval:        pollInterval,
+		DryRun:              dryRun,
+		DBPath:              envOr("DB_PATH", "/data/mctl-agent.db"),
+		MaxPRPerHour:        maxPRPerHour,
+		MaxPRPerDay:         maxPRPerDay,
+		AutoMergeEnabled:    autoMergeEnabled,
+		EscalationTag:       envOr("ESCALATION_TAG", "@mashkovd"),
 	}
 }
 

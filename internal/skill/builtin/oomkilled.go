@@ -72,6 +72,8 @@ func (s *OOMKilledSkill) Fix(_ context.Context, t *ticket.Ticket, _ *skill.Diagn
 	}, nil
 }
 
+func (s *OOMKilledSkill) AutoMergeSafe() bool { return true }
+
 // containsAny checks if s contains any of the substrings.
 func containsAny(s string, substrs ...string) bool {
 	for _, sub := range substrs {

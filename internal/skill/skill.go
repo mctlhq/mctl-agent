@@ -166,6 +166,12 @@ func (es EvidenceSet) All() map[string]string {
 	return cp
 }
 
+// AutoMerger is optionally implemented by skills whose fixes are safe to merge
+// without human review.
+type AutoMerger interface {
+	AutoMergeSafe() bool
+}
+
 // Info contains metadata about a registered skill (for listing/discovery).
 type Info struct {
 	Name         string         `json:"name"`

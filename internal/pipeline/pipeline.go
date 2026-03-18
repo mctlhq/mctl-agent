@@ -38,9 +38,11 @@ type Pipeline struct {
 	apiClient *mctlclient.Client
 	github    *fixer.GitHubFixer
 	telegram  *notify.Telegram
-	dryRun    bool
-	paused    atomic.Bool
-	sem       chan struct{}
+	dryRun        bool
+	autoMerge     bool
+	escalationTag string
+	paused        atomic.Bool
+	sem           chan struct{}
 }
 
 // NewPipeline creates a new pipeline orchestrator.
@@ -53,17 +55,21 @@ func NewPipeline(
 	github *fixer.GitHubFixer,
 	telegram *notify.Telegram,
 	dryRun bool,
+	autoMerge bool,
+	escalationTag string,
 ) *Pipeline {
 	return &Pipeline{
-		store:     store,
-		registry:  registry,
-		metrics:   metrics,
-		provider:  provider,
-		apiClient: apiClient,
-		github:    github,
-		telegram:  telegram,
-		dryRun:    dryRun,
-		sem:       make(chan struct{}, 3), // Max 3 concurrent analyses.
+		store:         store,
+		registry:      registry,
+		metrics:       metrics,
+		provider:      provider,
+		apiClient:     apiClient,
+		github:        github,
+		telegram:      telegram,
+		dryRun:        dryRun,
+		autoMerge:     autoMerge,
+		escalationTag: escalationTag,
+		sem:           make(chan struct{}, 3), // Max 3 concurrent analyses.
 	}
 }
 
@@ -128,6 +134,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		log.Error("failed to send new ticket notification", "error", err)
 	}
 
+	// Publish to mctl-api alert store.
+	go p.apiClient.PublishAlert(t)
+
 	// Update status to analyzing.
 	t.Status = ticket.StatusAnalyzing
 	if err := p.store.Update(t); err != nil {
@@ -186,6 +195,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		t.Analysis = diag.Diagnosis
 		t.Confidence = diag.Confidence
 
+		// Sync diagnosis to mctl-api.
+		go p.apiClient.UpdateAlert(t)
+
 		log.Info("diagnosis complete",
 			"skill", rs.Skill.Name(),
 			"confidence", diag.Confidence,
@@ -204,8 +216,13 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			return
 		}
 
-		// MEDIUM confidence + fixable → suggest in Telegram.
+		// MEDIUM confidence + fixable + auto-merge safe → create PR (same as HIGH).
 		if diag.Confidence == ticket.ConfidenceMedium && diag.Fixable {
+			if am, ok := rs.Skill.(skill.AutoMerger); ok && am.AutoMergeSafe() {
+				p.handleHighConfidenceFix(ctx, t, rs.Skill, diag, log)
+				return
+			}
+			// Not auto-merge safe → suggest in Telegram.
 			action := fmt.Sprintf("Fixable but MEDIUM confidence (skill: %s) — sending suggestion to Telegram for review", rs.Skill.Name())
 			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
 			t.Status = ticket.StatusFixProposed
@@ -280,6 +297,10 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	switch diag.FixType {
 	case "bump_memory":
 		newContent, summary, patchErr = fixer.GenerateMemoryBump(content)
+	case "bump_cpu":
+		newContent, summary, patchErr = fixer.GenerateCPUBump(content)
+	case "adjust_probe":
+		newContent, summary, patchErr = fixer.GenerateProbeFix(content, diag.YAMLField)
 	case "rollback_image":
 		patchErr = fmt.Errorf("image rollback requires previous tag — not yet implemented")
 	default:
@@ -327,8 +348,31 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	t.Status = ticket.StatusFixProposed
 	_ = p.store.Update(t)
 
+	// Sync PR info to mctl-api.
+	go p.apiClient.UpdateAlert(t)
+
 	if prURL != "" {
-		_ = p.telegram.SendPRCreated(t, prURL, summary)
+		shouldAutoMerge := p.autoMerge && !p.dryRun
+		if shouldAutoMerge {
+			if am, ok := s.(skill.AutoMerger); !ok || !am.AutoMergeSafe() {
+				shouldAutoMerge = false
+			}
+		}
+
+		if shouldAutoMerge {
+			if err := p.github.MergePR(ctx, prNumber); err != nil {
+				log.Error("auto-merge failed", "error", err)
+				_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag,
+					"Auto-merge failed: "+err.Error())
+			} else {
+				t.Status = ticket.StatusFixApplied
+				_ = p.store.Update(t)
+				go p.apiClient.UpdateAlert(t)
+				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
+			}
+		} else {
+			_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag, "")
+		}
 	} else {
 		// Dry-run mode.
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,

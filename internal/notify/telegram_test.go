@@ -69,7 +69,7 @@ func TestSendTextWithMockServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tg := NewTelegram("test-token", "12345")
+	tg := NewTelegram("test-token", "12345", "")
 	// Override the URL by replacing the httpClient with one that redirects.
 	tg.httpClient = srv.Client()
 	// We need to actually hit the mock server, so let's use a custom approach:
@@ -79,14 +79,14 @@ func TestSendTextWithMockServer(t *testing.T) {
 
 	// Unfortunately, Telegram.sendMessage hard-codes the URL.
 	// Let's test the no-config path instead.
-	tgEmpty := NewTelegram("", "")
+	tgEmpty := NewTelegram("", "", "")
 	if err := tgEmpty.SendText("hello"); err != nil {
 		t.Errorf("expected nil error for unconfigured telegram, got %v", err)
 	}
 }
 
 func TestSendNewTicketUnconfigured(t *testing.T) {
-	tg := NewTelegram("", "")
+	tg := NewTelegram("", "", "")
 	tk := &ticket.Ticket{
 		ID:       "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
 		Type:     ticket.TypePodCrashloop,
@@ -102,7 +102,7 @@ func TestSendNewTicketUnconfigured(t *testing.T) {
 }
 
 func TestSendStatusEmptyTickets(t *testing.T) {
-	tg := NewTelegram("", "")
+	tg := NewTelegram("", "", "")
 	if err := tg.SendStatus(nil); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -129,6 +129,34 @@ func TestConfidenceIcon(t *testing.T) {
 	}
 	if got := confidenceIcon(ticket.ConfidenceLow); got != "🔴" {
 		t.Errorf("LOW icon = %q", got)
+	}
+}
+
+func TestSendPRAutoMergedUnconfigured(t *testing.T) {
+	tg := NewTelegram("", "", "")
+	tk := &ticket.Ticket{
+		ID:      "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
+		Tenant:  "billing",
+		Service: "api",
+	}
+	if err := tg.SendPRAutoMerged(tk, "https://github.com/mctlhq/mctl-gitops/pull/42", "Bump memory limit from 512Mi to 768Mi"); err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+}
+
+func TestSendPRNeedsReviewUnconfigured(t *testing.T) {
+	tg := NewTelegram("", "", "")
+	tk := &ticket.Ticket{
+		ID:      "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
+		Tenant:  "billing",
+		Service: "api",
+	}
+	if err := tg.SendPRNeedsReview(tk, "https://github.com/mctlhq/mctl-gitops/pull/43", "Rollback image", "@mashkovd", ""); err != nil {
+		t.Errorf("expected nil error, got %v", err)
+	}
+	// With reason.
+	if err := tg.SendPRNeedsReview(tk, "https://github.com/mctlhq/mctl-gitops/pull/43", "Rollback image", "@mashkovd", "Auto-merge failed: conflict"); err != nil {
+		t.Errorf("expected nil error, got %v", err)
 	}
 }
 

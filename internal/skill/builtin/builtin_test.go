@@ -212,8 +212,8 @@ func TestAllSkillsRegistered(t *testing.T) {
 	RegisterAll(reg, "test-key")
 
 	infos := reg.List()
-	if len(infos) != 9 {
-		t.Fatalf("expected 9 skills, got %d", len(infos))
+	if len(infos) != 10 {
+		t.Fatalf("expected 10 skills, got %d", len(infos))
 	}
 
 	names := map[string]bool{}
@@ -230,6 +230,7 @@ func TestAllSkillsRegistered(t *testing.T) {
 	expected := []string{
 		"oomkilled", "imagepull", "post_deploy_rollback", "argocd_drift",
 		"llm_diagnosis", "probe_fix", "cpu_throttle", "quota_adjust", "scale_up",
+		"github_actions",
 	}
 	for _, name := range expected {
 		if !names[name] {
@@ -313,6 +314,38 @@ func TestQuotaAdjustSkillMatch(t *testing.T) {
 	}
 	if diag.Fixable {
 		t.Error("quota adjustments should not be auto-fixable")
+	}
+}
+
+func TestAutoMergeSafe(t *testing.T) {
+	tests := []struct {
+		name string
+		skill skill.Skill
+		safe  bool
+	}{
+		{"oomkilled", NewOOMKilledSkill(), true},
+		{"cpu_throttle", NewCPUThrottleSkill(), true},
+		{"probe_fix", NewProbeFixSkill(), true},
+		{"scale_up", NewScaleUpSkill(), false},
+		{"post_deploy_rollback", NewPostDeployRollbackSkill(), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			am, ok := tt.skill.(skill.AutoMerger)
+			if tt.safe {
+				if !ok {
+					t.Fatalf("expected %s to implement AutoMerger", tt.name)
+				}
+				if !am.AutoMergeSafe() {
+					t.Errorf("expected AutoMergeSafe()=true for %s", tt.name)
+				}
+			} else {
+				if ok && am.AutoMergeSafe() {
+					t.Errorf("expected %s NOT to be auto-merge safe", tt.name)
+				}
+			}
+		})
 	}
 }
 

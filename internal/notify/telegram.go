@@ -29,16 +29,21 @@ import (
 
 // Telegram handles sending and receiving Telegram messages.
 type Telegram struct {
-	botToken   string
-	chatID     string
-	httpClient *http.Client
+	botToken        string
+	chatID          string
+	openClawBotUser string
+	httpClient      *http.Client
 }
 
 // NewTelegram creates a new Telegram notifier.
-func NewTelegram(botToken, chatID string) *Telegram {
+func NewTelegram(botToken, chatID, openClawBotUser string) *Telegram {
+	if openClawBotUser == "" {
+		openClawBotUser = "@mctl_me_bot"
+	}
 	return &Telegram{
-		botToken: botToken,
-		chatID:   chatID,
+		botToken:        botToken,
+		chatID:          chatID,
+		openClawBotUser: openClawBotUser,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -55,14 +60,14 @@ type TelegramCommand struct {
 // SendNewTicket notifies about a new ticket.
 func (tg *Telegram) SendNewTicket(t *ticket.Ticket) error {
 	icon := severityIcon(t.Severity)
-	msg := fmt.Sprintf(`%s <b>New Incident</b>
+	msg := fmt.Sprintf(`%s %s in %s/%s [%s]
+%s
+ID: <code>%s</code>
 
-<b>Type:</b> %s
-<b>Service:</b> %s/%s
-<b>Severity:</b> %s
-<b>Summary:</b> %s
-<b>ID:</b> <code>%s</code>`,
-		icon, t.Type, t.Tenant, t.Service, t.Severity, escapeHTML(t.Summary), t.ID[:8])
+Ask %s: "explain incident %s"`,
+		icon, t.Type, t.Tenant, t.Service, t.Severity,
+		escapeHTML(t.Summary), t.ID[:8],
+		tg.openClawBotUser, t.ID[:8])
 
 	return tg.sendMessage(msg)
 }
@@ -70,31 +75,50 @@ func (tg *Telegram) SendNewTicket(t *ticket.Ticket) error {
 // SendDiagnosis notifies about a completed diagnosis.
 func (tg *Telegram) SendDiagnosis(t *ticket.Ticket, diagnosis, confidence, action string) error {
 	confIcon := confidenceIcon(confidence)
-	msg := fmt.Sprintf(`🔍 <b>Diagnosis Complete</b>
+	msg := fmt.Sprintf(`🔍 %s/%s — %s %s
+%s
+%s
+ID: <code>%s</code>
 
-<b>Service:</b> %s/%s
-<b>Confidence:</b> %s %s
-<b>Analysis:</b> %s
-<b>Action:</b> %s
-<b>ID:</b> <code>%s</code>`,
-		t.Tenant, t.Service, confIcon, confidence, escapeHTML(diagnosis), action, t.ID[:8])
+Ask %s: "explain incident %s"`,
+		t.Tenant, t.Service, confIcon, confidence,
+		escapeHTML(diagnosis), action, t.ID[:8],
+		tg.openClawBotUser, t.ID[:8])
 
 	return tg.sendMessage(msg)
 }
 
 // SendPRCreated notifies about a PR being created.
 func (tg *Telegram) SendPRCreated(t *ticket.Ticket, prURL, summary string) error {
-	msg := fmt.Sprintf(`🔧 <b>Fix PR Created</b>
+	msg := fmt.Sprintf(`🔧 %s/%s — fix PR
+%s
+%s
 
-<b>Service:</b> %s/%s
-<b>Fix:</b> %s
-<b>PR:</b> %s
+<code>/approve %s</code> | <code>/reject %s reason</code>
 
-Commands:
-<code>/approve %s</code> — merge PR
-<code>/reject %s reason</code> — close PR`,
-		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8], t.ID[:8])
+Ask %s: "explain incident %s"`,
+		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8], t.ID[:8],
+		tg.openClawBotUser, t.ID[:8])
 
+	return tg.sendMessage(msg)
+}
+
+// SendPRAutoMerged notifies that a PR was auto-merged (informational, no action needed).
+func (tg *Telegram) SendPRAutoMerged(t *ticket.Ticket, prURL, summary string) error {
+	msg := fmt.Sprintf("✅ AUTO-MERGED %s/%s\n%s\n%s\nID: <code>%s</code>",
+		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8])
+	return tg.sendMessage(msg)
+}
+
+// SendPRNeedsReview notifies that a PR needs human review, tagging the escalation contact.
+func (tg *Telegram) SendPRNeedsReview(t *ticket.Ticket, prURL, summary, escalationTag, reason string) error {
+	msg := fmt.Sprintf("⚠️ REVIEW NEEDED %s/%s %s\n%s\n%s",
+		t.Tenant, t.Service, escalationTag, escapeHTML(summary), prURL)
+	if reason != "" {
+		msg += "\n" + escapeHTML(reason)
+	}
+	msg += fmt.Sprintf("\n\n<code>/approve %s</code> | <code>/reject %s reason</code>", t.ID[:8], t.ID[:8])
+	msg += fmt.Sprintf("\n\nAsk %s: \"explain incident %s\"", tg.openClawBotUser, t.ID[:8])
 	return tg.sendMessage(msg)
 }
 
