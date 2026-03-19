@@ -62,14 +62,11 @@ func (tg *Telegram) SendNewTicket(t *ticket.Ticket) error {
 	icon := severityIcon(t.Severity)
 	msg := fmt.Sprintf(`%s %s in %s/%s [%s]
 %s
-ID: <code>%s</code>
-
-Ask %s: "explain incident %s"`,
+ID: <code>%s</code>`,
 		icon, t.Type, t.Tenant, t.Service, t.Severity,
-		escapeHTML(t.Summary), t.ID[:8],
-		tg.openClawBotUser, t.ID[:8])
+		escapeHTML(t.Summary), t.ID[:8])
 
-	return tg.sendMessage(msg)
+	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendDiagnosis notifies about a completed diagnosis.
@@ -78,14 +75,11 @@ func (tg *Telegram) SendDiagnosis(t *ticket.Ticket, diagnosis, confidence, actio
 	msg := fmt.Sprintf(`🔍 %s/%s — %s %s
 %s
 %s
-ID: <code>%s</code>
-
-Ask %s: "explain incident %s"`,
+ID: <code>%s</code>`,
 		t.Tenant, t.Service, confIcon, confidence,
-		escapeHTML(diagnosis), action, t.ID[:8],
-		tg.openClawBotUser, t.ID[:8])
+		escapeHTML(diagnosis), action, t.ID[:8])
 
-	return tg.sendMessage(msg)
+	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendPRCreated notifies about a PR being created.
@@ -94,13 +88,10 @@ func (tg *Telegram) SendPRCreated(t *ticket.Ticket, prURL, summary string) error
 %s
 %s
 
-<code>/approve %s</code> | <code>/reject %s reason</code>
+<code>/approve %s</code> | <code>/reject %s reason</code>`,
+		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8], t.ID[:8])
 
-Ask %s: "explain incident %s"`,
-		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8], t.ID[:8],
-		tg.openClawBotUser, t.ID[:8])
-
-	return tg.sendMessage(msg)
+	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendPRAutoMerged notifies that a PR was auto-merged (informational, no action needed).
@@ -118,8 +109,7 @@ func (tg *Telegram) SendPRNeedsReview(t *ticket.Ticket, prURL, summary, escalati
 		msg += "\n" + escapeHTML(reason)
 	}
 	msg += fmt.Sprintf("\n\n<code>/approve %s</code> | <code>/reject %s reason</code>", t.ID[:8], t.ID[:8])
-	msg += fmt.Sprintf("\n\nAsk %s: \"explain incident %s\"", tg.openClawBotUser, t.ID[:8])
-	return tg.sendMessage(msg)
+	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendStatus sends a summary of open tickets.
@@ -266,15 +256,22 @@ type TelegramUpdate struct {
 }
 
 func (tg *Telegram) sendMessage(text string) error {
+	return tg.doSend(text, nil)
+}
+
+func (tg *Telegram) doSend(text string, markup any) error {
 	if tg.botToken == "" || tg.chatID == "" {
 		slog.Debug("telegram: skipping send (not configured)", "text_len", len(text))
 		return nil
 	}
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"chat_id":    tg.chatID,
 		"text":       text,
 		"parse_mode": "HTML",
+	}
+	if markup != nil {
+		payload["reply_markup"] = markup
 	}
 	body, _ := json.Marshal(payload)
 
@@ -291,6 +288,19 @@ func (tg *Telegram) sendMessage(text string) error {
 	}
 
 	return nil
+}
+
+// openClawKeyboard returns a Telegram InlineKeyboardMarkup with a deep-link
+// button that opens a conversation with the OpenClaw bot pre-filled with the
+// explain command for the given ticket ID.
+func openClawKeyboard(botUser, ticketID string) any {
+	username := strings.TrimPrefix(botUser, "@")
+	url := fmt.Sprintf("https://t.me/%s?start=explain_%s", username, ticketID)
+	return map[string]any{
+		"inline_keyboard": [][]map[string]any{
+			{{"text": "Ask OpenClaw", "url": url}},
+		},
+	}
 }
 
 func severityIcon(s string) string {
