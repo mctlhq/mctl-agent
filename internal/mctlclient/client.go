@@ -180,6 +180,19 @@ func (c *Client) ListAudit() ([]AuditEntry, error) {
 	return resp.Items, nil
 }
 
+// GetWorkflow returns live workflow status.
+func (c *Client) GetWorkflow(name string) (map[string]any, error) {
+	body, err := c.doGet(fmt.Sprintf("/api/v1/workflows/%s", name))
+	if err != nil {
+		return nil, err
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("parsing workflow: %w", err)
+	}
+	return resp, nil
+}
+
 // PublishAlert sends a new incident to mctl-api.
 func (c *Client) PublishAlert(t *ticket.Ticket) {
 	body := map[string]interface{}{

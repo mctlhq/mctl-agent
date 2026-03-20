@@ -110,13 +110,26 @@ func (a *Analyzer) Analyze(ctx context.Context, t *ticket.Ticket) (*DiagnosisRes
 func (a *Analyzer) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 	now := time.Now().UTC()
 
+	// Workflow specific evidence.
+	if t.Type == ticket.TypeWorkflowFailed && t.Service != "" {
+		if wf, err := a.apiClient.GetWorkflow(t.Service); err == nil {
+			_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+				Type:        "workflow_live_status",
+				Content:     ticket.EvidenceJSON(wf),
+				CollectedAt: now,
+			})
+		}
+	}
+
 	// Status from ArgoCD.
-	if status, err := a.apiClient.GetServiceStatus(t.Tenant, t.Service); err == nil {
-		_ = a.store.AddEvidence(t.ID, ticket.Evidence{
-			Type:        "argocd_status",
-			Content:     ticket.EvidenceJSON(status),
-			CollectedAt: now,
-		})
+	if t.Service != "" && t.Type != ticket.TypeWorkflowFailed {
+		if status, err := a.apiClient.GetServiceStatus(t.Tenant, t.Service); err == nil {
+			_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+				Type:        "argocd_status",
+				Content:     ticket.EvidenceJSON(status),
+				CollectedAt: now,
+			})
+		}
 	}
 
 	// Service config.

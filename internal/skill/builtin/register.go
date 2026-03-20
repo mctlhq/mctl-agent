@@ -28,6 +28,7 @@ func RegisterAll(reg *skill.Registry, anthropicKey string) {
 	reg.Register(NewQuotaAdjustSkill())
 	reg.Register(NewScaleUpSkill())
 	reg.Register(NewGitHubActionsSkill())
+	reg.Register(NewWorkflowFixerSkill())
 
 	// LLM-based fallback skill.
 	reg.Register(NewLLMDiagnosisSkill(anthropicKey))

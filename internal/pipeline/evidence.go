@@ -28,17 +28,30 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 	_ = ctx // available for future cancellation support
 	now := time.Now().UTC()
 
+	// Workflow specific evidence.
+	if t.Type == ticket.TypeWorkflowFailed && t.Service != "" {
+		if wf, err := p.apiClient.GetWorkflow(t.Service); err == nil {
+			_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+				Type:        "workflow_live_status",
+				Content:     ticket.EvidenceJSON(wf),
+				CollectedAt: now,
+			})
+		}
+	}
+
 	// Status from ArgoCD.
-	if status, err := p.apiClient.GetServiceStatus(t.Tenant, t.Service); err == nil {
-		_ = p.store.AddEvidence(t.ID, ticket.Evidence{
-			Type:        "argocd_status",
-			Content:     ticket.EvidenceJSON(status),
-			CollectedAt: now,
-		})
+	if t.Service != "" && t.Type != ticket.TypeWorkflowFailed {
+		if status, err := p.apiClient.GetServiceStatus(t.Tenant, t.Service); err == nil {
+			_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+				Type:        "argocd_status",
+				Content:     ticket.EvidenceJSON(status),
+				CollectedAt: now,
+			})
+		}
 	}
 
 	// Service config.
-	if config, err := p.apiClient.GetServiceConfig(t.Tenant, t.Service); err == nil {
+	if config, err := p.apiClient.GetServiceConfig(t.Tenant, t.Service); err == nil && t.Type != ticket.TypeWorkflowFailed {
 		_ = p.store.AddEvidence(t.ID, ticket.Evidence{
 			Type:        "config",
 			Content:     ticket.EvidenceJSON(config),

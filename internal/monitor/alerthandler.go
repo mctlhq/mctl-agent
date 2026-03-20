@@ -76,11 +76,15 @@ func (h *AlertHandler) processAlert(a alert) {
 	alertName := a.Labels["alertname"]
 	namespace := a.Labels["namespace"]
 	pod := a.Labels["pod"]
+	workflow := a.Labels["name"]
 
 	tType, severity := classifyAlert(alertName)
 
 	tenant := namespace
 	service := extractService(pod)
+	if tType == ticket.TypeWorkflowFailed && workflow != "" {
+		service = workflow
+	}
 
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
