@@ -18,62 +18,130 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	_ "github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
 
-// Store persists tickets and evidence in SQLite.
+// Store persists tickets and evidence.
 type Store struct {
-	db *sql.DB
+	db      *sql.DB
+	dialect string
 }
 
-// NewStore opens (or creates) the SQLite database at path.
-func NewStore(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("opening sqlite: %w", err)
+// NewStore opens (or creates) the database.
+// Supports "sqlite" (path to file) or "postgres" (postgres://... URL).
+func NewStore(connStr string) (*Store, error) {
+	driver := "sqlite"
+	if strings.HasPrefix(connStr, "postgres://") || strings.HasPrefix(connStr, "postgresql://") {
+		driver = "postgres"
 	}
-	// WAL mode for better read concurrency — best-effort, non-fatal.
-	// Some filesystems (e.g. Hetzner block storage) may not support it.
-	_, _ = db.Exec("PRAGMA journal_mode=WAL")
-	s := &Store{db: db}
+
+	db, err := sql.Open(driver, connStr)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", driver, err)
+	}
+
+	if driver == "sqlite" {
+		// WAL mode for better read concurrency — best-effort, non-fatal.
+		_, _ = db.Exec("PRAGMA journal_mode=WAL")
+	}
+
+	s := &Store{db: db, dialect: driver}
 	if err := s.migrate(); err != nil {
 		return nil, fmt.Errorf("migrating: %w", err)
 	}
 	return s, nil
 }
 
+func (s *Store) rebind(query string) string {
+	if s.dialect != "postgres" {
+		return query
+	}
+	// Replace ? with $1, $2, etc.
+	out := make([]byte, 0, len(query))
+	argIdx := 1
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' {
+			out = append(out, '$')
+			out = append(out, fmt.Sprintf("%d", argIdx)...)
+			argIdx++
+		} else {
+			out = append(out, query[i])
+		}
+	}
+	return string(out)
+}
+
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
-		CREATE TABLE IF NOT EXISTS tickets (
-			id          TEXT PRIMARY KEY,
-			source      TEXT NOT NULL,
-			type        TEXT NOT NULL,
-			tenant      TEXT NOT NULL DEFAULT '',
-			service     TEXT NOT NULL DEFAULT '',
-			summary     TEXT NOT NULL DEFAULT '',
-			severity    TEXT NOT NULL DEFAULT 'info',
-			status      TEXT NOT NULL DEFAULT 'open',
-			analysis    TEXT NOT NULL DEFAULT '',
-			proposed_fix TEXT NOT NULL DEFAULT '',
-			pr_url      TEXT NOT NULL DEFAULT '',
-			pr_number   INTEGER NOT NULL DEFAULT 0,
-			confidence  TEXT NOT NULL DEFAULT '',
-			created_at  DATETIME NOT NULL,
-			updated_at  DATETIME NOT NULL,
-			resolved_at DATETIME
-		);
+	var err error
+	if s.dialect == "postgres" {
+		_, err = s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS tickets (
+				id          TEXT PRIMARY KEY,
+				source      TEXT NOT NULL,
+				type        TEXT NOT NULL,
+				tenant      TEXT NOT NULL DEFAULT '',
+				service     TEXT NOT NULL DEFAULT '',
+				summary     TEXT NOT NULL DEFAULT '',
+				severity    TEXT NOT NULL DEFAULT 'info',
+				status      TEXT NOT NULL DEFAULT 'open',
+				analysis    TEXT NOT NULL DEFAULT '',
+				proposed_fix TEXT NOT NULL DEFAULT '',
+				pr_url      TEXT NOT NULL DEFAULT '',
+				pr_number   INTEGER NOT NULL DEFAULT 0,
+				confidence  TEXT NOT NULL DEFAULT '',
+				created_at  TIMESTAMPTZ NOT NULL,
+				updated_at  TIMESTAMPTZ NOT NULL,
+				resolved_at TIMESTAMPTZ
+			);
 
-		CREATE TABLE IF NOT EXISTS evidence (
-			id           INTEGER PRIMARY KEY AUTOINCREMENT,
-			ticket_id    TEXT NOT NULL REFERENCES tickets(id),
-			type         TEXT NOT NULL,
-			content      TEXT NOT NULL,
-			collected_at DATETIME NOT NULL
-		);
+			CREATE TABLE IF NOT EXISTS evidence (
+				id           SERIAL PRIMARY KEY,
+				ticket_id    TEXT NOT NULL REFERENCES tickets(id),
+				type         TEXT NOT NULL,
+				content      TEXT NOT NULL,
+				collected_at TIMESTAMPTZ NOT NULL
+			);
+		`)
+	} else {
+		_, err = s.db.Exec(`
+			CREATE TABLE IF NOT EXISTS tickets (
+				id          TEXT PRIMARY KEY,
+				source      TEXT NOT NULL,
+				type        TEXT NOT NULL,
+				tenant      TEXT NOT NULL DEFAULT '',
+				service     TEXT NOT NULL DEFAULT '',
+				summary     TEXT NOT NULL DEFAULT '',
+				severity    TEXT NOT NULL DEFAULT 'info',
+				status      TEXT NOT NULL DEFAULT 'open',
+				analysis    TEXT NOT NULL DEFAULT '',
+				proposed_fix TEXT NOT NULL DEFAULT '',
+				pr_url      TEXT NOT NULL DEFAULT '',
+				pr_number   INTEGER NOT NULL DEFAULT 0,
+				confidence  TEXT NOT NULL DEFAULT '',
+				created_at  DATETIME NOT NULL,
+				updated_at  DATETIME NOT NULL,
+				resolved_at DATETIME
+			);
 
+			CREATE TABLE IF NOT EXISTS evidence (
+				id           INTEGER PRIMARY KEY AUTOINCREMENT,
+				ticket_id    TEXT NOT NULL REFERENCES tickets(id),
+				type         TEXT NOT NULL,
+				content      TEXT NOT NULL,
+				collected_at DATETIME NOT NULL
+			);
+		`)
+	}
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
 		CREATE INDEX IF NOT EXISTS idx_tickets_tenant_service_type ON tickets(tenant, service, type);
 		CREATE INDEX IF NOT EXISTS idx_evidence_ticket ON evidence(ticket_id);
@@ -91,10 +159,12 @@ func (s *Store) Create(t *Ticket) error {
 		t.Status = StatusOpen
 	}
 
-	_, err := s.db.Exec(`
+	query := `
 		INSERT INTO tickets (id, source, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+
+	_, err := s.db.Exec(s.rebind(query),
 		t.ID, t.Source, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
 		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.Confidence,
 		t.CreatedAt, t.UpdatedAt, t.ResolvedAt,
@@ -105,11 +175,13 @@ func (s *Store) Create(t *Ticket) error {
 // Update saves changes to an existing ticket.
 func (s *Store) Update(t *Ticket) error {
 	t.UpdatedAt = time.Now().UTC()
-	_, err := s.db.Exec(`
+	query := `
 		UPDATE tickets SET source=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
 			analysis=?, proposed_fix=?, pr_url=?, pr_number=?, confidence=?,
 			updated_at=?, resolved_at=?
-		WHERE id=?`,
+		WHERE id=?`
+
+	_, err := s.db.Exec(s.rebind(query),
 		t.Source, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
 		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.Confidence,
 		t.UpdatedAt, t.ResolvedAt, t.ID,
@@ -121,11 +193,12 @@ func (s *Store) Update(t *Ticket) error {
 func (s *Store) Get(id string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
-	err := s.db.QueryRow(`
+	query := `
 		SELECT id, source, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
-		FROM tickets WHERE id=?`, id,
-	).Scan(&t.ID, &t.Source, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
+		FROM tickets WHERE id=?`
+
+	err := s.db.QueryRow(s.rebind(query), id).Scan(&t.ID, &t.Source, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.Confidence,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
@@ -150,10 +223,12 @@ func (s *Store) ListOpen() ([]*Ticket, error) {
 
 // ListAll returns all tickets (latest first, limit 100).
 func (s *Store) ListAll() ([]*Ticket, error) {
-	rows, err := s.db.Query(`
+	query := `
 		SELECT id, source, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
-		FROM tickets ORDER BY created_at DESC LIMIT 100`)
+		FROM tickets ORDER BY created_at DESC LIMIT 100`
+
+	rows, err := s.db.Query(s.rebind(query))
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +251,7 @@ func (s *Store) listByStatus(statuses ...string) ([]*Ticket, error) {
 	}
 	query += ") ORDER BY created_at DESC"
 
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.db.Query(s.rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -206,12 +281,14 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
-	err := s.db.QueryRow(`
+	query := `
 		SELECT id, source, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
-		ORDER BY created_at DESC LIMIT 1`,
+		ORDER BY created_at DESC LIMIT 1`
+
+	err := s.db.QueryRow(s.rebind(query),
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.Confidence,
@@ -231,18 +308,22 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 
 // AddEvidence adds evidence to a ticket.
 func (s *Store) AddEvidence(ticketID string, ev Evidence) error {
-	_, err := s.db.Exec(`
+	query := `
 		INSERT INTO evidence (ticket_id, type, content, collected_at)
-		VALUES (?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?)`
+
+	_, err := s.db.Exec(s.rebind(query),
 		ticketID, ev.Type, ev.Content, ev.CollectedAt,
 	)
 	return err
 }
 
 func (s *Store) loadEvidence(ticketID string) ([]Evidence, error) {
-	rows, err := s.db.Query(`
+	query := `
 		SELECT type, content, collected_at FROM evidence
-		WHERE ticket_id=? ORDER BY collected_at`, ticketID)
+		WHERE ticket_id=? ORDER BY collected_at`
+
+	rows, err := s.db.Query(s.rebind(query), ticketID)
 	if err != nil {
 		return nil, err
 	}
@@ -263,10 +344,11 @@ func (s *Store) loadEvidence(ticketID string) ([]Evidence, error) {
 func (s *Store) CountPRsInWindow(hours int) (int, error) {
 	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
 	var count int
-	err := s.db.QueryRow(`
+	query := `
 		SELECT COUNT(*) FROM tickets
-		WHERE pr_url != '' AND created_at > ?`, since,
-	).Scan(&count)
+		WHERE pr_url != '' AND created_at > ?`
+
+	err := s.db.QueryRow(s.rebind(query), since).Scan(&count)
 	return count, err
 }
 
@@ -274,10 +356,11 @@ func (s *Store) CountPRsInWindow(hours int) (int, error) {
 func (s *Store) CountResolvedInWindow(hours int) (int, error) {
 	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
 	var count int
-	err := s.db.QueryRow(`
+	query := `
 		SELECT COUNT(*) FROM tickets
-		WHERE status=? AND resolved_at > ?`, StatusResolved, since,
-	).Scan(&count)
+		WHERE status=? AND resolved_at > ?`
+
+	err := s.db.QueryRow(s.rebind(query), StatusResolved, since).Scan(&count)
 	return count, err
 }
 
@@ -285,12 +368,14 @@ func (s *Store) CountResolvedInWindow(hours int) (int, error) {
 // Used to inject historical context into LLM diagnosis.
 func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket, error) {
 	since := time.Now().UTC().Add(-90 * 24 * time.Hour)
-	rows, err := s.db.Query(`
+	query := `
 		SELECT id, source, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE type=? AND status=? AND id != ? AND created_at > ?
-		ORDER BY created_at DESC LIMIT ?`,
+		ORDER BY created_at DESC LIMIT ?`
+
+	rows, err := s.db.Query(s.rebind(query),
 		ticketType, StatusResolved, excludeID, since, limit,
 	)
 	if err != nil {
@@ -303,9 +388,11 @@ func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket,
 // ResolveByTenantService resolves open tickets matching tenant+service.
 func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
 	now := time.Now().UTC()
-	_, err := s.db.Exec(`
+	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
-		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)`,
+		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)`
+
+	_, err := s.db.Exec(s.rebind(query),
 		StatusResolved, now, now,
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	)

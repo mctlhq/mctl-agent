@@ -44,10 +44,10 @@ func main() {
 
 	cfg := config.Load()
 
-	// Initialize SQLite store.
-	store, err := ticket.NewStore(cfg.DBPath)
+	// Initialize database store.
+	store, err := ticket.NewStore(cfg.DatabaseURL)
 	if err != nil {
-		slog.Error("failed to initialize ticket store", "error", err, "path", cfg.DBPath)
+		slog.Error("failed to initialize ticket store", "error", err, "url", cfg.DatabaseURL)
 		os.Exit(1)
 	}
 	defer store.Close() //nolint:errcheck

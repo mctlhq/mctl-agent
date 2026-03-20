@@ -172,7 +172,35 @@ func GenerateCPUBump(content string) (string, string, error) {
 
 // GenerateProbeFix creates a patch that increases initialDelaySeconds for a probe.
 func GenerateProbeFix(content string, probeField string) (string, string, error) {
-// ... (omitting body for brevity)
+	lines := strings.Split(content, "\n")
+	var modified []string
+	summary := ""
+	inProbe := false
+
+	for _, line := range lines {
+		if strings.Contains(line, probeField+":") {
+			inProbe = true
+		}
+		if inProbe && strings.Contains(line, "initialDelaySeconds:") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				val, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
+				newVal := val + 30
+				if newVal < 60 {
+					newVal = 60
+				}
+				line = strings.Replace(line, parts[1], fmt.Sprintf(" %d", newVal), 1)
+				summary = fmt.Sprintf("Increase %s initialDelaySeconds to %d", probeField, newVal)
+				inProbe = false
+			}
+		}
+		modified = append(modified, line)
+	}
+
+	if summary == "" {
+		return content, "", fmt.Errorf("could not find %s initialDelaySeconds to bump", probeField)
+	}
+
 	return strings.Join(modified, "\n"), summary, nil
 }
 

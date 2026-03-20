@@ -34,7 +34,7 @@ type Config struct {
 	OpenClawBotUsername string
 	PollInterval        time.Duration
 	DryRun              bool
-	DBPath              string
+	DatabaseURL         string
 	MaxPRPerHour        int
 	MaxPRPerDay         int
 	AutoMergeEnabled    bool
@@ -73,6 +73,12 @@ func Load() Config {
 		autoMergeEnabled = false
 	}
 
+	// Priority: DATABASE_URL > DB_PATH > default
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = envOr("DB_PATH", "/data/mctl-agent.db")
+	}
+
 	return Config{
 		Port:                envOr("PORT", "8081"),
 		MctlAPIURL:          envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
@@ -87,7 +93,7 @@ func Load() Config {
 		OpenClawBotUsername: envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
 		PollInterval:        pollInterval,
 		DryRun:              dryRun,
-		DBPath:              envOr("DB_PATH", "/data/mctl-agent.db"),
+		DatabaseURL:         dbURL,
 		MaxPRPerHour:        maxPRPerHour,
 		MaxPRPerDay:         maxPRPerDay,
 		AutoMergeEnabled:    autoMergeEnabled,

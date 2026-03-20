@@ -24,10 +24,11 @@ import (
 
 // Metrics tracks skill execution statistics and provides circuit breaker functionality.
 type Metrics struct {
-	db                *sql.DB
-	mu                sync.RWMutex
-	circuitThreshold  float64 // Minimum success rate before auto-disable.
-	circuitWindow     int     // Number of recent executions to evaluate.
+	db               *sql.DB
+	dialect          string
+	mu               sync.RWMutex
+	circuitThreshold float64 // Minimum success rate before auto-disable.
+	circuitWindow    int     // Number of recent executions to evaluate.
 }
 
 // MetricsSnapshot contains the current stats for a skill.
@@ -44,10 +45,18 @@ type MetricsSnapshot struct {
 	CircuitOpen    bool    `json:"circuit_open"`
 }
 
-// NewMetrics creates a Metrics tracker with the given SQLite database.
+// NewMetrics creates a Metrics tracker with the given database.
 func NewMetrics(db *sql.DB, circuitThreshold float64, circuitWindow int) (*Metrics, error) {
+	// Detect dialect from DB connection (best effort)
+	dialect := "sqlite"
+	// Check if db is a postgres connection (lib/pq)
+	if fmt.Sprintf("%T", db.Driver()) == "*pq.Driver" {
+		dialect = "postgres"
+	}
+
 	m := &Metrics{
 		db:               db,
+		dialect:          dialect,
 		circuitThreshold: circuitThreshold,
 		circuitWindow:    circuitWindow,
 	}
@@ -57,18 +66,59 @@ func NewMetrics(db *sql.DB, circuitThreshold float64, circuitWindow int) (*Metri
 	return m, nil
 }
 
+func (m *Metrics) rebind(query string) string {
+	if m.dialect != "postgres" {
+		return query
+	}
+	// Replace ? with $1, $2, etc.
+	out := make([]byte, 0, len(query))
+	argIdx := 1
+	for i := 0; i < len(query); i++ {
+		if query[i] == '?' {
+			out = append(out, '$')
+			out = append(out, fmt.Sprintf("%d", argIdx)...)
+			argIdx++
+		} else {
+			out = append(out, query[i])
+		}
+	}
+	return string(out)
+}
+
 func (m *Metrics) migrate() error {
-	_, err := m.db.Exec(`
-		CREATE TABLE IF NOT EXISTS skill_executions (
-			id           INTEGER PRIMARY KEY AUTOINCREMENT,
-			skill_name   TEXT NOT NULL,
-			ticket_id    TEXT NOT NULL,
-			event        TEXT NOT NULL,
-			success      BOOLEAN NOT NULL DEFAULT 0,
-			duration_ms  INTEGER NOT NULL DEFAULT 0,
-			detail       TEXT NOT NULL DEFAULT '',
-			created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-		);
+	var err error
+	if m.dialect == "postgres" {
+		_, err = m.db.Exec(`
+			CREATE TABLE IF NOT EXISTS skill_executions (
+				id           SERIAL PRIMARY KEY,
+				skill_name   TEXT NOT NULL,
+				ticket_id    TEXT NOT NULL,
+				event        TEXT NOT NULL,
+				success      BOOLEAN NOT NULL DEFAULT FALSE,
+				duration_ms  INTEGER NOT NULL DEFAULT 0,
+				detail       TEXT NOT NULL DEFAULT '',
+				created_at   TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+			);
+		`)
+	} else {
+		_, err = m.db.Exec(`
+			CREATE TABLE IF NOT EXISTS skill_executions (
+				id           INTEGER PRIMARY KEY AUTOINCREMENT,
+				skill_name   TEXT NOT NULL,
+				ticket_id    TEXT NOT NULL,
+				event        TEXT NOT NULL,
+				success      BOOLEAN NOT NULL DEFAULT 0,
+				duration_ms  INTEGER NOT NULL DEFAULT 0,
+				detail       TEXT NOT NULL DEFAULT '',
+				created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			);
+		`)
+	}
+	if err != nil {
+		return err
+	}
+
+	_, err = m.db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_skill_exec_name ON skill_executions(skill_name);
 		CREATE INDEX IF NOT EXISTS idx_skill_exec_created ON skill_executions(created_at);
 	`)
@@ -100,9 +150,11 @@ func (m *Metrics) RecordResolution(skillName, ticketID string, resolved bool) {
 }
 
 func (m *Metrics) record(skillName, ticketID, event string, success bool, durationMs int64, detail string) {
-	_, err := m.db.Exec(`
+	query := `
 		INSERT INTO skill_executions (skill_name, ticket_id, event, success, duration_ms, detail)
-		VALUES (?, ?, ?, ?, ?, ?)`,
+		VALUES (?, ?, ?, ?, ?, ?)`
+
+	_, err := m.db.Exec(m.rebind(query),
 		skillName, ticketID, event, success, durationMs, detail,
 	)
 	if err != nil {
@@ -114,19 +166,27 @@ func (m *Metrics) record(skillName, ticketID, event string, success bool, durati
 func (m *Metrics) GetSnapshot(skillName string) MetricsSnapshot {
 	snap := MetricsSnapshot{SkillName: skillName}
 
-	_ = m.db.QueryRow(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='match'`,
+	_ = m.db.QueryRow(m.rebind(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='match'`),
 		skillName).Scan(&snap.TotalMatches)
 
-	_ = m.db.QueryRow(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='diagnose'`,
+	_ = m.db.QueryRow(m.rebind(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='diagnose'`),
 		skillName).Scan(&snap.TotalDiagnoses)
 
-	_ = m.db.QueryRow(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='fix'`,
+	_ = m.db.QueryRow(m.rebind(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='fix'`),
 		skillName).Scan(&snap.TotalFixes)
 
-	_ = m.db.QueryRow(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND success=1`,
+	// In Postgres success=1 might not work if it is a real BOOLEAN, better use boolean literals or adapt per dialect
+	successCond := "success=1"
+	failureCond := "success=0"
+	if m.dialect == "postgres" {
+		successCond = "success=TRUE"
+		failureCond = "success=FALSE"
+	}
+
+	_ = m.db.QueryRow(m.rebind(fmt.Sprintf(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND %s`, successCond)),
 		skillName).Scan(&snap.Successes)
 
-	_ = m.db.QueryRow(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND success=0`,
+	_ = m.db.QueryRow(m.rebind(fmt.Sprintf(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND %s`, failureCond)),
 		skillName).Scan(&snap.Failures)
 
 	total := snap.Successes + snap.Failures
@@ -134,11 +194,11 @@ func (m *Metrics) GetSnapshot(skillName string) MetricsSnapshot {
 		snap.SuccessRate = float64(snap.Successes) / float64(total)
 	}
 
-	_ = m.db.QueryRow(`SELECT COALESCE(AVG(duration_ms), 0) FROM skill_executions WHERE skill_name=? AND event='diagnose' AND duration_ms > 0`,
+	_ = m.db.QueryRow(m.rebind(`SELECT COALESCE(AVG(duration_ms), 0) FROM skill_executions WHERE skill_name=? AND event='diagnose' AND duration_ms > 0`),
 		skillName).Scan(&snap.AvgDurationMs)
 
 	var lastAt sql.NullString
-	_ = m.db.QueryRow(`SELECT MAX(created_at) FROM skill_executions WHERE skill_name=?`, skillName).Scan(&lastAt)
+	_ = m.db.QueryRow(m.rebind(`SELECT MAX(created_at) FROM skill_executions WHERE skill_name=?`), skillName).Scan(&lastAt)
 	if lastAt.Valid {
 		snap.LastExecutedAt = lastAt.String
 	}
@@ -173,16 +233,23 @@ func (m *Metrics) IsCircuitOpen(skillName string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	successCond := "success"
+	if m.dialect != "postgres" {
+		successCond = "success=1"
+	}
+
 	var successes, total int
-	_ = m.db.QueryRow(`
+	query := fmt.Sprintf(`
 		SELECT 
-			COALESCE(SUM(CASE WHEN success THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN %s THEN 1 ELSE 0 END), 0),
 			COUNT(*)
 		FROM (
 			SELECT success FROM skill_executions
 			WHERE skill_name=? AND event='resolution'
 			ORDER BY created_at DESC LIMIT ?
-		)`,
+		) sub`, successCond)
+
+	_ = m.db.QueryRow(m.rebind(query),
 		skillName, m.circuitWindow,
 	).Scan(&successes, &total)
 
