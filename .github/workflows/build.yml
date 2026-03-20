@@ -94,7 +94,7 @@ jobs:
           cd /tmp/mctl-gitops
           python3 - <<'PYEOF'
           import re, os
-          f = 'platform-gitops/services/admins/mctl-agent/values.yaml'
+          f = 'platform-gitops/apps/templates/mctl-platform/mctl-agent.yaml'
           version = os.environ['VERSION']
           content = open(f).read()
           content = re.sub(
@@ -106,7 +106,7 @@ jobs:
           PYEOF
           git config user.email "ci@mctl.ai"
           git config user.name "mctl-ci"
-          git add platform-gitops/services/admins/mctl-agent/values.yaml
+          git add platform-gitops/apps/templates/mctl-platform/mctl-agent.yaml
           git diff --staged --quiet || git commit -m "chore: bump mctl-agent to ${VERSION}"
           git push
 
