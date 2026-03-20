@@ -164,7 +164,7 @@ AlertManager configuration examples are in [`examples/`](examples/).
 
 ## Related Projects
 
-- [mctl-api](https://github.com/mctlhq/mctl-api) — REST API + MCP server (Go)
+- [mctl-api](https://github.com/mctlhq/mctl-api) — REST API + MCP server (Go, Claude, Gemini)
 - [mctl-gitops](https://github.com/mctlhq/mctl-gitops) — GitOps source of truth + CLI (Helm, ArgoCD, Go)
 - [mctl-portal](https://github.com/mctlhq/mctl-portal) — Developer portal (TypeScript, Backstage)
 - [mctl-web](https://github.com/mctlhq/mctl-web) — Landing page + MCP connector (HTML, Cloudflare)
