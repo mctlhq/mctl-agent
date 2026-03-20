@@ -302,6 +302,10 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		newContent, summary, patchErr = fixer.GenerateCPUBump(content)
 	case "adjust_probe":
 		newContent, summary, patchErr = fixer.GenerateProbeFix(content, diag.YAMLField)
+	case "fix_workflow_params":
+		newContent, summary, patchErr = fixer.GenerateWorkflowParamFix(content)
+	case "fix_appproject_whitelist":
+		newContent, summary, patchErr = fixer.GenerateAppProjectWhitelistFix(content)
 	case "rollback_image":
 		patchErr = fmt.Errorf("image rollback requires previous tag — not yet implemented")
 	default:
