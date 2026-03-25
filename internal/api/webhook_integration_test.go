@@ -40,6 +40,11 @@ func TestExternalWebhookEndToEnd(t *testing.T) {
 
 	eventCh := make(chan webhook.Event, 1)
 	externalSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer hook-token" {
+			t.Errorf("unexpected authorization header: %q", got)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
 		body, _ := io.ReadAll(r.Body)
 		ts := r.Header.Get("X-Mctl-Webhook-Timestamp")
 		sig := r.Header.Get("X-Mctl-Webhook-Signature")
@@ -60,11 +65,13 @@ func TestExternalWebhookEndToEnd(t *testing.T) {
 	defer externalSrv.Close()
 
 	if err := webhookStore.CreateEndpoint(&webhook.WebhookEndpoint{
-		AgentID:    "openclaw-prod",
-		URL:        externalSrv.URL,
-		Secret:     "secret",
-		EventTypes: []string{string(webhook.EventTicketCreated)},
-		Active:     true,
+		AgentID:         "openclaw-prod",
+		URL:             externalSrv.URL,
+		Secret:          "secret",
+		AuthHeaderName:  "Authorization",
+		AuthHeaderValue: "Bearer hook-token",
+		EventTypes:      []string{string(webhook.EventTicketCreated)},
+		Active:          true,
 	}); err != nil {
 		t.Fatal(err)
 	}

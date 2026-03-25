@@ -25,11 +25,13 @@ func newWebhookStore(t *testing.T) *Store {
 func TestEndpointCRUDAndClaims(t *testing.T) {
 	store := newWebhookStore(t)
 	ep := &WebhookEndpoint{
-		AgentID:    "openclaw-prod",
-		URL:        "https://example.com/hook",
-		Secret:     "secret",
-		EventTypes: []string{string(EventTicketCreated), string(EventTicketFixFailed)},
-		Active:     true,
+		AgentID:         "openclaw-prod",
+		URL:             "https://example.com/hook",
+		Secret:          "secret",
+		AuthHeaderName:  "Authorization",
+		AuthHeaderValue: "Bearer test-token",
+		EventTypes:      []string{string(EventTicketCreated), string(EventTicketFixFailed)},
+		Active:          true,
 	}
 	if err := store.CreateEndpoint(ep); err != nil {
 		t.Fatal(err)
@@ -40,6 +42,9 @@ func TestEndpointCRUDAndClaims(t *testing.T) {
 	}
 	if len(items) != 1 {
 		t.Fatalf("expected 1 endpoint, got %d", len(items))
+	}
+	if items[0].AuthHeaderName != "Authorization" || items[0].AuthHeaderValue != "Bearer test-token" {
+		t.Fatalf("expected auth header fields to round-trip, got %#v", items[0])
 	}
 
 	event := &Event{ID: "evt_1", Type: EventTicketCreated, OccurredAt: time.Now().UTC()}
@@ -68,4 +73,3 @@ func TestEndpointCRUDAndClaims(t *testing.T) {
 		t.Fatalf("expected ErrAlreadyClaimed, got %v", err)
 	}
 }
-

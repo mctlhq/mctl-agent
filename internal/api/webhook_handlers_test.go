@@ -35,7 +35,7 @@ func newWebhookEnabledRouter(t *testing.T) http.Handler {
 
 func TestWebhookRegisterListDelete(t *testing.T) {
 	router := newWebhookEnabledRouter(t)
-	body := []byte(`{"agent_id":"openclaw-prod","url":"https://example.com/hook","secret":"secret","event_types":["ticket.created"]}`)
+	body := []byte(`{"agent_id":"openclaw-prod","url":"https://example.com/hook","secret":"secret","auth_header_name":"Authorization","auth_header_value":"Bearer hook-token","event_types":["ticket.created"]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks", bytes.NewReader(body))
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
@@ -56,6 +56,9 @@ func TestWebhookRegisterListDelete(t *testing.T) {
 	items := list["items"].([]interface{})
 	if len(items) != 1 {
 		t.Fatalf("expected 1 webhook, got %d", len(items))
+	}
+	if items[0].(map[string]interface{})["auth_header_name"].(string) != "Authorization" {
+		t.Fatalf("expected auth_header_name in list response, got %v", items[0])
 	}
 	id := items[0].(map[string]interface{})["id"].(string)
 

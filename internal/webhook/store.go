@@ -52,9 +52,11 @@ func (s *Store) migrate() error {
 		stmts = append(stmts,
 			`CREATE TABLE IF NOT EXISTS webhook_endpoints (
 			id TEXT PRIMARY KEY,
-			agent_id TEXT NOT NULL UNIQUE,
+			agent_id TEXT NOT NULL,
 			url TEXT NOT NULL,
 			secret TEXT NOT NULL,
+			auth_header_name TEXT NOT NULL DEFAULT '',
+			auth_header_value TEXT NOT NULL DEFAULT '',
 			event_types TEXT NOT NULL DEFAULT '[]',
 			active BOOLEAN NOT NULL DEFAULT true,
 			created_at TIMESTAMPTZ NOT NULL,
@@ -98,9 +100,11 @@ func (s *Store) migrate() error {
 		stmts = append(stmts,
 			`CREATE TABLE IF NOT EXISTS webhook_endpoints (
 			id TEXT PRIMARY KEY,
-			agent_id TEXT NOT NULL UNIQUE,
+			agent_id TEXT NOT NULL,
 			url TEXT NOT NULL,
 			secret TEXT NOT NULL,
+			auth_header_name TEXT NOT NULL DEFAULT '',
+			auth_header_value TEXT NOT NULL DEFAULT '',
 			event_types TEXT NOT NULL DEFAULT '[]',
 			active BOOLEAN NOT NULL DEFAULT true,
 			created_at DATETIME NOT NULL,
@@ -152,6 +156,18 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
+	for _, stmt := range []string{
+		`ALTER TABLE webhook_endpoints ADD COLUMN auth_header_name TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE webhook_endpoints ADD COLUMN auth_header_value TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "duplicate column") || strings.Contains(msg, "already exists") {
+				continue
+			}
+			return err
+		}
+	}
 	return nil
 }
 
@@ -191,15 +207,15 @@ func (s *Store) CreateEndpoint(ep *WebhookEndpoint) error {
 		ep.Active = true
 	}
 	eventJSON, _ := json.Marshal(ep.EventTypes)
-	_, err = s.db.Exec(s.rebind(`INSERT INTO webhook_endpoints (id, agent_id, url, secret, event_types, active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`),
-		ep.ID, ep.AgentID, ep.URL, ep.Secret, string(eventJSON), ep.Active, ep.CreatedAt, ep.UpdatedAt,
+	_, err = s.db.Exec(s.rebind(`INSERT INTO webhook_endpoints (id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		ep.ID, ep.AgentID, ep.URL, ep.Secret, ep.AuthHeaderName, ep.AuthHeaderValue, string(eventJSON), ep.Active, ep.CreatedAt, ep.UpdatedAt,
 	)
 	return err
 }
 
 func (s *Store) ListEndpoints() ([]WebhookEndpoint, error) {
-	rows, err := s.db.Query(s.rebind(`SELECT id, agent_id, url, secret, event_types, active, created_at, updated_at FROM webhook_endpoints ORDER BY created_at`))
+	rows, err := s.db.Query(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at FROM webhook_endpoints ORDER BY created_at`))
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +224,7 @@ func (s *Store) ListEndpoints() ([]WebhookEndpoint, error) {
 	for rows.Next() {
 		var ep WebhookEndpoint
 		var eventJSON string
-		if err := rows.Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
+		if err := rows.Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(eventJSON), &ep.EventTypes)
@@ -225,8 +241,8 @@ func (s *Store) DeleteEndpoint(id string) error {
 func (s *Store) GetEndpointByAgentID(agentID string) (*WebhookEndpoint, error) {
 	var ep WebhookEndpoint
 	var eventJSON string
-	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, event_types, active, created_at, updated_at FROM webhook_endpoints WHERE agent_id=? AND active=true`), agentID).
-		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
+	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at FROM webhook_endpoints WHERE agent_id=? AND active=true ORDER BY created_at DESC LIMIT 1`), agentID).
+		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -319,8 +335,8 @@ func (s *Store) listPendingDeliveries(now time.Time, limit int) ([]ExternalDeliv
 func (s *Store) getEndpointByID(id string) (*WebhookEndpoint, error) {
 	var ep WebhookEndpoint
 	var eventJSON string
-	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, event_types, active, created_at, updated_at FROM webhook_endpoints WHERE id=?`), id).
-		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
+	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at FROM webhook_endpoints WHERE id=?`), id).
+		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}

@@ -160,6 +160,9 @@ func (d *Dispatcher) dispatchOne(ctx context.Context, delivery ExternalDelivery)
 	req.Header.Set("X-Mctl-Event-Type", string(ev.Type))
 	req.Header.Set("X-Mctl-Webhook-Timestamp", timestamp)
 	req.Header.Set("X-Mctl-Webhook-Signature", Sign(payload, timestamp, ep.Secret))
+	if ep.AuthHeaderName != "" && ep.AuthHeaderValue != "" {
+		req.Header.Set(ep.AuthHeaderName, ep.AuthHeaderValue)
+	}
 
 	resp, err := d.httpClient.Do(req)
 	attempt := delivery.Attempt + 1

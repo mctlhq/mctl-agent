@@ -16,10 +16,12 @@ import (
 )
 
 type webhookCreateRequest struct {
-	AgentID    string   `json:"agent_id"`
-	URL        string   `json:"url"`
-	Secret     string   `json:"secret"`
-	EventTypes []string `json:"event_types"`
+	AgentID         string   `json:"agent_id"`
+	URL             string   `json:"url"`
+	Secret          string   `json:"secret"`
+	AuthHeaderName  string   `json:"auth_header_name"`
+	AuthHeaderValue string   `json:"auth_header_value"`
+	EventTypes      []string `json:"event_types"`
 }
 
 func webhookListHandler(store *webhook.Store) http.HandlerFunc {
@@ -32,6 +34,9 @@ func webhookListHandler(store *webhook.Store) http.HandlerFunc {
 		for i := range items {
 			if items[i].Secret != "" {
 				items[i].Secret = "redacted"
+			}
+			if items[i].AuthHeaderValue != "" {
+				items[i].AuthHeaderValue = "redacted"
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]interface{}{"items": items, "count": len(items)})
@@ -50,12 +55,14 @@ func webhookCreateHandler(store *webhook.Store) http.HandlerFunc {
 			return
 		}
 		ep := &webhook.WebhookEndpoint{
-			ID:         uuid.New().String(),
-			AgentID:    req.AgentID,
-			URL:        req.URL,
-			Secret:     req.Secret,
-			EventTypes: req.EventTypes,
-			Active:     true,
+			ID:              uuid.New().String(),
+			AgentID:         req.AgentID,
+			URL:             req.URL,
+			Secret:          req.Secret,
+			AuthHeaderName:  req.AuthHeaderName,
+			AuthHeaderValue: req.AuthHeaderValue,
+			EventTypes:      req.EventTypes,
+			Active:          true,
 		}
 		if err := store.CreateEndpoint(ep); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})

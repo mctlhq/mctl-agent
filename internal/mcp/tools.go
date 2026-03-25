@@ -214,6 +214,9 @@ func (s *Server) registerListWebhooks() {
 			if items[i].Secret != "" {
 				items[i].Secret = "redacted"
 			}
+			if items[i].AuthHeaderValue != "" {
+				items[i].AuthHeaderValue = "redacted"
+			}
 		}
 		return jsonResult(map[string]interface{}{"items": items, "count": len(items)})
 	})
@@ -226,10 +229,12 @@ func (s *Server) registerRegisterWebhook() {
 		InputSchema: InputSchema{
 			Type: "object",
 			Properties: map[string]SchemaField{
-				"agent_id":    {Type: "string", Description: "External agent identifier"},
-				"url":         {Type: "string", Description: "Webhook URL"},
-				"secret":      {Type: "string", Description: "Shared secret for HMAC signing"},
-				"event_types": {Type: "array", Description: "Subscribed event types"},
+				"agent_id":          {Type: "string", Description: "External agent identifier"},
+				"url":               {Type: "string", Description: "Webhook URL"},
+				"secret":            {Type: "string", Description: "Shared secret for HMAC signing"},
+				"auth_header_name":  {Type: "string", Description: "Optional delivery auth header name"},
+				"auth_header_value": {Type: "string", Description: "Optional delivery auth header value"},
+				"event_types":       {Type: "array", Description: "Subscribed event types"},
 			},
 			Required: []string{"agent_id", "url", "secret", "event_types"},
 		},
@@ -240,16 +245,29 @@ func (s *Server) registerRegisterWebhook() {
 		agentID, _ := params["agent_id"].(string)
 		url, _ := params["url"].(string)
 		secret, _ := params["secret"].(string)
+		authHeaderName, _ := params["auth_header_name"].(string)
+		authHeaderValue, _ := params["auth_header_value"].(string)
 		rawEvents, _ := params["event_types"].([]interface{})
 		eventTypes := make([]string, 0, len(rawEvents))
 		for _, item := range rawEvents {
 			eventTypes = append(eventTypes, fmt.Sprintf("%v", item))
 		}
-		ep := &webhook.WebhookEndpoint{AgentID: agentID, URL: url, Secret: secret, EventTypes: eventTypes, Active: true}
+		ep := &webhook.WebhookEndpoint{
+			AgentID:         agentID,
+			URL:             url,
+			Secret:          secret,
+			AuthHeaderName:  authHeaderName,
+			AuthHeaderValue: authHeaderValue,
+			EventTypes:      eventTypes,
+			Active:          true,
+		}
 		if err := s.webhooks.CreateEndpoint(ep); err != nil {
 			return nil, err
 		}
-		return jsonResult(map[string]interface{}{"id": ep.ID, "agent_id": ep.AgentID, "url": ep.URL, "event_types": ep.EventTypes, "active": ep.Active})
+		return jsonResult(map[string]interface{}{
+			"id": ep.ID, "agent_id": ep.AgentID, "url": ep.URL, "event_types": ep.EventTypes, "active": ep.Active,
+			"auth_header_name": ep.AuthHeaderName,
+		})
 	})
 }
 

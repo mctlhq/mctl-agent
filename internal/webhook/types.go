@@ -79,14 +79,16 @@ type Event struct {
 }
 
 type WebhookEndpoint struct {
-	ID         string    `json:"id"`
-	AgentID    string    `json:"agent_id"`
-	URL        string    `json:"url"`
-	Secret     string    `json:"secret,omitempty"`
-	EventTypes []string  `json:"event_types"`
-	Active     bool      `json:"active"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID              string    `json:"id"`
+	AgentID         string    `json:"agent_id"`
+	URL             string    `json:"url"`
+	Secret          string    `json:"secret,omitempty"`
+	AuthHeaderName  string    `json:"auth_header_name,omitempty"`
+	AuthHeaderValue string    `json:"auth_header_value,omitempty"`
+	EventTypes      []string  `json:"event_types"`
+	Active          bool      `json:"active"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type ExternalDelivery struct {
