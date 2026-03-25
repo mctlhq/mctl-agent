@@ -212,8 +212,8 @@ func TestAllSkillsRegistered(t *testing.T) {
 	RegisterAll(reg, "test-key")
 
 	infos := reg.List()
-	if len(infos) != 10 {
-		t.Fatalf("expected 10 skills, got %d", len(infos))
+	if len(infos) != 11 {
+		t.Fatalf("expected 11 skills, got %d", len(infos))
 	}
 
 	names := map[string]bool{}
@@ -230,7 +230,7 @@ func TestAllSkillsRegistered(t *testing.T) {
 	expected := []string{
 		"oomkilled", "imagepull", "post_deploy_rollback", "argocd_drift",
 		"llm_diagnosis", "probe_fix", "cpu_throttle", "quota_adjust", "scale_up",
-		"github_actions",
+		"github_actions", "workflow_fixer",
 	}
 	for _, name := range expected {
 		if !names[name] {
@@ -319,7 +319,7 @@ func TestQuotaAdjustSkillMatch(t *testing.T) {
 
 func TestAutoMergeSafe(t *testing.T) {
 	tests := []struct {
-		name string
+		name  string
 		skill skill.Skill
 		safe  bool
 	}{

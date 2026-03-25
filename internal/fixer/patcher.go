@@ -175,19 +175,27 @@ func GenerateProbeFix(content string, probeField string) (string, string, error)
 	lines := strings.Split(content, "\n")
 	var modified []string
 	summary := ""
+	probeName := strings.TrimSuffix(probeField, ".initialDelaySeconds")
 	inProbe := false
+	probeIndent := ""
 
 	for _, line := range lines {
-		if strings.Contains(line, probeField+":") {
+		trimmed := strings.TrimSpace(line)
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		if trimmed == probeName+":" {
 			inProbe = true
+			probeIndent = indent
 		}
-		if inProbe && strings.Contains(line, "initialDelaySeconds:") {
+		if inProbe && indent == probeIndent && trimmed != "" && trimmed != probeName+":" && !strings.HasPrefix(trimmed, "initialDelaySeconds:") && !strings.HasPrefix(indent, probeIndent+" ") && !strings.HasPrefix(indent, probeIndent+"\t") {
+			inProbe = false
+		}
+		if inProbe && strings.HasPrefix(trimmed, "initialDelaySeconds:") {
 			parts := strings.Split(line, ":")
 			if len(parts) == 2 {
 				val, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-				newVal := val + 30
-				if newVal < 60 {
-					newVal = 60
+				newVal := val + 15
+				if newVal < 30 {
+					newVal = 30
 				}
 				line = strings.Replace(line, parts[1], fmt.Sprintf(" %d", newVal), 1)
 				summary = fmt.Sprintf("Increase %s initialDelaySeconds to %d", probeField, newVal)
