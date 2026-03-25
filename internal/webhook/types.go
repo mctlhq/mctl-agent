@@ -64,9 +64,11 @@ type DiagnosisPayload struct {
 }
 
 type DeliveryInfo struct {
-	ClaimURL        string `json:"claim_url"`
-	ResultURL       string `json:"result_url"`
-	LeaseTTLSeconds int    `json:"lease_ttl_seconds"`
+	ClaimURL           string `json:"claim_url"`
+	ResultURL          string `json:"result_url"`
+	LeaseTTLSeconds    int    `json:"lease_ttl_seconds"`
+	CallbackAuthHeader string `json:"callback_auth_header,omitempty"`
+	CallbackAuthValue  string `json:"callback_auth_value,omitempty"`
 }
 
 type Event struct {

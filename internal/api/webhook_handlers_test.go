@@ -98,7 +98,16 @@ func TestExternalClaimAndResult(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	event := &webhook.Event{ID: "evt_1", Type: webhook.EventTicketCreated, OccurredAt: time.Now().UTC()}
+	event := &webhook.Event{
+		ID:         "evt_1",
+		Type:       webhook.EventTicketCreated,
+		OccurredAt: time.Now().UTC(),
+		Ticket:     webhook.TicketPayload{ID: tk.ID},
+		Delivery: webhook.DeliveryInfo{
+			CallbackAuthHeader: "Authorization",
+			CallbackAuthValue:  "Bearer event-token",
+		},
+	}
 	if err := webhookStore.SaveEvent(event, tk.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -115,10 +124,8 @@ func TestExternalClaimAndResult(t *testing.T) {
 	})
 
 	claimBody := []byte(`{"agent_id":"openclaw-prod","event_id":"evt_1"}`)
-	ts := time.Now().UTC().Format(time.RFC3339)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tickets/"+tk.ID+"/external-claims", bytes.NewReader(claimBody))
-	req.Header.Set("X-Mctl-Webhook-Timestamp", ts)
-	req.Header.Set("X-Mctl-Webhook-Signature", webhook.Sign(claimBody, ts, "secret"))
+	req.Header.Set("Authorization", "Bearer event-token")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -139,10 +146,8 @@ func TestExternalClaimAndResult(t *testing.T) {
 		Artifacts:      map[string]string{"pr_url": "https://github.com/mctlhq/mctl-gitops/pull/42"},
 	}
 	resultBody, _ := json.Marshal(result)
-	ts = time.Now().UTC().Format(time.RFC3339)
 	req = httptest.NewRequest(http.MethodPatch, "/api/v1/tickets/"+tk.ID+"/external-results", bytes.NewReader(resultBody))
-	req.Header.Set("X-Mctl-Webhook-Timestamp", ts)
-	req.Header.Set("X-Mctl-Webhook-Signature", webhook.Sign(resultBody, ts, "secret"))
+	req.Header.Set("Authorization", "Bearer event-token")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -155,5 +160,66 @@ func TestExternalClaimAndResult(t *testing.T) {
 	}
 	if updated.PRNumber != 42 || updated.Status != ticket.StatusFixProposed {
 		t.Fatalf("ticket not updated: pr=%d status=%s", updated.PRNumber, updated.Status)
+	}
+}
+
+func TestExternalClaimRejectsWrongBearerToken(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceManual,
+		Type:     ticket.TypeGeneric,
+		Tenant:   "labs",
+		Service:  "svc",
+		Summary:  "test",
+		Severity: ticket.SeverityWarning,
+		Status:   ticket.StatusOpen,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	webhookStore, err := webhook.NewStore(store.DB(), store.Dialect())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := webhookStore.CreateEndpoint(&webhook.WebhookEndpoint{
+		AgentID:    "openclaw-prod",
+		URL:        "https://example.com/hook",
+		Secret:     "secret",
+		EventTypes: []string{string(webhook.EventTicketCreated)},
+		Active:     true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	event := &webhook.Event{
+		ID:         "evt_unauth",
+		Type:       webhook.EventTicketCreated,
+		OccurredAt: time.Now().UTC(),
+		Ticket:     webhook.TicketPayload{ID: tk.ID},
+		Delivery: webhook.DeliveryInfo{
+			CallbackAuthHeader: "Authorization",
+			CallbackAuthValue:  "Bearer expected-token",
+		},
+	}
+	if err := webhookStore.SaveEvent(event, tk.ID); err != nil {
+		t.Fatal(err)
+	}
+	router := NewRouter(Options{
+		Store:        store,
+		Pipeline:     pipe,
+		Telegram:     notify.NewTelegram("", "", ""),
+		WebhookStore: webhookStore,
+		WebhookTTL:   15 * time.Minute,
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+	claimBody := []byte(`{"agent_id":"openclaw-prod","event_id":"evt_unauth"}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/tickets/"+tk.ID+"/external-claims", bytes.NewReader(claimBody))
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d body=%s", rec.Code, rec.Body.String())
 	}
 }

@@ -83,6 +83,31 @@ func webhookDeleteHandler(store *webhook.Store) http.HandlerFunc {
 	}
 }
 
+func authorizeExternalCallback(
+	r *http.Request,
+	body []byte,
+	agentID string,
+	event *webhook.Event,
+	webhookStore *webhook.Store,
+) bool {
+	if event != nil && event.Delivery.CallbackAuthValue != "" {
+		headerName := strings.TrimSpace(event.Delivery.CallbackAuthHeader)
+		if headerName == "" {
+			headerName = "Authorization"
+		}
+		if r.Header.Get(headerName) == event.Delivery.CallbackAuthValue {
+			return true
+		}
+	}
+	ep, err := webhookStore.GetEndpointByAgentID(agentID)
+	if err != nil {
+		return false
+	}
+	ts := r.Header.Get("X-Mctl-Webhook-Timestamp")
+	sig := r.Header.Get("X-Mctl-Webhook-Signature")
+	return webhook.Verify(body, ts, sig, ep.Secret)
+}
+
 func externalClaimHandler(ticketStore *ticket.Store, webhookStore *webhook.Store, leaseTTLSeconds int) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ticketID := chi.URLParam(r, "id")
@@ -96,15 +121,21 @@ func externalClaimHandler(ticketStore *ticket.Store, webhookStore *webhook.Store
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
 		}
-		ep, err := webhookStore.GetEndpointByAgentID(req.AgentID)
-		if err != nil {
+		if _, err := webhookStore.GetEndpointByAgentID(req.AgentID); err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unknown agent_id"})
 			return
 		}
-		ts := r.Header.Get("X-Mctl-Webhook-Timestamp")
-		sig := r.Header.Get("X-Mctl-Webhook-Signature")
-		if !webhook.Verify(body, ts, sig, ep.Secret) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
+		ev, err := webhookStore.GetEvent(req.EventID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "event not found"})
+			return
+		}
+		if ev.Ticket.ID != ticketID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ticket/event mismatch"})
+			return
+		}
+		if !authorizeExternalCallback(r, body, req.AgentID, ev, webhookStore) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid callback auth"})
 			return
 		}
 		if _, err := ticketStore.Get(ticketID); err != nil {
@@ -154,15 +185,21 @@ func externalResultHandler(ticketStore *ticket.Store, webhookStore *webhook.Stor
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
 		}
-		ep, err := webhookStore.GetEndpointByAgentID(req.AgentID)
-		if err != nil {
+		if _, err := webhookStore.GetEndpointByAgentID(req.AgentID); err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unknown agent_id"})
 			return
 		}
-		ts := r.Header.Get("X-Mctl-Webhook-Timestamp")
-		sig := r.Header.Get("X-Mctl-Webhook-Signature")
-		if !webhook.Verify(body, ts, sig, ep.Secret) {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid signature"})
+		ev, err := webhookStore.GetEvent(req.EventID)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "event not found"})
+			return
+		}
+		if ev.Ticket.ID != ticketID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ticket/event mismatch"})
+			return
+		}
+		if !authorizeExternalCallback(r, body, req.AgentID, ev, webhookStore) {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid callback auth"})
 			return
 		}
 		claim, err := webhookStore.GetActiveClaim(req.LeaseID, req.EventID, req.AgentID)

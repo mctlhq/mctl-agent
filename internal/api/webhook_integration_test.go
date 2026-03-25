@@ -112,13 +112,17 @@ func TestExternalWebhookEndToEnd(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("timed out waiting for webhook delivery")
 	}
+	if ev.Delivery.CallbackAuthHeader != "Authorization" {
+		t.Fatalf("expected callback auth header, got %q", ev.Delivery.CallbackAuthHeader)
+	}
+	if ev.Delivery.CallbackAuthValue == "" {
+		t.Fatal("expected callback auth value in delivered event")
+	}
 
 	claimReq := webhook.ClaimRequest{AgentID: "openclaw-prod", EventID: ev.ID}
 	claimBody, _ := json.Marshal(claimReq)
-	ts := time.Now().UTC().Format(time.RFC3339)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/tickets/"+tk.ID+"/external-claims", bytes.NewReader(claimBody))
-	req.Header.Set("X-Mctl-Webhook-Timestamp", ts)
-	req.Header.Set("X-Mctl-Webhook-Signature", webhook.Sign(claimBody, ts, "secret"))
+	req.Header.Set(ev.Delivery.CallbackAuthHeader, ev.Delivery.CallbackAuthValue)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -139,10 +143,8 @@ func TestExternalWebhookEndToEnd(t *testing.T) {
 		Artifacts:      map[string]string{"pr_url": "https://github.com/mctlhq/mctl-gitops/pull/99"},
 	}
 	resultBody, _ := json.Marshal(result)
-	ts = time.Now().UTC().Format(time.RFC3339)
 	req = httptest.NewRequest(http.MethodPatch, "/api/v1/tickets/"+tk.ID+"/external-results", bytes.NewReader(resultBody))
-	req.Header.Set("X-Mctl-Webhook-Timestamp", ts)
-	req.Header.Set("X-Mctl-Webhook-Signature", webhook.Sign(resultBody, ts, "secret"))
+	req.Header.Set(ev.Delivery.CallbackAuthHeader, ev.Delivery.CallbackAuthValue)
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {

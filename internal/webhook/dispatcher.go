@@ -47,6 +47,7 @@ func (d *Dispatcher) Emit(ctx context.Context, eventType EventType, tk *ticket.T
 		return nil
 	}
 	eventID := "evt_" + uuid.New().String()
+	callbackToken := "mctl_evt_" + uuid.New().String()
 	ev := &Event{
 		ID:         eventID,
 		Type:       eventType,
@@ -63,9 +64,11 @@ func (d *Dispatcher) Emit(ctx context.Context, eventType EventType, tk *ticket.T
 			Confidence: tk.Confidence,
 		},
 		Delivery: DeliveryInfo{
-			ClaimURL:        d.callbackURL + "/api/v1/tickets/" + tk.ID + "/external-claims",
-			ResultURL:       d.callbackURL + "/api/v1/tickets/" + tk.ID + "/external-results",
-			LeaseTTLSeconds: int(d.defaultTTL.Seconds()),
+			ClaimURL:           d.callbackURL + "/api/v1/tickets/" + tk.ID + "/external-claims",
+			ResultURL:          d.callbackURL + "/api/v1/tickets/" + tk.ID + "/external-results",
+			LeaseTTLSeconds:    int(d.defaultTTL.Seconds()),
+			CallbackAuthHeader: "Authorization",
+			CallbackAuthValue:  "Bearer " + callbackToken,
 		},
 	}
 	if diag != nil {
