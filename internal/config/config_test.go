@@ -89,3 +89,25 @@ func TestLoadInvalidPollInterval(t *testing.T) {
 		t.Errorf("PollInterval = %v, want 5m (default)", cfg.PollInterval)
 	}
 }
+
+func TestLoadUsesGitHubTokenForLegacyMctlAPIToken(t *testing.T) {
+	t.Setenv("MCTL_API_TOKEN", "mctl-prod-token-2026-v1")
+	t.Setenv("GITHUB_TOKEN", "gho_live123")
+
+	cfg := Load()
+
+	if cfg.MctlAPIToken != "gho_live123" {
+		t.Fatalf("MctlAPIToken = %q, want GitHub token fallback", cfg.MctlAPIToken)
+	}
+}
+
+func TestLoadPreservesExplicitGitHubStyleMctlAPIToken(t *testing.T) {
+	t.Setenv("MCTL_API_TOKEN", "ghp_api_override")
+	t.Setenv("GITHUB_TOKEN", "gho_live123")
+
+	cfg := Load()
+
+	if cfg.MctlAPIToken != "ghp_api_override" {
+		t.Fatalf("MctlAPIToken = %q, want explicit override", cfg.MctlAPIToken)
+	}
+}

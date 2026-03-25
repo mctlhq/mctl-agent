@@ -17,6 +17,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -94,12 +95,21 @@ func Load() Config {
 		dbURL = envOr("DB_PATH", "/data/mctl-agent.db")
 	}
 
+	githubToken := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
+	mctlAPIToken := strings.TrimSpace(os.Getenv("MCTL_API_TOKEN"))
+	// mctl-api currently authenticates bearer tokens through the GitHub/Dex path.
+	// Older service tokens like "mctl-prod-token-..." no longer validate there.
+	// Prefer a GitHub token when the dedicated API token is absent or clearly legacy.
+	if githubToken != "" && (mctlAPIToken == "" || strings.HasPrefix(mctlAPIToken, "mctl-")) {
+		mctlAPIToken = githubToken
+	}
+
 	return Config{
 		Port:                envOr("PORT", "8081"),
 		MctlAPIURL:          envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
-		MctlAPIToken:        os.Getenv("MCTL_API_TOKEN"),
+		MctlAPIToken:        mctlAPIToken,
 		AnthropicAPIKey:     os.Getenv("ANTHROPIC_API_KEY"),
-		GitHubToken:         os.Getenv("GITHUB_TOKEN"),
+		GitHubToken:         githubToken,
 		GitHubOwner:         envOr("GITHUB_OWNER", "mctlhq"),
 		GitHubRepo:          envOr("GITHUB_REPO", "mctl-gitops"),
 		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
