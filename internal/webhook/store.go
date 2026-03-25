@@ -47,8 +47,56 @@ func (s *Store) rebind(query string) string {
 }
 
 func (s *Store) migrate() error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS webhook_endpoints (
+	stmts := []string{}
+	if s.dialect == "postgres" {
+		stmts = append(stmts,
+			`CREATE TABLE IF NOT EXISTS webhook_endpoints (
+			id TEXT PRIMARY KEY,
+			agent_id TEXT NOT NULL UNIQUE,
+			url TEXT NOT NULL,
+			secret TEXT NOT NULL,
+			event_types TEXT NOT NULL DEFAULT '[]',
+			active BOOLEAN NOT NULL DEFAULT true,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+			`CREATE TABLE IF NOT EXISTS external_events (
+			id TEXT PRIMARY KEY,
+			event_type TEXT NOT NULL,
+			ticket_id TEXT NOT NULL,
+			payload TEXT NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL
+		)`,
+			`CREATE TABLE IF NOT EXISTS external_deliveries (
+			id TEXT PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			webhook_id TEXT NOT NULL,
+			attempt INTEGER NOT NULL DEFAULT 0,
+			status TEXT NOT NULL DEFAULT 'pending',
+			response_code INTEGER NOT NULL DEFAULT 0,
+			response_body_truncated TEXT NOT NULL DEFAULT '',
+			last_error TEXT NOT NULL DEFAULT '',
+			next_attempt_at TIMESTAMPTZ NOT NULL,
+			created_at TIMESTAMPTZ NOT NULL,
+			updated_at TIMESTAMPTZ NOT NULL
+		)`,
+			`CREATE TABLE IF NOT EXISTS external_claims (
+			id TEXT PRIMARY KEY,
+			event_id TEXT NOT NULL,
+			ticket_id TEXT NOT NULL,
+			agent_id TEXT NOT NULL,
+			status TEXT NOT NULL DEFAULT 'active',
+			lease_expires_at TIMESTAMPTZ NOT NULL,
+			result_status TEXT NOT NULL DEFAULT '',
+			result_payload TEXT NOT NULL DEFAULT '',
+			idempotency_key TEXT NOT NULL DEFAULT '',
+			created_at TIMESTAMPTZ NOT NULL,
+			completed_at TIMESTAMPTZ
+		)`,
+		)
+	} else {
+		stmts = append(stmts,
+			`CREATE TABLE IF NOT EXISTS webhook_endpoints (
 			id TEXT PRIMARY KEY,
 			agent_id TEXT NOT NULL UNIQUE,
 			url TEXT NOT NULL,
@@ -58,14 +106,14 @@ func (s *Store) migrate() error {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS external_events (
+			`CREATE TABLE IF NOT EXISTS external_events (
 			id TEXT PRIMARY KEY,
 			event_type TEXT NOT NULL,
 			ticket_id TEXT NOT NULL,
 			payload TEXT NOT NULL,
 			created_at DATETIME NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS external_deliveries (
+			`CREATE TABLE IF NOT EXISTS external_deliveries (
 			id TEXT PRIMARY KEY,
 			event_id TEXT NOT NULL,
 			webhook_id TEXT NOT NULL,
@@ -78,7 +126,7 @@ func (s *Store) migrate() error {
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
 		)`,
-		`CREATE TABLE IF NOT EXISTS external_claims (
+			`CREATE TABLE IF NOT EXISTS external_claims (
 			id TEXT PRIMARY KEY,
 			event_id TEXT NOT NULL,
 			ticket_id TEXT NOT NULL,
@@ -91,11 +139,14 @@ func (s *Store) migrate() error {
 			created_at DATETIME NOT NULL,
 			completed_at DATETIME
 		)`,
+		)
+	}
+	stmts = append(stmts,
 		`CREATE INDEX IF NOT EXISTS idx_external_events_ticket ON external_events(ticket_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_external_deliveries_status_due ON external_deliveries(status, next_attempt_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_external_claims_event ON external_claims(event_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_external_claims_ticket ON external_claims(ticket_id)`,
-	}
+	)
 	for _, stmt := range stmts {
 		if _, err := s.db.Exec(stmt); err != nil {
 			return err
