@@ -36,6 +36,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	yamlskill "github.com/mctlhq/mctl-agent/internal/skill/yaml"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
+	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
 func main() {
@@ -56,6 +57,16 @@ func main() {
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)
 	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun)
 	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.OpenClawBotUsername)
+	var webhookStore *webhook.Store
+	var webhookDispatcher *webhook.Dispatcher
+	if cfg.WebhookEnabled {
+		webhookStore, err = webhook.NewStore(store.DB(), store.Dialect())
+		if err != nil {
+			slog.Error("failed to initialize webhook store", "error", err)
+			os.Exit(1)
+		}
+		webhookDispatcher = webhook.NewDispatcher(webhookStore, cfg.WebhookCallbackURL, cfg.WebhookDefaultTTL)
+	}
 
 	// Initialize skill registry.
 	registry := skill.NewRegistry()
@@ -81,7 +92,7 @@ func main() {
 	capProvider := capability.NewProvider(mctlClient, githubFixer, telegram, store)
 
 	// Pipeline wires everything together.
-	pipe := pipeline.NewPipeline(store, registry, skillMetrics, capProvider, mctlClient, githubFixer, telegram, cfg.DryRun, cfg.AutoMergeEnabled, cfg.EscalationTag)
+	pipe := pipeline.NewPipeline(store, registry, skillMetrics, capProvider, mctlClient, githubFixer, telegram, cfg.DryRun, cfg.AutoMergeEnabled, cfg.EscalationTag, webhookDispatcher)
 
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
@@ -104,6 +115,8 @@ func main() {
 		Telegram:      telegram,
 		GitHub:        githubFixer,
 		RemoteManager: remoteMgr,
+		WebhookStore:  webhookStore,
+		WebhookTTL:    cfg.WebhookDefaultTTL,
 		OnAlert:       alertHandler.ServeHTTP,
 	}
 	if ghWebhookHandler != nil {
@@ -123,6 +136,9 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go poller.Run(ctx, cfg.PollInterval)
+	if webhookDispatcher != nil {
+		webhookDispatcher.Start(ctx)
+	}
 
 	// Daily digest at 09:00 UTC.
 	go runDailyDigest(ctx, store, telegram)

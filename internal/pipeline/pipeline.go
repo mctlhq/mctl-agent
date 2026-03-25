@@ -27,17 +27,19 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
+	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
 // Pipeline orchestrates the ticket → evidence → skill match → diagnosis → fix → notify flow.
 type Pipeline struct {
-	store     *ticket.Store
-	registry  *skill.Registry
-	metrics   *skill.Metrics
-	provider  *capability.Provider
-	apiClient *mctlclient.Client
-	github    *fixer.GitHubFixer
-	telegram  *notify.Telegram
+	store         *ticket.Store
+	registry      *skill.Registry
+	metrics       *skill.Metrics
+	provider      *capability.Provider
+	apiClient     *mctlclient.Client
+	github        *fixer.GitHubFixer
+	telegram      *notify.Telegram
+	dispatcher    *webhook.Dispatcher
 	dryRun        bool
 	autoMerge     bool
 	escalationTag string
@@ -57,6 +59,7 @@ func NewPipeline(
 	dryRun bool,
 	autoMerge bool,
 	escalationTag string,
+	dispatcher *webhook.Dispatcher,
 ) *Pipeline {
 	return &Pipeline{
 		store:         store,
@@ -66,10 +69,20 @@ func NewPipeline(
 		apiClient:     apiClient,
 		github:        github,
 		telegram:      telegram,
+		dispatcher:    dispatcher,
 		dryRun:        dryRun,
 		autoMerge:     autoMerge,
 		escalationTag: escalationTag,
 		sem:           make(chan struct{}, 3), // Max 3 concurrent analyses.
+	}
+}
+
+func (p *Pipeline) emitExternalEvent(ctx context.Context, eventType webhook.EventType, t *ticket.Ticket, diag *skill.DiagnosisResult) {
+	if p.dispatcher == nil {
+		return
+	}
+	if err := p.dispatcher.Emit(ctx, eventType, t, diag); err != nil {
+		slog.Warn("failed to emit external webhook event", "event_type", eventType, "ticket", t.ID, "error", err)
 	}
 }
 
@@ -80,7 +93,7 @@ func (p *Pipeline) Metrics() *skill.Metrics { return p.metrics }
 func (p *Pipeline) Registry() *skill.Registry { return p.registry }
 
 // Pause stops processing new tickets.
-func (p *Pipeline) Pause()  { p.paused.Store(true) }
+func (p *Pipeline) Pause() { p.paused.Store(true) }
 
 // Resume restarts processing.
 func (p *Pipeline) Resume() { p.paused.Store(false) }
@@ -143,6 +156,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		log.Error("failed to update ticket status", "error", err)
 		return
 	}
+	p.emitExternalEvent(ctx, webhook.EventTicketCreated, t, nil)
 
 	// Collect evidence.
 	p.collectEvidence(ctx, t)
@@ -163,6 +177,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		log.Info("no skills matched ticket")
 		_ = p.telegram.SendDiagnosis(t, "No skill matched this ticket type. Manual review required.", ticket.ConfidenceLow, "No auto-diagnosis available")
 		_ = p.store.Update(t)
+		p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, nil)
 		return
 	}
 
@@ -228,12 +243,14 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
 			t.Status = ticket.StatusFixProposed
 			_ = p.store.Update(t)
+			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 			return
 		}
 
 		// LOW / not fixable → notify and stop.
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, fmt.Sprintf("No auto-fix available (skill: %s)", rs.Skill.Name()))
 		_ = p.store.Update(t)
+		p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 		return
 	}
 
@@ -241,6 +258,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	log.Warn("all matched skills failed to diagnose")
 	_ = p.telegram.SendDiagnosis(t, "All matched skills failed to produce a diagnosis. Manual review required.", ticket.ConfidenceLow, "Manual review required")
 	_ = p.store.Update(t)
+	p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, nil)
 }
 
 func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, s skill.Skill, diag *skill.DiagnosisResult, log *slog.Logger) {
@@ -260,6 +278,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
+		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
 	if !fixResult.Applied {
@@ -326,6 +345,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but patch generation failed: "+patchErr.Error())
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
+		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
 
@@ -345,6 +365,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"PR creation failed: "+err.Error())
 		_ = p.store.Update(t)
+		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
 

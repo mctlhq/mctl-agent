@@ -33,8 +33,8 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.DryRun {
 		t.Error("DryRun should default to true")
 	}
-	if cfg.DBPath != "/data/mctl-agent.db" {
-		t.Errorf("DBPath = %q", cfg.DBPath)
+	if cfg.DatabaseURL != "/data/mctl-agent.db" {
+		t.Errorf("DatabaseURL = %q", cfg.DatabaseURL)
 	}
 	if cfg.MaxPRPerHour != 5 {
 		t.Errorf("MaxPRPerHour = %d, want 5", cfg.MaxPRPerHour)
@@ -70,11 +70,14 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.MaxPRPerDay != 50 {
 		t.Errorf("MaxPRPerDay = %d, want 50", cfg.MaxPRPerDay)
 	}
-	if cfg.DBPath != "/tmp/test.db" {
-		t.Errorf("DBPath = %q", cfg.DBPath)
+	if cfg.DatabaseURL != "/tmp/test.db" {
+		t.Errorf("DatabaseURL = %q", cfg.DatabaseURL)
 	}
 	if cfg.GitHubToken != "ghp_test123" {
 		t.Errorf("GitHubToken = %q", cfg.GitHubToken)
+	}
+	if cfg.WebhookDefaultTTL != 15*time.Minute {
+		t.Errorf("WebhookDefaultTTL = %v, want 15m", cfg.WebhookDefaultTTL)
 	}
 }
 

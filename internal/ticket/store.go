@@ -409,6 +409,11 @@ func (s *Store) DB() *sql.DB {
 	return s.db
 }
 
+// Dialect returns the configured SQL dialect.
+func (s *Store) Dialect() string {
+	return s.dialect
+}
+
 // EvidenceJSON marshals v to JSON for storing as evidence content.
 func EvidenceJSON(v interface{}) string {
 	b, _ := json.Marshal(v)

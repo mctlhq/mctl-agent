@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -31,6 +32,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
+	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
 // Options holds all dependencies for the API router.
@@ -40,6 +42,8 @@ type Options struct {
 	Telegram      *notify.Telegram
 	GitHub        *fixer.GitHubFixer
 	RemoteManager *remote.Manager
+	WebhookStore  *webhook.Store
+	WebhookTTL    time.Duration
 	// OnAlert is called when AlertManager sends an alert.
 	OnAlert func(w http.ResponseWriter, r *http.Request)
 	// OnGitHubWebhook handles GitHub webhook events (optional).
@@ -90,8 +94,16 @@ func NewRouter(opts Options) http.Handler {
 	}
 
 	// MCP endpoint — JSON-RPC over HTTP POST.
-	mcpServer := mcp.NewServer(opts.Pipeline)
+	mcpServer := mcp.NewServer(opts.Pipeline, opts.WebhookStore)
 	r.Post("/mcp", mcpServer.ServeHTTP)
+
+	if opts.WebhookStore != nil {
+		r.Get("/api/v1/webhooks", webhookListHandler(opts.WebhookStore))
+		r.Post("/api/v1/webhooks", webhookCreateHandler(opts.WebhookStore))
+		r.Delete("/api/v1/webhooks/{id}", webhookDeleteHandler(opts.WebhookStore))
+		r.Post("/api/v1/tickets/{id}/external-claims", externalClaimHandler(opts.Store, opts.WebhookStore, int(opts.WebhookTTL.Seconds())))
+		r.Patch("/api/v1/tickets/{id}/external-results", externalResultHandler(opts.Store, opts.WebhookStore, opts.Telegram))
+	}
 
 	return r
 }
@@ -312,4 +324,3 @@ func remoteSkillListHandler(mgr *remote.Manager) http.HandlerFunc {
 		})
 	}
 }
-

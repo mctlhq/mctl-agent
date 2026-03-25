@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
+	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
 // jsonRPCRequest represents a JSON-RPC 2.0 request.
@@ -84,20 +85,22 @@ type ContentBlock struct {
 
 // Server is the MCP server that exposes agent skills as tools.
 type Server struct {
-	pipe  *pipeline.Pipeline
-	tools map[string]ToolHandler
-	defs  []ToolDef
-	mu    sync.RWMutex
+	pipe     *pipeline.Pipeline
+	webhooks *webhook.Store
+	tools    map[string]ToolHandler
+	defs     []ToolDef
+	mu       sync.RWMutex
 }
 
 // ToolHandler processes a tool call and returns a result.
 type ToolHandler func(params map[string]interface{}) (*ToolResult, error)
 
 // NewServer creates a new MCP server backed by the given pipeline.
-func NewServer(pipe *pipeline.Pipeline) *Server {
+func NewServer(pipe *pipeline.Pipeline, webhookStore *webhook.Store) *Server {
 	s := &Server{
-		pipe:  pipe,
-		tools: make(map[string]ToolHandler),
+		pipe:     pipe,
+		webhooks: webhookStore,
+		tools:    make(map[string]ToolHandler),
 	}
 	s.registerTools()
 	return s

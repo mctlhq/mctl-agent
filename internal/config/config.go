@@ -39,6 +39,9 @@ type Config struct {
 	MaxPRPerDay         int
 	AutoMergeEnabled    bool
 	EscalationTag       string
+	WebhookEnabled      bool
+	WebhookCallbackURL  string
+	WebhookDefaultTTL   time.Duration
 }
 
 func Load() Config {
@@ -73,6 +76,18 @@ func Load() Config {
 		autoMergeEnabled = false
 	}
 
+	webhookEnabled := false
+	if v := os.Getenv("WEBHOOK_ENABLED"); v == "true" {
+		webhookEnabled = true
+	}
+
+	webhookDefaultTTL := 15 * time.Minute
+	if v := os.Getenv("WEBHOOK_DEFAULT_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			webhookDefaultTTL = d
+		}
+	}
+
 	// Priority: DATABASE_URL > DB_PATH > default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -98,6 +113,9 @@ func Load() Config {
 		MaxPRPerDay:         maxPRPerDay,
 		AutoMergeEnabled:    autoMergeEnabled,
 		EscalationTag:       envOr("ESCALATION_TAG", "@mashkovd"),
+		WebhookEnabled:      webhookEnabled,
+		WebhookCallbackURL:  envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
+		WebhookDefaultTTL:   webhookDefaultTTL,
 	}
 }
 

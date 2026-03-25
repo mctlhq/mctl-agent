@@ -38,6 +38,9 @@ func TestToolDefinitions(t *testing.T) {
 		"mctl_agent_enable_skill",
 		"mctl_agent_trigger_skill",
 		"mctl_agent_all_skill_metrics",
+		"mctl_agent_list_webhooks",
+		"mctl_agent_register_webhook",
+		"mctl_agent_delete_webhook",
 	}
 
 	if len(defs) != len(expectedTools) {
@@ -116,8 +119,8 @@ func TestToolsListMethod(t *testing.T) {
 	if !ok {
 		t.Fatal("tools is not an array")
 	}
-	if len(tools) != 6 {
-		t.Errorf("expected 6 tools, got %d", len(tools))
+	if len(tools) != 9 {
+		t.Errorf("expected 9 tools, got %d", len(tools))
 	}
 }
 

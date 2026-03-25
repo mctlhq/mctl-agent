@@ -35,7 +35,7 @@ func newTestPipeline(t *testing.T, store *ticket.Store) *pipeline.Pipeline {
 		t.Fatal(err)
 	}
 
-	return pipeline.NewPipeline(store, reg, metrics, nil, nil, nil, nil, true, false, "")
+	return pipeline.NewPipeline(store, reg, metrics, nil, nil, nil, nil, true, false, "", nil)
 }
 
 func TestHealthEndpoints(t *testing.T) {

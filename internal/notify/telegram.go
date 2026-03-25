@@ -21,6 +21,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -187,6 +188,32 @@ func (tg *Telegram) SendDailyDigest(open []*ticket.Ticket, resolved24h, prsMerge
 // SendText sends a plain text message.
 func (tg *Telegram) SendText(text string) error {
 	return tg.sendMessage(escapeHTML(text))
+}
+
+func (tg *Telegram) SendExternalAgentResult(t *ticket.Ticket, agentID, summary, messageTemplate string, artifacts map[string]string) error {
+	if messageTemplate != "" {
+		return tg.sendMessage(escapeHTML(messageTemplate))
+	}
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "🤖 External agent update from <b>%s</b>\n", escapeHTML(agentID))
+	fmt.Fprintf(&sb, "%s/%s\n", escapeHTML(t.Tenant), escapeHTML(t.Service))
+	if summary != "" {
+		fmt.Fprintf(&sb, "%s\n", escapeHTML(summary))
+	}
+	if len(artifacts) > 0 {
+		keys := make([]string, 0, len(artifacts))
+		for k := range artifacts {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			fmt.Fprintf(&sb, "%s: %s\n", escapeHTML(k), escapeHTML(artifacts[k]))
+		}
+	}
+	if t.ID != "" {
+		fmt.Fprintf(&sb, "ID: <code>%s</code>", t.ID[:8])
+	}
+	return tg.doSend(sb.String(), openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // ParseCommand parses an inbound Telegram message into a command.

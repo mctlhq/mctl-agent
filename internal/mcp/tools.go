@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
 // registerTools registers all MCP tools for skill management.
@@ -29,6 +30,9 @@ func (s *Server) registerTools() {
 	s.registerEnableSkill()
 	s.registerTriggerSkill()
 	s.registerSkillMetricsAll()
+	s.registerListWebhooks()
+	s.registerRegisterWebhook()
+	s.registerDeleteWebhook()
 }
 
 func (s *Server) registerListSkills() {
@@ -39,10 +43,10 @@ func (s *Server) registerListSkills() {
 	}, func(params map[string]interface{}) (*ToolResult, error) {
 		skills := s.pipe.Registry().List()
 		type skillEntry struct {
-			Name         string              `json:"name"`
-			Version      string              `json:"version"`
-			Description  string              `json:"description"`
-			Enabled      bool                `json:"enabled"`
+			Name         string               `json:"name"`
+			Version      string               `json:"version"`
+			Description  string               `json:"description"`
+			Enabled      bool                 `json:"enabled"`
 			Capabilities []skill.CapabilityID `json:"capabilities"`
 		}
 		entries := make([]skillEntry, len(skills))
@@ -190,5 +194,87 @@ func (s *Server) registerSkillMetricsAll() {
 			"skills": snaps,
 			"count":  len(snaps),
 		})
+	})
+}
+
+func (s *Server) registerListWebhooks() {
+	s.register(ToolDef{
+		Name:        "mctl_agent_list_webhooks",
+		Description: "List registered external webhook endpoints for mctl-agent.",
+		InputSchema: InputSchema{Type: "object"},
+	}, func(params map[string]interface{}) (*ToolResult, error) {
+		if s.webhooks == nil {
+			return nil, fmt.Errorf("webhooks not enabled")
+		}
+		items, err := s.webhooks.ListEndpoints()
+		if err != nil {
+			return nil, err
+		}
+		for i := range items {
+			if items[i].Secret != "" {
+				items[i].Secret = "redacted"
+			}
+		}
+		return jsonResult(map[string]interface{}{"items": items, "count": len(items)})
+	})
+}
+
+func (s *Server) registerRegisterWebhook() {
+	s.register(ToolDef{
+		Name:        "mctl_agent_register_webhook",
+		Description: "Register an external webhook endpoint for selected event types.",
+		InputSchema: InputSchema{
+			Type: "object",
+			Properties: map[string]SchemaField{
+				"agent_id":    {Type: "string", Description: "External agent identifier"},
+				"url":         {Type: "string", Description: "Webhook URL"},
+				"secret":      {Type: "string", Description: "Shared secret for HMAC signing"},
+				"event_types": {Type: "array", Description: "Subscribed event types"},
+			},
+			Required: []string{"agent_id", "url", "secret", "event_types"},
+		},
+	}, func(params map[string]interface{}) (*ToolResult, error) {
+		if s.webhooks == nil {
+			return nil, fmt.Errorf("webhooks not enabled")
+		}
+		agentID, _ := params["agent_id"].(string)
+		url, _ := params["url"].(string)
+		secret, _ := params["secret"].(string)
+		rawEvents, _ := params["event_types"].([]interface{})
+		eventTypes := make([]string, 0, len(rawEvents))
+		for _, item := range rawEvents {
+			eventTypes = append(eventTypes, fmt.Sprintf("%v", item))
+		}
+		ep := &webhook.WebhookEndpoint{AgentID: agentID, URL: url, Secret: secret, EventTypes: eventTypes, Active: true}
+		if err := s.webhooks.CreateEndpoint(ep); err != nil {
+			return nil, err
+		}
+		return jsonResult(map[string]interface{}{"id": ep.ID, "agent_id": ep.AgentID, "url": ep.URL, "event_types": ep.EventTypes, "active": ep.Active})
+	})
+}
+
+func (s *Server) registerDeleteWebhook() {
+	s.register(ToolDef{
+		Name:        "mctl_agent_delete_webhook",
+		Description: "Delete a registered external webhook endpoint by id.",
+		InputSchema: InputSchema{
+			Type: "object",
+			Properties: map[string]SchemaField{
+				"id": {Type: "string", Description: "Webhook id"},
+			},
+			Required: []string{"id"},
+		},
+	}, func(params map[string]interface{}) (*ToolResult, error) {
+		if s.webhooks == nil {
+			return nil, fmt.Errorf("webhooks not enabled")
+		}
+		id, _ := params["id"].(string)
+		if id == "" {
+			return nil, fmt.Errorf("id is required")
+		}
+		if err := s.webhooks.DeleteEndpoint(id); err != nil {
+			return nil, err
+		}
+		return textResult("Webhook %s deleted.", id), nil
 	})
 }
