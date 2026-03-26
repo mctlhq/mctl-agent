@@ -123,6 +123,9 @@ func TestAlertHandlerServeHTTP(t *testing.T) {
 	if received[0].Severity != ticket.SeverityCritical {
 		t.Errorf("expected severity critical, got %s", received[0].Severity)
 	}
+	if received[0].AlertName != "PodCrashLooping" {
+		t.Errorf("expected alert name PodCrashLooping, got %s", received[0].AlertName)
+	}
 }
 
 func TestAlertHandlerDedup(t *testing.T) {

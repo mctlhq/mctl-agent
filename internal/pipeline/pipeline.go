@@ -30,6 +30,8 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
+const quietAlertRecordingRulesNoData = "RecordingRulesNoData"
+
 // Pipeline orchestrates the ticket → evidence → skill match → diagnosis → fix → notify flow.
 type Pipeline struct {
 	store         *ticket.Store
@@ -143,8 +145,12 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	log := slog.With("ticket", t.ID, "service", t.Tenant+"/"+t.Service)
 
 	// Notify about new ticket.
-	if err := p.telegram.SendNewTicket(t); err != nil {
-		log.Error("failed to send new ticket notification", "error", err)
+	if shouldNotifyNewTicket(t) {
+		if err := p.telegram.SendNewTicket(t); err != nil {
+			log.Error("failed to send new ticket notification", "error", err)
+		}
+	} else {
+		log.Info("suppressing new ticket notification", "alert_name", t.AlertName)
 	}
 
 	// Publish to mctl-api alert store.
@@ -175,7 +181,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	ranked := p.registry.Match(ctx, t, ev)
 	if len(ranked) == 0 {
 		log.Info("no skills matched ticket")
-		_ = p.telegram.SendDiagnosis(t, "No skill matched this ticket type. Manual review required.", ticket.ConfidenceLow, "No auto-diagnosis available")
+		if shouldNotifyDiagnosis(t) {
+			_ = p.telegram.SendDiagnosis(t, "No skill matched this ticket type. Manual review required.", ticket.ConfidenceLow, "No auto-diagnosis available")
+		}
 		_ = p.store.Update(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, nil)
 		return
@@ -221,7 +229,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 
 		// Infrastructure alerts — never auto-fix.
 		if isInfraAlert(t) {
-			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "Infrastructure alert — manual review only")
+			if shouldNotifyDiagnosis(t) {
+				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "Infrastructure alert — manual review only")
+			}
 			_ = p.store.Update(t)
 			return
 		}
@@ -240,7 +250,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			}
 			// Not auto-merge safe → suggest in Telegram.
 			action := fmt.Sprintf("Fixable but MEDIUM confidence (skill: %s) — sending suggestion to Telegram for review", rs.Skill.Name())
-			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
+			if shouldNotifyDiagnosis(t) {
+				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
+			}
 			t.Status = ticket.StatusFixProposed
 			_ = p.store.Update(t)
 			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
@@ -248,7 +260,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		}
 
 		// LOW / not fixable → notify and stop.
-		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, fmt.Sprintf("No auto-fix available (skill: %s)", rs.Skill.Name()))
+		if shouldNotifyDiagnosis(t) {
+			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, fmt.Sprintf("No auto-fix available (skill: %s)", rs.Skill.Name()))
+		}
 		_ = p.store.Update(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 		return
@@ -256,9 +270,23 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 
 	// All skills failed.
 	log.Warn("all matched skills failed to diagnose")
-	_ = p.telegram.SendDiagnosis(t, "All matched skills failed to produce a diagnosis. Manual review required.", ticket.ConfidenceLow, "Manual review required")
+	if shouldNotifyDiagnosis(t) {
+		_ = p.telegram.SendDiagnosis(t, "All matched skills failed to produce a diagnosis. Manual review required.", ticket.ConfidenceLow, "Manual review required")
+	}
 	_ = p.store.Update(t)
 	p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, nil)
+}
+
+func shouldNotifyNewTicket(t *ticket.Ticket) bool {
+	return !isQuietAlert(t)
+}
+
+func shouldNotifyDiagnosis(t *ticket.Ticket) bool {
+	return !isQuietAlert(t)
+}
+
+func isQuietAlert(t *ticket.Ticket) bool {
+	return t != nil && t.Source == ticket.SourceAlertManager && t.AlertName == quietAlertRecordingRulesNoData
 }
 
 func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, s skill.Skill, diag *skill.DiagnosisResult, log *slog.Logger) {

@@ -38,12 +38,12 @@ const (
 
 // Ticket statuses.
 const (
-	StatusOpen         = "open"
-	StatusAnalyzing    = "analyzing"
-	StatusFixProposed  = "fix_proposed"
-	StatusFixApplied   = "fix_applied"
-	StatusResolved     = "resolved"
-	StatusSuppressed   = "suppressed"
+	StatusOpen        = "open"
+	StatusAnalyzing   = "analyzing"
+	StatusFixProposed = "fix_proposed"
+	StatusFixApplied  = "fix_applied"
+	StatusResolved    = "resolved"
+	StatusSuppressed  = "suppressed"
 )
 
 // Severity levels.
@@ -64,6 +64,7 @@ const (
 type Ticket struct {
 	ID          string     `json:"id"`
 	Source      string     `json:"source"`
+	AlertName   string     `json:"alert_name,omitempty"`
 	Type        string     `json:"type"`
 	Tenant      string     `json:"tenant"`
 	Service     string     `json:"service"`

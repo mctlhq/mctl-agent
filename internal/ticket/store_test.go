@@ -21,12 +21,13 @@ func TestStoreCreateAndGet(t *testing.T) {
 	store := newTestStore(t)
 
 	tk := &Ticket{
-		Source:   SourceAlertManager,
-		Type:     TypePodCrashloop,
-		Tenant:   "billing",
-		Service:  "api",
-		Summary:  "Pod is crash looping",
-		Severity: SeverityCritical,
+		Source:    SourceAlertManager,
+		AlertName: "PodCrashLooping",
+		Type:      TypePodCrashloop,
+		Tenant:    "billing",
+		Service:   "api",
+		Summary:   "Pod is crash looping",
+		Severity:  SeverityCritical,
 	}
 
 	if err := store.Create(tk); err != nil {
@@ -55,6 +56,9 @@ func TestStoreCreateAndGet(t *testing.T) {
 	}
 	if got.Service != "api" {
 		t.Errorf("expected service api, got %s", got.Service)
+	}
+	if got.AlertName != "PodCrashLooping" {
+		t.Errorf("expected alert name PodCrashLooping, got %s", got.AlertName)
 	}
 }
 

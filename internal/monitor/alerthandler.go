@@ -111,12 +111,13 @@ func (h *AlertHandler) processAlert(a alert) {
 	}
 
 	t := &ticket.Ticket{
-		Source:   ticket.SourceAlertManager,
-		Type:     tType,
-		Tenant:   tenant,
-		Service:  service,
-		Summary:  summary,
-		Severity: severity,
+		Source:    ticket.SourceAlertManager,
+		AlertName: alertName,
+		Type:      tType,
+		Tenant:    tenant,
+		Service:   service,
+		Summary:   summary,
+		Severity:  severity,
 	}
 
 	if err := h.store.Create(t); err != nil {

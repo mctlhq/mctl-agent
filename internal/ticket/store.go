@@ -141,12 +141,30 @@ func (s *Store) migrate() error {
 		return err
 	}
 
+	if err := s.ensureColumn("tickets", "alert_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+
 	_, err = s.db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
 		CREATE INDEX IF NOT EXISTS idx_tickets_tenant_service_type ON tickets(tenant, service, type);
 		CREATE INDEX IF NOT EXISTS idx_evidence_ticket ON evidence(ticket_id);
 	`)
 	return err
+}
+
+func (s *Store) ensureColumn(table, column, definition string) error {
+	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)
+	if s.dialect == "postgres" {
+		query = fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", table, column, definition)
+	}
+	if _, err := s.db.Exec(query); err != nil {
+		if s.dialect != "postgres" && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+			return nil
+		}
+		return err
+	}
+	return nil
 }
 
 // Create inserts a new ticket, generating a UUID.
@@ -160,12 +178,12 @@ func (s *Store) Create(t *Ticket) error {
 	}
 
 	query := `
-		INSERT INTO tickets (id, source, type, tenant, service, summary, severity, status,
+		INSERT INTO tickets (id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := s.db.Exec(s.rebind(query),
-		t.ID, t.Source, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
+		t.ID, t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
 		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.Confidence,
 		t.CreatedAt, t.UpdatedAt, t.ResolvedAt,
 	)
@@ -176,13 +194,13 @@ func (s *Store) Create(t *Ticket) error {
 func (s *Store) Update(t *Ticket) error {
 	t.UpdatedAt = time.Now().UTC()
 	query := `
-		UPDATE tickets SET source=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
+		UPDATE tickets SET source=?, alert_name=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
 			analysis=?, proposed_fix=?, pr_url=?, pr_number=?, confidence=?,
 			updated_at=?, resolved_at=?
 		WHERE id=?`
 
 	_, err := s.db.Exec(s.rebind(query),
-		t.Source, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
+		t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
 		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.Confidence,
 		t.UpdatedAt, t.ResolvedAt, t.ID,
 	)
@@ -194,11 +212,11 @@ func (s *Store) Get(id string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
 	query := `
-		SELECT id, source, type, tenant, service, summary, severity, status,
+		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
 		FROM tickets WHERE id=?`
 
-	err := s.db.QueryRow(s.rebind(query), id).Scan(&t.ID, &t.Source, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
+	err := s.db.QueryRow(s.rebind(query), id).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.Confidence,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
@@ -224,7 +242,7 @@ func (s *Store) ListOpen() ([]*Ticket, error) {
 // ListAll returns all tickets (latest first, limit 100).
 func (s *Store) ListAll() ([]*Ticket, error) {
 	query := `
-		SELECT id, source, type, tenant, service, summary, severity, status,
+		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
 		FROM tickets ORDER BY created_at DESC LIMIT 100`
 
@@ -238,7 +256,7 @@ func (s *Store) ListAll() ([]*Ticket, error) {
 
 func (s *Store) listByStatus(statuses ...string) ([]*Ticket, error) {
 	query := `
-		SELECT id, source, type, tenant, service, summary, severity, status,
+		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
 		FROM tickets WHERE status IN (`
 	args := make([]interface{}, len(statuses))
@@ -264,7 +282,7 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 	for rows.Next() {
 		t := &Ticket{}
 		var resolvedAt sql.NullTime
-		if err := rows.Scan(&t.ID, &t.Source, &t.Type, &t.Tenant, &t.Service, &t.Summary,
+		if err := rows.Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary,
 			&t.Severity, &t.Status, &t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber,
 			&t.Confidence, &t.CreatedAt, &t.UpdatedAt, &resolvedAt); err != nil {
 			return nil, err
@@ -282,7 +300,7 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
 	query := `
-		SELECT id, source, type, tenant, service, summary, severity, status,
+		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
@@ -290,7 +308,7 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 
 	err := s.db.QueryRow(s.rebind(query),
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
-	).Scan(&t.ID, &t.Source, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
+	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.Confidence,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
@@ -369,7 +387,7 @@ func (s *Store) CountResolvedInWindow(hours int) (int, error) {
 func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket, error) {
 	since := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	query := `
-		SELECT id, source, type, tenant, service, summary, severity, status,
+		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE type=? AND status=? AND id != ? AND created_at > ?
