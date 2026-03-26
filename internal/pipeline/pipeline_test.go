@@ -7,17 +7,24 @@ import (
 )
 
 func TestQuietAlertPolicy_RecordingRulesNoData(t *testing.T) {
-	tk := &ticket.Ticket{
-		Source:    ticket.SourceAlertManager,
-		AlertName: quietAlertRecordingRulesNoData,
-		Type:      ticket.TypeGeneric,
-	}
+	for _, alertName := range []string{
+		quietAlertRecordingRulesNoData,
+		quietAlertScrapePoolHasNoTargets,
+		quietAlertTooManyScrapeErrors,
+		quietAlertTooManyLogs,
+	} {
+		tk := &ticket.Ticket{
+			Source:    ticket.SourceAlertManager,
+			AlertName: alertName,
+			Type:      ticket.TypeGeneric,
+		}
 
-	if shouldNotifyNewTicket(tk) {
-		t.Fatal("expected new ticket notification to be suppressed")
-	}
-	if shouldNotifyDiagnosis(tk) {
-		t.Fatal("expected diagnosis notification to be suppressed")
+		if shouldNotifyNewTicket(tk) {
+			t.Fatalf("expected new ticket notification to be suppressed for %s", alertName)
+		}
+		if shouldNotifyDiagnosis(tk) {
+			t.Fatalf("expected diagnosis notification to be suppressed for %s", alertName)
+		}
 	}
 }
 

@@ -30,7 +30,12 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
-const quietAlertRecordingRulesNoData = "RecordingRulesNoData"
+const (
+	quietAlertRecordingRulesNoData = "RecordingRulesNoData"
+	quietAlertScrapePoolHasNoTargets = "ScrapePoolHasNoTargets"
+	quietAlertTooManyScrapeErrors    = "TooManyScrapeErrors"
+	quietAlertTooManyLogs            = "TooManyLogs"
+)
 
 // Pipeline orchestrates the ticket → evidence → skill match → diagnosis → fix → notify flow.
 type Pipeline struct {
@@ -286,7 +291,18 @@ func shouldNotifyDiagnosis(t *ticket.Ticket) bool {
 }
 
 func isQuietAlert(t *ticket.Ticket) bool {
-	return t != nil && t.Source == ticket.SourceAlertManager && t.AlertName == quietAlertRecordingRulesNoData
+	if t == nil || t.Source != ticket.SourceAlertManager {
+		return false
+	}
+	switch t.AlertName {
+	case quietAlertRecordingRulesNoData,
+		quietAlertScrapePoolHasNoTargets,
+		quietAlertTooManyScrapeErrors,
+		quietAlertTooManyLogs:
+		return true
+	default:
+		return false
+	}
 }
 
 func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, s skill.Skill, diag *skill.DiagnosisResult, log *slog.Logger) {
