@@ -62,6 +62,35 @@ func TestStoreCreateAndGet(t *testing.T) {
 	}
 }
 
+func TestStorePersistsPRMetadata(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source:      SourceManual,
+		Type:        TypeGeneric,
+		Tenant:      "labs",
+		Service:     "openclaw",
+		Summary:     "test",
+		PRURL:       "https://github.com/mctlhq/mctl-gitops/pull/101",
+		PRNumber:    101,
+		PRRepo:      "mctlhq/mctl-gitops",
+		PRBranch:    "openclaw/ticket-101",
+		PRCommitSHA: "deadbeef101",
+	}
+
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRRepo != tk.PRRepo || got.PRBranch != tk.PRBranch || got.PRCommitSHA != tk.PRCommitSHA {
+		t.Fatalf("expected PR metadata round-trip, got repo=%s branch=%s sha=%s", got.PRRepo, got.PRBranch, got.PRCommitSHA)
+	}
+}
+
 func TestStoreUpdate(t *testing.T) {
 	store := newTestStore(t)
 

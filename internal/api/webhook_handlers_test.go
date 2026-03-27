@@ -143,7 +143,13 @@ func TestExternalClaimAndResult(t *testing.T) {
 		IdempotencyKey: "res_1",
 		Status:         webhook.ResultPRCreated,
 		Summary:        "Raised memory limit",
-		Artifacts:      map[string]string{"pr_url": "https://github.com/mctlhq/mctl-gitops/pull/42"},
+		Artifacts: map[string]string{
+			"pr_url":     "https://github.com/mctlhq/mctl-gitops/pull/42",
+			"pr_number":  "42",
+			"repo":       "mctlhq/mctl-gitops",
+			"branch":     "openclaw/ticket-123",
+			"commit_sha": "abc123def456",
+		},
 	}
 	resultBody, _ := json.Marshal(result)
 	req = httptest.NewRequest(http.MethodPatch, "/api/v1/tickets/"+tk.ID+"/external-results", bytes.NewReader(resultBody))
@@ -160,6 +166,9 @@ func TestExternalClaimAndResult(t *testing.T) {
 	}
 	if updated.PRNumber != 42 || updated.Status != ticket.StatusFixProposed {
 		t.Fatalf("ticket not updated: pr=%d status=%s", updated.PRNumber, updated.Status)
+	}
+	if updated.PRRepo != "mctlhq/mctl-gitops" || updated.PRBranch != "openclaw/ticket-123" || updated.PRCommitSHA != "abc123def456" {
+		t.Fatalf("ticket PR metadata not updated: repo=%s branch=%s sha=%s", updated.PRRepo, updated.PRBranch, updated.PRCommitSHA)
 	}
 }
 

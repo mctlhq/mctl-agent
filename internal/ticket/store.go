@@ -93,6 +93,9 @@ func (s *Store) migrate() error {
 				proposed_fix TEXT NOT NULL DEFAULT '',
 				pr_url      TEXT NOT NULL DEFAULT '',
 				pr_number   INTEGER NOT NULL DEFAULT 0,
+				pr_repo     TEXT NOT NULL DEFAULT '',
+				pr_branch   TEXT NOT NULL DEFAULT '',
+				pr_commit_sha TEXT NOT NULL DEFAULT '',
 				confidence  TEXT NOT NULL DEFAULT '',
 				created_at  TIMESTAMPTZ NOT NULL,
 				updated_at  TIMESTAMPTZ NOT NULL,
@@ -122,6 +125,9 @@ func (s *Store) migrate() error {
 				proposed_fix TEXT NOT NULL DEFAULT '',
 				pr_url      TEXT NOT NULL DEFAULT '',
 				pr_number   INTEGER NOT NULL DEFAULT 0,
+				pr_repo     TEXT NOT NULL DEFAULT '',
+				pr_branch   TEXT NOT NULL DEFAULT '',
+				pr_commit_sha TEXT NOT NULL DEFAULT '',
 				confidence  TEXT NOT NULL DEFAULT '',
 				created_at  DATETIME NOT NULL,
 				updated_at  DATETIME NOT NULL,
@@ -142,6 +148,15 @@ func (s *Store) migrate() error {
 	}
 
 	if err := s.ensureColumn("tickets", "alert_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("tickets", "pr_repo", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("tickets", "pr_branch", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("tickets", "pr_commit_sha", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 
@@ -179,12 +194,12 @@ func (s *Store) Create(t *Ticket) error {
 
 	query := `
 		INSERT INTO tickets (id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := s.db.Exec(s.rebind(query),
 		t.ID, t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
-		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.Confidence,
+		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence,
 		t.CreatedAt, t.UpdatedAt, t.ResolvedAt,
 	)
 	return err
@@ -195,13 +210,13 @@ func (s *Store) Update(t *Ticket) error {
 	t.UpdatedAt = time.Now().UTC()
 	query := `
 		UPDATE tickets SET source=?, alert_name=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
-			analysis=?, proposed_fix=?, pr_url=?, pr_number=?, confidence=?,
+			analysis=?, proposed_fix=?, pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?, confidence=?,
 			updated_at=?, resolved_at=?
 		WHERE id=?`
 
 	_, err := s.db.Exec(s.rebind(query),
 		t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
-		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.Confidence,
+		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence,
 		t.UpdatedAt, t.ResolvedAt, t.ID,
 	)
 	return err
@@ -213,11 +228,11 @@ func (s *Store) Get(id string) (*Ticket, error) {
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
 		FROM tickets WHERE id=?`
 
 	err := s.db.QueryRow(s.rebind(query), id).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.Confidence,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err != nil {
@@ -243,7 +258,7 @@ func (s *Store) ListOpen() ([]*Ticket, error) {
 func (s *Store) ListAll() ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
 		FROM tickets ORDER BY created_at DESC LIMIT 100`
 
 	rows, err := s.db.Query(s.rebind(query))
@@ -257,7 +272,7 @@ func (s *Store) ListAll() ([]*Ticket, error) {
 func (s *Store) listByStatus(statuses ...string) ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
 		FROM tickets WHERE status IN (`
 	args := make([]interface{}, len(statuses))
 	for i, st := range statuses {
@@ -283,7 +298,7 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 		t := &Ticket{}
 		var resolvedAt sql.NullTime
 		if err := rows.Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary,
-			&t.Severity, &t.Status, &t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber,
+			&t.Severity, &t.Status, &t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA,
 			&t.Confidence, &t.CreatedAt, &t.UpdatedAt, &resolvedAt); err != nil {
 			return nil, err
 		}
@@ -301,7 +316,7 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
 		ORDER BY created_at DESC LIMIT 1`
@@ -309,7 +324,7 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 	err := s.db.QueryRow(s.rebind(query),
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.Confidence,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -388,7 +403,7 @@ func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket,
 	since := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE type=? AND status=? AND id != ? AND created_at > ?
 		ORDER BY created_at DESC LIMIT ?`

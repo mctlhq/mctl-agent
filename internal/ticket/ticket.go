@@ -76,6 +76,9 @@ type Ticket struct {
 	ProposedFix string     `json:"proposed_fix,omitempty"`
 	PRURL       string     `json:"pr_url,omitempty"`
 	PRNumber    int        `json:"pr_number,omitempty"`
+	PRRepo      string     `json:"pr_repo,omitempty"`
+	PRBranch    string     `json:"pr_branch,omitempty"`
+	PRCommitSHA string     `json:"pr_commit_sha,omitempty"`
 	Confidence  string     `json:"confidence,omitempty"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`

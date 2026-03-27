@@ -196,21 +196,24 @@ func (c *Client) GetWorkflow(name string) (map[string]any, error) {
 // PublishAlert sends a new incident to mctl-api.
 func (c *Client) PublishAlert(t *ticket.Ticket) {
 	body := map[string]interface{}{
-		"id":          t.ID,
-		"source":      t.Source,
-		"type":        t.Type,
-		"tenant":      t.Tenant,
-		"service":     t.Service,
-		"summary":     t.Summary,
-		"severity":    t.Severity,
-		"status":      t.Status,
-		"analysis":    t.Analysis,
-		"proposed_fix": t.ProposedFix,
-		"pr_url":      t.PRURL,
-		"pr_number":   t.PRNumber,
-		"confidence":  t.Confidence,
-		"created_at":  t.CreatedAt,
-		"updated_at":  t.UpdatedAt,
+		"id":            t.ID,
+		"source":        t.Source,
+		"type":          t.Type,
+		"tenant":        t.Tenant,
+		"service":       t.Service,
+		"summary":       t.Summary,
+		"severity":      t.Severity,
+		"status":        t.Status,
+		"analysis":      t.Analysis,
+		"proposed_fix":  t.ProposedFix,
+		"pr_url":        t.PRURL,
+		"pr_number":     t.PRNumber,
+		"pr_repo":       t.PRRepo,
+		"pr_branch":     t.PRBranch,
+		"pr_commit_sha": t.PRCommitSHA,
+		"confidence":    t.Confidence,
+		"created_at":    t.CreatedAt,
+		"updated_at":    t.UpdatedAt,
 	}
 	if t.ResolvedAt != nil {
 		body["resolved_at"] = t.ResolvedAt
@@ -236,12 +239,15 @@ func (c *Client) PublishAlert(t *ticket.Ticket) {
 // UpdateAlert sends an incident update to mctl-api.
 func (c *Client) UpdateAlert(t *ticket.Ticket) {
 	body := map[string]interface{}{
-		"status":       t.Status,
-		"analysis":     t.Analysis,
-		"proposed_fix": t.ProposedFix,
-		"pr_url":       t.PRURL,
-		"pr_number":    t.PRNumber,
-		"confidence":   t.Confidence,
+		"status":        t.Status,
+		"analysis":      t.Analysis,
+		"proposed_fix":  t.ProposedFix,
+		"pr_url":        t.PRURL,
+		"pr_number":     t.PRNumber,
+		"pr_repo":       t.PRRepo,
+		"pr_branch":     t.PRBranch,
+		"pr_commit_sha": t.PRCommitSHA,
+		"confidence":    t.Confidence,
 	}
 
 	if err := c.doPatch("/api/v1/incidents/"+t.ID, body); err != nil {

@@ -239,6 +239,14 @@ func externalResultHandler(ticketStore *ticket.Store, webhookStore *webhook.Stor
 			tk.ProposedFix = strings.TrimSpace(req.Summary)
 			tk.PRURL = req.Artifacts["pr_url"]
 			tk.PRNumber = parsePRNumber(tk.PRURL)
+			if raw := strings.TrimSpace(req.Artifacts["pr_number"]); raw != "" {
+				if parsed, err := strconv.Atoi(raw); err == nil {
+					tk.PRNumber = parsed
+				}
+			}
+			tk.PRRepo = strings.TrimSpace(req.Artifacts["repo"])
+			tk.PRBranch = strings.TrimSpace(req.Artifacts["branch"])
+			tk.PRCommitSHA = strings.TrimSpace(req.Artifacts["commit_sha"])
 			tk.Status = ticket.StatusFixProposed
 		case webhook.ResultNeedsHuman:
 			tk.ProposedFix = strings.TrimSpace(req.Summary)
