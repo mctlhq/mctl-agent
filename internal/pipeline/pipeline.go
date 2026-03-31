@@ -232,6 +232,15 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			"confidence", diag.Confidence,
 			"fixable", diag.Fixable)
 
+		if isHumanReviewOnlyAlert(t) {
+			if shouldNotifyDiagnosis(t) {
+				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "Alert is routed for diagnosis only; manual review required")
+			}
+			_ = p.store.Update(t)
+			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
+			return
+		}
+
 		// Infrastructure alerts — never auto-fix.
 		if isInfraAlert(t) {
 			if shouldNotifyDiagnosis(t) {
@@ -455,6 +464,21 @@ func isInfraAlert(t *ticket.Ticket) bool {
 		return false
 	}
 	return t.Service == ""
+}
+
+func isHumanReviewOnlyAlert(t *ticket.Ticket) bool {
+	if t == nil {
+		return false
+	}
+	switch t.AlertName {
+	case "CPUThrottlingHigh",
+		"KubeJobNotCompleted",
+		"KubePersistentVolumeFillingUp",
+		"KubeStatefulSetReplicasMismatch":
+		return true
+	default:
+		return false
+	}
 }
 
 // toLegacyDiag converts a skill.DiagnosisResult to the legacy diagnosis format

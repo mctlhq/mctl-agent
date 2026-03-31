@@ -42,3 +42,29 @@ func TestQuietAlertPolicy_NonQuietAlertStillNotifies(t *testing.T) {
 		t.Fatal("expected diagnosis notification to be sent")
 	}
 }
+
+func TestHumanReviewOnlyAlertPolicy(t *testing.T) {
+	tests := []struct {
+		alertName string
+		want      bool
+	}{
+		{alertName: "CPUThrottlingHigh", want: true},
+		{alertName: "KubeJobNotCompleted", want: true},
+		{alertName: "KubePersistentVolumeFillingUp", want: true},
+		{alertName: "KubeStatefulSetReplicasMismatch", want: true},
+		{alertName: "KubePodCrashLooping", want: false},
+		{alertName: "PodCrashLooping", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.alertName, func(t *testing.T) {
+			tk := &ticket.Ticket{
+				Source:    ticket.SourceAlertManager,
+				AlertName: tt.alertName,
+			}
+			if got := isHumanReviewOnlyAlert(tk); got != tt.want {
+				t.Fatalf("isHumanReviewOnlyAlert(%q) = %v, want %v", tt.alertName, got, tt.want)
+			}
+		})
+	}
+}

@@ -144,14 +144,16 @@ func (h *AlertHandler) processAlert(a alert) {
 // classifyAlert maps AlertManager alertname to ticket type and severity.
 func classifyAlert(alertName string) (ticketType, severity string) {
 	switch alertName {
-	case "PodCrashLooping":
+	case "PodCrashLooping", "KubePodCrashLooping":
 		return ticket.TypePodCrashloop, ticket.SeverityCritical
 	case "KubePodNotReady", "PodNotReady":
 		return ticket.TypePodCrashloop, ticket.SeverityWarning
-	case "TenantCPUQuotaHigh", "TenantMemoryQuotaHigh":
+	case "TenantCPUQuotaHigh", "TenantMemoryQuotaHigh", "CPUThrottlingHigh":
 		return ticket.TypeResourceLimit, ticket.SeverityWarning
-	case "ArgoWorkflowFailed", "ArgoWorkflowHighFailureRate":
+	case "ArgoWorkflowFailed", "ArgoWorkflowHighFailureRate", "KubeJobNotCompleted":
 		return ticket.TypeWorkflowFailed, ticket.SeverityWarning
+	case "KubePersistentVolumeFillingUp", "KubeStatefulSetReplicasMismatch":
+		return ticket.TypeGeneric, ticket.SeverityWarning
 	case "NodeHighCPU", "NodeHighMemory", "NodeDiskPressure":
 		return ticket.TypeResourceLimit, ticket.SeverityWarning
 	case "VaultSealed":

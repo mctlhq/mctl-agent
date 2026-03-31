@@ -28,11 +28,16 @@ func TestClassifyAlert(t *testing.T) {
 		wantSeverity string
 	}{
 		{"PodCrashLooping", ticket.TypePodCrashloop, ticket.SeverityCritical},
+		{"KubePodCrashLooping", ticket.TypePodCrashloop, ticket.SeverityCritical},
 		{"KubePodNotReady", ticket.TypePodCrashloop, ticket.SeverityWarning},
 		{"PodNotReady", ticket.TypePodCrashloop, ticket.SeverityWarning},
 		{"TenantCPUQuotaHigh", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"TenantMemoryQuotaHigh", ticket.TypeResourceLimit, ticket.SeverityWarning},
+		{"CPUThrottlingHigh", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"ArgoWorkflowFailed", ticket.TypeWorkflowFailed, ticket.SeverityWarning},
+		{"KubeJobNotCompleted", ticket.TypeWorkflowFailed, ticket.SeverityWarning},
+		{"KubePersistentVolumeFillingUp", ticket.TypeGeneric, ticket.SeverityWarning},
+		{"KubeStatefulSetReplicasMismatch", ticket.TypeGeneric, ticket.SeverityWarning},
 		{"VaultSealed", ticket.TypeResourceLimit, ticket.SeverityCritical},
 		{"NodeHighCPU", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"UnknownAlert", ticket.TypeGeneric, ticket.SeverityWarning},

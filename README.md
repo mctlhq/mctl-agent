@@ -4,7 +4,12 @@ Self-healing GitOps agent for Kubernetes that turns Prometheus alerts into autom
 
 ## What It Does
 
-mctl-agent receives alerts from Prometheus AlertManager (via webhook or periodic polling), diagnoses root causes using the Claude API and a library of builtin skills, and opens targeted fix PRs against the [mctl-gitops](https://github.com/mctlhq/mctl-gitops) repository. It supports six alert types — PodCrashLooping, KubePodNotReady, TenantCPUQuotaHigh, TenantMemoryQuotaHigh, ArgoWorkflowFailed, and ArgoWorkflowHighFailureRate — and notifies operators via Telegram throughout the lifecycle.
+mctl-agent receives alerts from Prometheus AlertManager (via webhook or periodic polling), diagnoses root causes using the Claude API and a library of builtin skills, and opens targeted fix PRs against the [mctl-gitops](https://github.com/mctlhq/mctl-gitops) repository. It currently routes crashloop, pod readiness, quota-pressure, workflow, and selected infrastructure alerts into the ticket pipeline, and notifies operators via Telegram throughout the lifecycle.
+
+Current routed alert names:
+
+- PR-capable path: `PodCrashLooping`, `KubePodCrashLooping`, `KubePodNotReady`, `PodNotReady`, `TenantCPUQuotaHigh`, `TenantMemoryQuotaHigh`, `ArgoWorkflowFailed`, `ArgoWorkflowHighFailureRate`
+- Diagnosis / human-review only: `CPUThrottlingHigh`, `KubeJobNotCompleted`, `KubePersistentVolumeFillingUp`, `KubeStatefulSetReplicasMismatch`
 
 ## Architecture
 
