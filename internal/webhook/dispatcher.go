@@ -43,7 +43,10 @@ func (d *Dispatcher) Emit(ctx context.Context, eventType EventType, tk *ticket.T
 	if err != nil {
 		return err
 	}
+	endpoints = filterEndpointsByTenant(endpoints, tk.Tenant)
 	if len(endpoints) == 0 {
+		slog.Info("no webhook endpoints match event tenant; skipping dispatch",
+			"event_type", eventType, "ticket_id", tk.ID, "tenant", tk.Tenant)
 		return nil
 	}
 	eventID := "evt_" + uuid.New().String()
@@ -87,6 +90,26 @@ func (d *Dispatcher) Emit(ctx context.Context, eventType EventType, tk *ticket.T
 	}
 	slog.Info("webhook event queued", "event_id", ev.ID, "event_type", ev.Type, "ticket_id", tk.ID, "deliveries", len(endpoints))
 	return nil
+}
+
+// filterEndpointsByTenant keeps endpoints whose AllowedTenants list is empty
+// (no restriction) or contains the given tenant. Used by Emit to prevent
+// external agents from receiving events for tenants they cannot act on.
+func filterEndpointsByTenant(endpoints []WebhookEndpoint, tenant string) []WebhookEndpoint {
+	out := make([]WebhookEndpoint, 0, len(endpoints))
+	for _, ep := range endpoints {
+		if len(ep.AllowedTenants) == 0 {
+			out = append(out, ep)
+			continue
+		}
+		for _, t := range ep.AllowedTenants {
+			if t == tenant {
+				out = append(out, ep)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func (d *Dispatcher) Start(ctx context.Context) {
