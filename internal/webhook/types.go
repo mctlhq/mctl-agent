@@ -88,9 +88,13 @@ type WebhookEndpoint struct {
 	AuthHeaderName  string    `json:"auth_header_name,omitempty"`
 	AuthHeaderValue string    `json:"auth_header_value,omitempty"`
 	EventTypes      []string  `json:"event_types"`
-	Active          bool      `json:"active"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// AllowedTenants restricts which tenants this endpoint receives events
+	// for. Empty list = no restriction (all tenants). An agent registered
+	// with AllowedTenants=["labs"] will not see events for platform-db etc.
+	AllowedTenants []string  `json:"allowed_tenants,omitempty"`
+	Active         bool      `json:"active"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type ExternalDelivery struct {

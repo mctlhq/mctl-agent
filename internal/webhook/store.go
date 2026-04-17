@@ -58,6 +58,7 @@ func (s *Store) migrate() error {
 			auth_header_name TEXT NOT NULL DEFAULT '',
 			auth_header_value TEXT NOT NULL DEFAULT '',
 			event_types TEXT NOT NULL DEFAULT '[]',
+			allowed_tenants TEXT NOT NULL DEFAULT '[]',
 			active BOOLEAN NOT NULL DEFAULT true,
 			created_at TIMESTAMPTZ NOT NULL,
 			updated_at TIMESTAMPTZ NOT NULL
@@ -106,6 +107,7 @@ func (s *Store) migrate() error {
 			auth_header_name TEXT NOT NULL DEFAULT '',
 			auth_header_value TEXT NOT NULL DEFAULT '',
 			event_types TEXT NOT NULL DEFAULT '[]',
+			allowed_tenants TEXT NOT NULL DEFAULT '[]',
 			active BOOLEAN NOT NULL DEFAULT true,
 			created_at DATETIME NOT NULL,
 			updated_at DATETIME NOT NULL
@@ -159,6 +161,7 @@ func (s *Store) migrate() error {
 	for _, stmt := range []string{
 		`ALTER TABLE webhook_endpoints ADD COLUMN auth_header_name TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE webhook_endpoints ADD COLUMN auth_header_value TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE webhook_endpoints ADD COLUMN allowed_tenants TEXT NOT NULL DEFAULT '[]'`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil {
 			msg := strings.ToLower(err.Error())
@@ -207,15 +210,33 @@ func (s *Store) CreateEndpoint(ep *WebhookEndpoint) error {
 		ep.Active = true
 	}
 	eventJSON, _ := json.Marshal(ep.EventTypes)
-	_, err = s.db.Exec(s.rebind(`INSERT INTO webhook_endpoints (id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
-		ep.ID, ep.AgentID, ep.URL, ep.Secret, ep.AuthHeaderName, ep.AuthHeaderValue, string(eventJSON), ep.Active, ep.CreatedAt, ep.UpdatedAt,
+	tenantJSON, _ := json.Marshal(normalizeStringList(ep.AllowedTenants))
+	_, err = s.db.Exec(s.rebind(`INSERT INTO webhook_endpoints (id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, allowed_tenants, active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
+		ep.ID, ep.AgentID, ep.URL, ep.Secret, ep.AuthHeaderName, ep.AuthHeaderValue, string(eventJSON), string(tenantJSON), ep.Active, ep.CreatedAt, ep.UpdatedAt,
 	)
 	return err
 }
 
+func normalizeStringList(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		if _, ok := seen[raw]; ok {
+			continue
+		}
+		seen[raw] = struct{}{}
+		out = append(out, raw)
+	}
+	return out
+}
+
 func (s *Store) ListEndpoints() ([]WebhookEndpoint, error) {
-	rows, err := s.db.Query(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at FROM webhook_endpoints ORDER BY created_at`))
+	rows, err := s.db.Query(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, allowed_tenants, active, created_at, updated_at FROM webhook_endpoints ORDER BY created_at`))
 	if err != nil {
 		return nil, err
 	}
@@ -223,11 +244,12 @@ func (s *Store) ListEndpoints() ([]WebhookEndpoint, error) {
 	var out []WebhookEndpoint
 	for rows.Next() {
 		var ep WebhookEndpoint
-		var eventJSON string
-		if err := rows.Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
+		var eventJSON, tenantJSON string
+		if err := rows.Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &tenantJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(eventJSON), &ep.EventTypes)
+		_ = json.Unmarshal([]byte(tenantJSON), &ep.AllowedTenants)
 		out = append(out, ep)
 	}
 	return out, rows.Err()
@@ -240,13 +262,14 @@ func (s *Store) DeleteEndpoint(id string) error {
 
 func (s *Store) GetEndpointByAgentID(agentID string) (*WebhookEndpoint, error) {
 	var ep WebhookEndpoint
-	var eventJSON string
-	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at FROM webhook_endpoints WHERE agent_id=? AND active=true ORDER BY created_at DESC LIMIT 1`), agentID).
-		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
+	var eventJSON, tenantJSON string
+	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, allowed_tenants, active, created_at, updated_at FROM webhook_endpoints WHERE agent_id=? AND active=true ORDER BY created_at DESC LIMIT 1`), agentID).
+		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &tenantJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(eventJSON), &ep.EventTypes)
+	_ = json.Unmarshal([]byte(tenantJSON), &ep.AllowedTenants)
 	return &ep, nil
 }
 
@@ -334,13 +357,14 @@ func (s *Store) listPendingDeliveries(now time.Time, limit int) ([]ExternalDeliv
 
 func (s *Store) getEndpointByID(id string) (*WebhookEndpoint, error) {
 	var ep WebhookEndpoint
-	var eventJSON string
-	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, active, created_at, updated_at FROM webhook_endpoints WHERE id=?`), id).
-		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
+	var eventJSON, tenantJSON string
+	err := s.db.QueryRow(s.rebind(`SELECT id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, allowed_tenants, active, created_at, updated_at FROM webhook_endpoints WHERE id=?`), id).
+		Scan(&ep.ID, &ep.AgentID, &ep.URL, &ep.Secret, &ep.AuthHeaderName, &ep.AuthHeaderValue, &eventJSON, &tenantJSON, &ep.Active, &ep.CreatedAt, &ep.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	_ = json.Unmarshal([]byte(eventJSON), &ep.EventTypes)
+	_ = json.Unmarshal([]byte(tenantJSON), &ep.AllowedTenants)
 	return &ep, nil
 }
 

@@ -22,6 +22,7 @@ type webhookCreateRequest struct {
 	AuthHeaderName  string   `json:"auth_header_name"`
 	AuthHeaderValue string   `json:"auth_header_value"`
 	EventTypes      []string `json:"event_types"`
+	AllowedTenants  []string `json:"allowed_tenants"`
 }
 
 func webhookListHandler(store *webhook.Store) http.HandlerFunc {
@@ -62,6 +63,7 @@ func webhookCreateHandler(store *webhook.Store) http.HandlerFunc {
 			AuthHeaderName:  req.AuthHeaderName,
 			AuthHeaderValue: req.AuthHeaderValue,
 			EventTypes:      req.EventTypes,
+			AllowedTenants:  req.AllowedTenants,
 			Active:          true,
 		}
 		if err := store.CreateEndpoint(ep); err != nil {
