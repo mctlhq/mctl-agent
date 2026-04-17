@@ -111,9 +111,12 @@ func (h *AlertHandler) processAlert(a alert) {
 
 	// Flap suppression: if the same alert was just resolved, skip creating
 	// a fresh ticket. Prevents Telegram spam from alerts that toggle
-	// above/below threshold (e.g. CPU throttling near the limit).
+	// above/below threshold (e.g. CPU throttling near the limit). The key
+	// includes alertName so that two Prometheus alerts mapped to the same
+	// ticket type (e.g. TenantCPUQuotaHigh and CPUThrottlingHigh both ->
+	// TypeResourceLimit) do not suppress each other.
 	if h.FlapCooldown > 0 {
-		recent, err := h.store.FindRecentlyResolved(tenant, service, tType, h.FlapCooldown)
+		recent, err := h.store.FindRecentlyResolved(tenant, service, tType, alertName, h.FlapCooldown)
 		if err != nil {
 			slog.Error("flap cooldown check failed", "error", err)
 		}

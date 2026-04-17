@@ -281,6 +281,69 @@ func TestAlertHandlerFlapCooldown(t *testing.T) {
 	}
 }
 
+func TestAlertHandlerFlapCooldownKeyedByAlertName(t *testing.T) {
+	// Two distinct Prometheus alerts (CPUThrottlingHigh and
+	// TenantCPUQuotaHigh) both classify as TypeResourceLimit. When one
+	// resolves within the cooldown window, the other must still be able
+	// to open a ticket — they are independent incidents even though
+	// they share a ticket type.
+	store := newTestStore(t)
+
+	callCount := 0
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		callCount++
+	})
+	handler.FlapCooldown = 10 * time.Minute
+
+	fireThrottling := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname": "CPUThrottlingHigh",
+					"namespace": "platform-db",
+					"pod":       "shared-pg-1",
+				},
+			},
+		},
+	}
+	resolveThrottling := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "resolved",
+				Labels: map[string]string{
+					"alertname": "CPUThrottlingHigh",
+					"namespace": "platform-db",
+					"pod":       "shared-pg-1",
+				},
+			},
+		},
+	}
+	fireQuota := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname": "TenantCPUQuotaHigh",
+					"namespace": "platform-db",
+					"pod":       "shared-pg-1",
+				},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(fireThrottling)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	body, _ = json.Marshal(resolveThrottling)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	body, _ = json.Marshal(fireQuota)
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+
+	if callCount != 2 {
+		t.Errorf("expected 2 callbacks (different alertnames are independent), got %d", callCount)
+	}
+}
+
 func TestAlertHandlerFlapCooldownDisabled(t *testing.T) {
 	store := newTestStore(t)
 
