@@ -29,6 +29,10 @@ import (
 type AlertHandler struct {
 	store    *ticket.Store
 	onTicket func(*ticket.Ticket)
+	// FlapCooldown suppresses creation of a new ticket for the same
+	// (tenant, service, type) if a previous ticket was resolved within
+	// this window. Zero disables the cooldown.
+	FlapCooldown time.Duration
 }
 
 // NewAlertHandler creates a new AlertManager webhook handler.
@@ -103,6 +107,22 @@ func (h *AlertHandler) processAlert(a alert) {
 	if existing != nil {
 		slog.Debug("duplicate ticket exists", "id", existing.ID, "alertname", alertName)
 		return
+	}
+
+	// Flap suppression: if the same alert was just resolved, skip creating
+	// a fresh ticket. Prevents Telegram spam from alerts that toggle
+	// above/below threshold (e.g. CPU throttling near the limit).
+	if h.FlapCooldown > 0 {
+		recent, err := h.store.FindRecentlyResolved(tenant, service, tType, h.FlapCooldown)
+		if err != nil {
+			slog.Error("flap cooldown check failed", "error", err)
+		}
+		if recent != nil {
+			slog.Info("suppressing flap alert within cooldown",
+				"alertname", alertName, "tenant", tenant, "service", service,
+				"previous_ticket", recent.ID, "cooldown", h.FlapCooldown)
+			return
+		}
 	}
 
 	summary := a.Annotations["summary"]

@@ -96,6 +96,7 @@ func main() {
 
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
+	alertHandler.FlapCooldown = cfg.AlertFlapCooldown
 	poller := monitor.NewPoller(mctlClient, store, pipe.ProcessTicket)
 
 	// GitHub Actions webhook handler (optional — enabled when GITHUB_WEBHOOK_SECRET is set).

@@ -43,6 +43,7 @@ type Config struct {
 	WebhookEnabled      bool
 	WebhookCallbackURL  string
 	WebhookDefaultTTL   time.Duration
+	AlertFlapCooldown   time.Duration
 }
 
 func Load() Config {
@@ -89,6 +90,13 @@ func Load() Config {
 		}
 	}
 
+	alertFlapCooldown := 10 * time.Minute
+	if v := os.Getenv("ALERT_FLAP_COOLDOWN"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			alertFlapCooldown = d
+		}
+	}
+
 	// Priority: DATABASE_URL > DB_PATH > default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -126,6 +134,7 @@ func Load() Config {
 		WebhookEnabled:      webhookEnabled,
 		WebhookCallbackURL:  envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
 		WebhookDefaultTTL:   webhookDefaultTTL,
+		AlertFlapCooldown:   alertFlapCooldown,
 	}
 }
 
