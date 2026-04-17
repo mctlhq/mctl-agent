@@ -211,11 +211,30 @@ func (s *Store) CreateEndpoint(ep *WebhookEndpoint) error {
 	}
 	eventJSON, _ := json.Marshal(ep.EventTypes)
 	tenantJSON, _ := json.Marshal(normalizeStringList(ep.AllowedTenants))
-	_, err = s.db.Exec(s.rebind(`INSERT INTO webhook_endpoints (id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, allowed_tenants, active, created_at, updated_at)
+
+	// Deactivate prior active endpoints for the same agent_id so that
+	// re-registering (e.g. to add allowed_tenants scoping) actually
+	// replaces the previous row. Otherwise the older endpoint — which
+	// likely has an empty allowed_tenants list, treated as unrestricted
+	// by the dispatcher — keeps receiving events for every tenant and
+	// defeats the tenant filter.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(s.rebind(`UPDATE webhook_endpoints SET active=?, updated_at=? WHERE agent_id=? AND active=?`),
+		false, now, ep.AgentID, true,
+	); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(s.rebind(`INSERT INTO webhook_endpoints (id, agent_id, url, secret, auth_header_name, auth_header_value, event_types, allowed_tenants, active, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`),
 		ep.ID, ep.AgentID, ep.URL, ep.Secret, ep.AuthHeaderName, ep.AuthHeaderValue, string(eventJSON), string(tenantJSON), ep.Active, ep.CreatedAt, ep.UpdatedAt,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func normalizeStringList(in []string) []string {
