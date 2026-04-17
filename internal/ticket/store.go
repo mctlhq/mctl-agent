@@ -418,6 +418,51 @@ func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket,
 	return s.scanTickets(rows)
 }
 
+// FindRecentlyResolved returns the most recent ticket with the given
+// (tenant, service, type, alertName) that was resolved within the window.
+// Used to suppress re-firing "flap" alerts that would otherwise create a
+// fresh ticket every time Prometheus toggles above/below threshold.
+//
+// alertName is part of the key because classifyAlert collapses multiple
+// distinct Prometheus alert names into shared ticket types (e.g.
+// TenantCPUQuotaHigh, TenantMemoryQuotaHigh, and CPUThrottlingHigh all
+// map to TypeResourceLimit). Keying only on type would let a recently
+// resolved incident suppress an unrelated one firing on the same
+// tenant/service. An empty alertName matches tickets whose alert_name
+// is blank — e.g. tickets created by the poller or other non-
+// AlertManager sources.
+func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName string, window time.Duration) (*Ticket, error) {
+	if window <= 0 {
+		return nil, nil
+	}
+	since := time.Now().UTC().Add(-window)
+	t := &Ticket{}
+	var resolvedAt sql.NullTime
+	query := `
+		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
+		FROM tickets
+		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status=? AND resolved_at > ?
+		ORDER BY resolved_at DESC LIMIT 1`
+
+	err := s.db.QueryRow(s.rebind(query),
+		tenant, service, ticketType, alertName, StatusResolved, since,
+	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence,
+		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if resolvedAt.Valid {
+		t.ResolvedAt = &resolvedAt.Time
+	}
+	return t, nil
+}
+
 // ResolveByTenantService resolves open tickets matching tenant+service.
 func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
 	now := time.Now().UTC()
