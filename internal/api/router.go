@@ -110,32 +110,18 @@ func NewRouter(opts Options) http.Handler {
 
 func ticketListHandler(store *ticket.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		tickets, err := store.ListAll()
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
-		}
-
 		q := r.URL.Query()
 		status := strings.TrimSpace(q.Get("status"))
 		tenant := strings.TrimSpace(q.Get("tenant"))
 		service := strings.TrimSpace(q.Get("service"))
 
-		if status != "" || tenant != "" || service != "" {
-			filtered := tickets[:0]
-			for _, t := range tickets {
-				if status != "" && t.Status != status {
-					continue
-				}
-				if tenant != "" && t.Tenant != tenant {
-					continue
-				}
-				if service != "" && t.Service != service {
-					continue
-				}
-				filtered = append(filtered, t)
-			}
-			tickets = filtered
+		// Filters applied in SQL before the limit: narrow queries
+		// (e.g. `?tenant=platform-db&service=shared`) return every
+		// match even when the table is much larger than 100 rows.
+		tickets, err := store.ListByFilters(status, tenant, service, 100)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
 		}
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
