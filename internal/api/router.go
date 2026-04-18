@@ -115,6 +115,29 @@ func ticketListHandler(store *ticket.Store) http.HandlerFunc {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}
+
+		q := r.URL.Query()
+		status := strings.TrimSpace(q.Get("status"))
+		tenant := strings.TrimSpace(q.Get("tenant"))
+		service := strings.TrimSpace(q.Get("service"))
+
+		if status != "" || tenant != "" || service != "" {
+			filtered := tickets[:0]
+			for _, t := range tickets {
+				if status != "" && t.Status != status {
+					continue
+				}
+				if tenant != "" && t.Tenant != tenant {
+					continue
+				}
+				if service != "" && t.Service != service {
+					continue
+				}
+				filtered = append(filtered, t)
+			}
+			tickets = filtered
+		}
+
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"items": tickets,
 			"count": len(tickets),
