@@ -301,6 +301,62 @@ func TestStoreCountPRsInWindow(t *testing.T) {
 	}
 }
 
+func TestListByFiltersSurviveTableCap(t *testing.T) {
+	// Regression: SQL-side filtering must happen BEFORE LIMIT, otherwise
+	// a narrow query (e.g. tenant=X AND service=Y) silently drops matches
+	// that fall outside the latest 100 rows and looks like "none found".
+	//
+	// The matching rows MUST be older than the noise rows — otherwise
+	// they land inside the latest-100 window and a buggy "LIMIT then
+	// filter" implementation would still pass this test.
+	store := newTestStore(t)
+
+	// 5 matching tickets, inserted first (oldest).
+	for i := 0; i < 5; i++ {
+		tk := &Ticket{
+			Source:  SourceAlertManager,
+			Type:    TypeResourceLimit,
+			Tenant:  "platform-db",
+			Service: "shared",
+			Status:  StatusAnalyzing,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Ensure strictly monotonically newer timestamps on the noise batch
+	// so ORDER BY created_at DESC puts the 150 noise rows ahead of the
+	// 5 matching ones. SQLite's DATETIME has microsecond precision; a
+	// small sleep is enough.
+	time.Sleep(10 * time.Millisecond)
+	// 150 noise tickets for a different tenant/service (newer).
+	for i := 0; i < 150; i++ {
+		tk := &Ticket{
+			Source:  SourceAlertManager,
+			Type:    TypeResourceLimit,
+			Tenant:  "other",
+			Service: "svc",
+			Status:  StatusSuppressed,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := store.ListByFilters("analyzing", "platform-db", "shared", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 {
+		t.Errorf("expected all 5 analyzing platform-db/shared tickets, got %d", len(got))
+	}
+	for _, tk := range got {
+		if tk.Status != StatusAnalyzing || tk.Tenant != "platform-db" || tk.Service != "shared" {
+			t.Errorf("unexpected ticket in result: %+v", tk)
+		}
+	}
+}
+
 func TestEvidenceJSON(t *testing.T) {
 	data := map[string]string{"health": "Degraded"}
 	got := EvidenceJSON(data)

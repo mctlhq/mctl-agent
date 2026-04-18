@@ -124,6 +124,77 @@ func TestTicketListEndpoint(t *testing.T) {
 	}
 }
 
+func TestTicketListEndpointFilters(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+
+	mkTicket := func(tenant, service, status string) {
+		t.Helper()
+		tk := &ticket.Ticket{
+			Source:   ticket.SourceAlertManager,
+			Type:     ticket.TypeResourceLimit,
+			Tenant:   tenant,
+			Service:  service,
+			Severity: ticket.SeverityWarning,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+		if status != ticket.StatusOpen {
+			tk.Status = status
+			if err := store.Update(tk); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	mkTicket("platform-db", "shared", ticket.StatusSuppressed)
+	mkTicket("platform-db", "shared", ticket.StatusSuppressed)
+	mkTicket("platform-db", "shared", ticket.StatusAnalyzing)
+	mkTicket("labs", "openclaw", ticket.StatusAnalyzing)
+	mkTicket("data", "etl", ticket.StatusResolved)
+
+	router := NewRouter(Options{
+		Store:    store,
+		Pipeline: pipe,
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+
+	fetch := func(query string) int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/tickets?"+query, nil)
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s: status = %d, want 200", query, w.Code)
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+		return int(resp["count"].(float64))
+	}
+
+	if got := fetch(""); got != 5 {
+		t.Errorf("no filter: count = %d, want 5", got)
+	}
+	if got := fetch("status=analyzing"); got != 2 {
+		t.Errorf("status=analyzing: count = %d, want 2", got)
+	}
+	if got := fetch("status=suppressed"); got != 2 {
+		t.Errorf("status=suppressed: count = %d, want 2", got)
+	}
+	if got := fetch("tenant=platform-db"); got != 3 {
+		t.Errorf("tenant=platform-db: count = %d, want 3", got)
+	}
+	if got := fetch("tenant=platform-db&service=shared&status=analyzing"); got != 1 {
+		t.Errorf("combined filter: count = %d, want 1", got)
+	}
+	if got := fetch("status=no-such-status"); got != 0 {
+		t.Errorf("unknown status: count = %d, want 0", got)
+	}
+}
+
 func TestSkillListEndpoint(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)

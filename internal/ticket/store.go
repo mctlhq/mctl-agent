@@ -256,12 +256,42 @@ func (s *Store) ListOpen() ([]*Ticket, error) {
 
 // ListAll returns all tickets (latest first, limit 100).
 func (s *Store) ListAll() ([]*Ticket, error) {
+	return s.ListByFilters("", "", "", 100)
+}
+
+// ListByFilters returns tickets matching the given filters, latest first.
+// Empty filter values are ignored. limit <= 0 means no LIMIT clause.
+// Filters are applied in SQL before the limit so narrow queries return
+// correct results even when the underlying table is much larger.
+func (s *Store) ListByFilters(status, tenant, service string, limit int) ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
-		FROM tickets ORDER BY created_at DESC LIMIT 100`
+		FROM tickets`
+	var clauses []string
+	var args []interface{}
+	if status != "" {
+		clauses = append(clauses, "status=?")
+		args = append(args, status)
+	}
+	if tenant != "" {
+		clauses = append(clauses, "tenant=?")
+		args = append(args, tenant)
+	}
+	if service != "" {
+		clauses = append(clauses, "service=?")
+		args = append(args, service)
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+	query += " ORDER BY created_at DESC"
+	if limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, limit)
+	}
 
-	rows, err := s.db.Query(s.rebind(query))
+	rows, err := s.db.Query(s.rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}
