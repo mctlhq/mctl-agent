@@ -188,6 +188,17 @@ var heartbeatTicketTypes = map[string]bool{
 	ticket.TypeGitHubActionsFailed: true, // Touch in github_webhook
 }
 
+// heartbeatTicketSources lists ticket sources that emit heartbeats.
+// SourceManual (used by Pipeline.TriggerAnalysis for user-initiated
+// investigations) has no recurring signal and must never be auto-
+// resolved by age — otherwise a paused pipeline or a long-running
+// investigation would be silently closed.
+var heartbeatTicketSources = map[string]bool{
+	ticket.SourceAlertManager:  true,
+	ticket.SourcePolling:       true,
+	ticket.SourceGitHubWebhook: true,
+}
+
 // resolveStale closes open tickets whose UpdatedAt has not advanced
 // within StaleAfter. UpdatedAt is refreshed on each duplicate-signal
 // hit (see alerthandler.go, github_webhook.go, and pollDegraded
@@ -227,6 +238,11 @@ func (p *Poller) resolveStale(state refreshState) {
 		if !t.UpdatedAt.Before(cutoff) {
 			continue
 		}
+		if !heartbeatTicketSources[t.Source] {
+			slog.Debug("poller: skipping stale GC, ticket source has no heartbeat",
+				"id", t.ID, "source", t.Source)
+			continue
+		}
 		if !heartbeatTicketTypes[t.Type] {
 			slog.Debug("poller: skipping stale GC, ticket type has no heartbeat",
 				"id", t.ID, "type", t.Type)
@@ -237,9 +253,18 @@ func (p *Poller) resolveStale(state refreshState) {
 				"id", t.ID, "tenant", t.Tenant, "service", t.Service)
 			continue
 		}
-		if err := p.store.ResolveByID(t.ID); err != nil {
+		resolved, err := p.store.ResolveByID(t.ID)
+		if err != nil {
 			slog.Error("poller: failed to auto-resolve stale ticket",
 				"error", err, "id", t.ID)
+			continue
+		}
+		if !resolved {
+			// Ticket was promoted out of status=open between ListOpen
+			// and ResolveByID — pipeline owns it, do not claim a false
+			// resolution.
+			slog.Debug("poller: stale GC no-op, ticket advanced concurrently",
+				"id", t.ID)
 			continue
 		}
 		slog.Info("poller: auto-resolved stale ticket",

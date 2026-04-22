@@ -509,16 +509,27 @@ func (s *Store) Touch(id string) error {
 // silently overwritten by the stale-ticket GC; the resolver reads
 // ListOpen and calls ResolveByID, and the pipeline can race between
 // those two steps.
-func (s *Store) ResolveByID(id string) error {
+//
+// Returns true when a row was actually updated, false when the gate
+// filtered the write (e.g. the pipeline promoted the ticket first).
+// Callers should check the bool before logging a resolution.
+func (s *Store) ResolveByID(id string) (bool, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
 		WHERE id=? AND status=?`
-	_, err := s.db.Exec(s.rebind(query),
+	res, err := s.db.Exec(s.rebind(query),
 		StatusResolved, now, now,
 		id, StatusOpen,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // ResolveByTenantService resolves open tickets matching tenant+service.

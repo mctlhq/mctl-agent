@@ -153,8 +153,12 @@ func TestResolveByIDIgnoresNonOpenTickets(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			if err := store.ResolveByID(tk.ID); err != nil {
+			resolved, err := store.ResolveByID(tk.ID)
+			if err != nil {
 				t.Fatal(err)
+			}
+			if resolved {
+				t.Errorf("ResolveByID returned resolved=true for status=%s; should report no-op", status)
 			}
 
 			got, err := store.Get(tk.ID)
@@ -192,6 +196,37 @@ func TestPollerResolveStaleDisabledWhenZero(t *testing.T) {
 	got, _ := store.Get(stale.ID)
 	if got.Status == ticket.StatusResolved {
 		t.Error("StaleAfter=0 must disable the GC; ticket was still resolved")
+	}
+}
+
+func TestResolveStaleSkipsManualSource(t *testing.T) {
+	// Pipeline.TriggerAnalysis creates SourceManual tickets (e.g. from
+	// MCP for a user-initiated investigation). They have no recurring
+	// signal, so UpdatedAt can only advance through pipeline state
+	// transitions. A paused pipeline + a still-open manual ticket must
+	// not be silently closed by the stale GC.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 24 * time.Hour
+
+	manual := &ticket.Ticket{
+		Source:   ticket.SourceManual,
+		Type:     ticket.TypeArgoCDDegraded, // whitelisted type
+		Tenant:   "labs",
+		Service:  "user-poked",
+		Summary:  "triggered via MCP",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(manual); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, manual.ID, time.Now().UTC().Add(-30*time.Hour))
+
+	p.resolveStale(refreshState{})
+
+	got, _ := store.Get(manual.ID)
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("SourceManual ticket must be spared by stale GC; got status=%q", got.Status)
 	}
 }
 
