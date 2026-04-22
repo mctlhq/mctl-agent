@@ -118,6 +118,12 @@ func (h *GitHubWebhookHandler) processWorkflowRun(event workflowRunEvent) {
 		slog.Error("dedup check failed for github webhook", "error", err)
 	}
 	if existing != nil {
+		// Bump UpdatedAt so the stale-ticket GC recognizes the failure
+		// is still recurring; otherwise a workflow that keeps failing
+		// on every push would silently auto-resolve after StaleAfter.
+		if err := h.store.Touch(existing.ID); err != nil {
+			slog.Error("failed to touch github webhook ticket", "error", err, "id", existing.ID)
+		}
 		slog.Debug("duplicate GitHub Actions ticket exists", "id", existing.ID, "repo", repo)
 		return
 	}

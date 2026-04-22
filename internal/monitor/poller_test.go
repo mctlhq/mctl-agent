@@ -238,6 +238,58 @@ func TestResolveStaleArgoGatedOnRefresh(t *testing.T) {
 	}
 }
 
+func TestResolveStaleOnlyHeartbeatTypes(t *testing.T) {
+	// Only ticket types whose sources emit a Touch on duplicate events
+	// are safe to GC by UpdatedAt age. Other types (currently none —
+	// this test documents the contract) must be skipped.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 24 * time.Hour
+
+	mkStale := func(typ string) string {
+		tk := &ticket.Ticket{
+			Source:   ticket.SourceAlertManager,
+			Type:     typ,
+			Tenant:   "labs",
+			Service:  "svc-" + typ,
+			Summary:  "x",
+			Severity: ticket.SeverityWarning,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+		backdate(t, store, tk.ID, time.Now().UTC().Add(-30*time.Hour))
+		return tk.ID
+	}
+
+	// Heartbeat-enabled types must be resolved.
+	resolvable := []string{
+		ticket.TypePodCrashloop,
+		ticket.TypeResourceLimit,
+		ticket.TypeWorkflowFailed,
+		ticket.TypeGeneric,
+		ticket.TypeGitHubActionsFailed,
+	}
+	var resolvableIDs []string
+	for _, typ := range resolvable {
+		resolvableIDs = append(resolvableIDs, mkStale(typ))
+	}
+	// Unknown type must be preserved by the whitelist gate.
+	unknownID := mkStale(ticket.TypeDeploymentFailed)
+
+	p.resolveStale(refreshState{})
+
+	for i, id := range resolvableIDs {
+		if got, _ := store.Get(id); got.Status != ticket.StatusResolved {
+			t.Errorf("heartbeat type %q: status=%q, want resolved", resolvable[i], got.Status)
+		}
+	}
+	if got, _ := store.Get(unknownID); got.Status == ticket.StatusResolved {
+		t.Errorf("non-heartbeat type %q must be spared; got %q",
+			ticket.TypeDeploymentFailed, got.Status)
+	}
+}
+
 func TestResolveStaleArgoSkippedWhenAllUnknown(t *testing.T) {
 	// ListServices failed entirely — every ArgoCDDegraded ticket must
 	// be skipped, but AlertManager-based tickets still GC.

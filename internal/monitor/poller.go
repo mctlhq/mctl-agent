@@ -170,24 +170,46 @@ func (p *Poller) pollDegraded() refreshState {
 	return refreshState{failedServices: failed}
 }
 
+// heartbeatTicketTypes lists ticket types whose creation path has a
+// paired Touch-on-duplicate heartbeat in this package. Only these types
+// are eligible for auto-resolve by UpdatedAt age — for any other type,
+// a stale UpdatedAt does not necessarily mean the underlying signal
+// stopped, because the source may not refresh UpdatedAt on recurring
+// events.
+//
+// Adding a new ticket type here requires that its source also calls
+// store.Touch on every duplicate/repeat event.
+var heartbeatTicketTypes = map[string]bool{
+	ticket.TypeArgoCDDegraded:      true, // Touch in pollDegraded
+	ticket.TypePodCrashloop:        true, // Touch in alerthandler
+	ticket.TypeResourceLimit:       true, // Touch in alerthandler
+	ticket.TypeWorkflowFailed:      true, // Touch in alerthandler
+	ticket.TypeGeneric:             true, // Touch in alerthandler
+	ticket.TypeGitHubActionsFailed: true, // Touch in github_webhook
+}
+
 // resolveStale closes open tickets whose UpdatedAt has not advanced
-// within StaleAfter. UpdatedAt is refreshed on each duplicate-alert hit
-// (see alerthandler.go and pollDegraded above), so a frozen UpdatedAt
-// means the underlying signal has stopped firing.
+// within StaleAfter. UpdatedAt is refreshed on each duplicate-signal
+// hit (see alerthandler.go, github_webhook.go, and pollDegraded
+// above), so a frozen UpdatedAt means the underlying signal has
+// stopped recurring.
 //
 // Only tickets in StatusOpen are considered — tickets the pipeline is
 // actively analyzing or fixing keep their UpdatedAt current through
 // their own status transitions, and we never want to close those out
 // from under the pipeline.
 //
+// Only ticket types listed in heartbeatTicketTypes are GC-eligible.
+// Anything else might not refresh UpdatedAt on recurring signals and
+// would be false-resolved on age alone.
+//
 // For TypeArgoCDDegraded tickets, GC is further gated on the current
 // cycle having reached the underlying service. If mctl-api could not
 // enumerate services or the specific service's health fetch failed,
 // the ticket is skipped this cycle — its stalled UpdatedAt is a
-// telemetry gap, not real recovery. AlertManager-based ticket types
-// (pod_crashloop, resource_limit, workflow_failed, generic) are
-// independent of mctl-api health and are GC'd purely by UpdatedAt, so
-// a partial poller outage does not block noise cleanup.
+// telemetry gap, not real recovery. The other heartbeat-enabled types
+// do not depend on mctl-api reachability and are GC'd purely by
+// UpdatedAt, so a partial poller outage does not block noise cleanup.
 func (p *Poller) resolveStale(state refreshState) {
 	if p.StaleAfter <= 0 {
 		return
@@ -203,6 +225,11 @@ func (p *Poller) resolveStale(state refreshState) {
 			continue
 		}
 		if !t.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if !heartbeatTicketTypes[t.Type] {
+			slog.Debug("poller: skipping stale GC, ticket type has no heartbeat",
+				"id", t.ID, "type", t.Type)
 			continue
 		}
 		if t.Type == ticket.TypeArgoCDDegraded && !state.argoRefreshed(t.Tenant, t.Service) {
