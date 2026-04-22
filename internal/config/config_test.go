@@ -111,3 +111,27 @@ func TestLoadPreservesExplicitGitHubStyleMctlAPIToken(t *testing.T) {
 		t.Fatalf("MctlAPIToken = %q, want explicit override", cfg.MctlAPIToken)
 	}
 }
+
+func TestLoadAlertIgnoreServiceRegexDefaultAndEmpty(t *testing.T) {
+	// Default: env unset → a non-empty pattern is used.
+	cfg := Load()
+	if cfg.AlertIgnoreServiceRegex == "" {
+		t.Error("expected non-empty default for AlertIgnoreServiceRegex")
+	}
+
+	// Empty explicit value disables the filter (main.go skips compile
+	// when empty). envOr would have swallowed this and returned the
+	// default.
+	t.Setenv("ALERT_IGNORE_SERVICE_REGEX", "")
+	cfg = Load()
+	if cfg.AlertIgnoreServiceRegex != "" {
+		t.Errorf("empty env should disable filter, got %q", cfg.AlertIgnoreServiceRegex)
+	}
+
+	// Custom pattern honored.
+	t.Setenv("ALERT_IGNORE_SERVICE_REGEX", "^custom-.*$")
+	cfg = Load()
+	if cfg.AlertIgnoreServiceRegex != "^custom-.*$" {
+		t.Errorf("custom pattern not honored: %q", cfg.AlertIgnoreServiceRegex)
+	}
+}

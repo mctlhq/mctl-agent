@@ -106,10 +106,12 @@ func Load() Config {
 		}
 	}
 
-	alertIgnoreServiceRegex := envOr(
-		"ALERT_IGNORE_SERVICE_REGEX",
-		`^(openclawpr\d+|.*-demo\d*|hooktest-.*|svcprobe-.*|external-agent-demo.*|auto-remediation-demo)$`,
-	)
+	// Default pattern; empty env explicitly disables the filter, so we
+	// cannot use envOr (which treats "" as "fall back to default").
+	alertIgnoreServiceRegex := `^(openclawpr\d+|.*-demo\d*|hooktest-.*|svcprobe-.*|external-agent-demo.*|auto-remediation-demo)$`
+	if v, ok := os.LookupEnv("ALERT_IGNORE_SERVICE_REGEX"); ok {
+		alertIgnoreServiceRegex = v
+	}
 
 	// Priority: DATABASE_URL > DB_PATH > default
 	dbURL := os.Getenv("DATABASE_URL")

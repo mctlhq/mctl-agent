@@ -60,15 +60,25 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 }
 
 func (p *Poller) poll() {
-	p.pollDegraded()
+	// Stale-ticket GC is gated on a successful health refresh. If mctl-api
+	// is unreachable, open degraded tickets do not get their UpdatedAt
+	// touched, so running the GC would auto-resolve them based on a
+	// telemetry outage rather than real recovery.
+	if !p.pollDegraded() {
+		slog.Warn("poller: skipping stale-ticket GC, pollDegraded did not complete")
+		return
+	}
 	p.resolveStale()
 }
 
-func (p *Poller) pollDegraded() {
+// pollDegraded reports whether the degraded-service scan completed
+// successfully. A false return means downstream stale-ticket GC must
+// be skipped this cycle.
+func (p *Poller) pollDegraded() bool {
 	services, err := p.client.ListServices()
 	if err != nil {
 		slog.Error("poller: failed to list services", "error", err)
-		return
+		return false
 	}
 
 	slog.Debug("poller: checking services", "count", len(services))
@@ -138,6 +148,7 @@ func (p *Poller) pollDegraded() {
 			p.onTicket(t)
 		}
 	}
+	return true
 }
 
 // resolveStale closes open tickets whose UpdatedAt has not advanced
