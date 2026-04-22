@@ -493,6 +493,45 @@ func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName stri
 	return t, nil
 }
 
+// Touch bumps the ticket's UpdatedAt without changing any other field.
+// Used on duplicate-alert firings so stale-ticket GC can tell a still-
+// firing alert from one that stopped firing.
+func (s *Store) Touch(id string) error {
+	now := time.Now().UTC()
+	query := `UPDATE tickets SET updated_at=? WHERE id=?`
+	_, err := s.db.Exec(s.rebind(query), now, id)
+	return err
+}
+
+// ResolveByID marks a single open ticket as resolved. The UPDATE is
+// gated on status=open so concurrent pipeline transitions (a ticket
+// moving from open → analyzing / fix_proposed / fix_applied) are not
+// silently overwritten by the stale-ticket GC; the resolver reads
+// ListOpen and calls ResolveByID, and the pipeline can race between
+// those two steps.
+//
+// Returns true when a row was actually updated, false when the gate
+// filtered the write (e.g. the pipeline promoted the ticket first).
+// Callers should check the bool before logging a resolution.
+func (s *Store) ResolveByID(id string) (bool, error) {
+	now := time.Now().UTC()
+	query := `
+		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
+		WHERE id=? AND status=?`
+	res, err := s.db.Exec(s.rebind(query),
+		StatusResolved, now, now,
+		id, StatusOpen,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // ResolveByTenantService resolves open tickets matching tenant+service.
 func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
 	now := time.Now().UTC()

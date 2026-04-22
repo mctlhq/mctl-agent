@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"syscall"
 	"time"
 
@@ -97,7 +98,18 @@ func main() {
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
 	alertHandler.FlapCooldown = cfg.AlertFlapCooldown
+	if cfg.AlertIgnoreServiceRegex != "" {
+		re, err := regexp.Compile(cfg.AlertIgnoreServiceRegex)
+		if err != nil {
+			slog.Error("invalid ALERT_IGNORE_SERVICE_REGEX; ignoring",
+				"error", err, "pattern", cfg.AlertIgnoreServiceRegex)
+		} else {
+			alertHandler.IgnoreService = re
+			slog.Info("alert service filter enabled", "pattern", cfg.AlertIgnoreServiceRegex)
+		}
+	}
 	poller := monitor.NewPoller(mctlClient, store, pipe.ProcessTicket)
+	poller.StaleAfter = cfg.AutoResolveStaleAfter
 
 	// GitHub Actions webhook handler (optional — enabled when GITHUB_WEBHOOK_SECRET is set).
 	var ghWebhookHandler *monitor.GitHubWebhookHandler

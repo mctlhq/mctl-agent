@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"testing"
 	"time"
 
@@ -416,5 +417,143 @@ func TestAlertHandlerUnknownAlert(t *testing.T) {
 	// Unknown alerts are now routed as TypeGeneric — callback must fire.
 	if callCount != 1 {
 		t.Errorf("expected 1 callback for unknown alert (generic routing), got %d", callCount)
+	}
+}
+
+func TestAlertHandlerIgnoreServiceFilter(t *testing.T) {
+	store := newTestStore(t)
+
+	callCount := 0
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { callCount++ })
+	handler.IgnoreService = regexp.MustCompile(`^(openclawpr\d+|hooktest-.*)$`)
+
+	cases := []struct {
+		name        string
+		pod         string
+		wantDropped bool
+	}{
+		{"matches openclawprN", "openclawpr7-6d4b5c7f8-abc12", true},
+		{"matches hooktest", "hooktest-service-6d4b5c7f8-abc12", true},
+		{"non-matching service creates ticket", "api-6d4b5c7f8-abc12", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			callCount = 0
+			// Use a unique tenant per case so dedup does not hide drops
+			// between sub-tests (dedup keys on tenant+service+type).
+			ns := "labs-" + tc.name[:4]
+			payload := alertManagerPayload{
+				Alerts: []alert{
+					{
+						Status: "firing",
+						Labels: map[string]string{
+							"alertname": "PodCrashLooping",
+							"namespace": ns,
+							"pod":       tc.pod,
+						},
+					},
+				},
+			}
+			body, _ := json.Marshal(payload)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			if tc.wantDropped && callCount != 0 {
+				t.Errorf("expected ticket to be dropped by filter, got %d callbacks", callCount)
+			}
+			if !tc.wantDropped && callCount != 1 {
+				t.Errorf("expected 1 ticket callback, got %d", callCount)
+			}
+		})
+	}
+}
+
+func TestAlertHandlerIgnoreFilterSkipsResolve(t *testing.T) {
+	// A resolved alert must still close existing tickets even if the
+	// service name matches the ignore filter — otherwise any ticket that
+	// was created before the filter was added would be stuck forever.
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {})
+
+	// Create a ticket directly (simulating one created before filter existed).
+	t0 := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypePodCrashloop,
+		Tenant:   "labs",
+		Service:  "hooktest-service",
+		Summary:  "legacy",
+		Severity: ticket.SeverityCritical,
+	}
+	if err := store.Create(t0); err != nil {
+		t.Fatal(err)
+	}
+
+	// Enable filter.
+	handler.IgnoreService = regexp.MustCompile(`^hooktest-.*$`)
+
+	// Send a resolved alert for the filtered service.
+	resolve := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "resolved",
+				Labels: map[string]string{
+					"alertname": "PodCrashLooping",
+					"namespace": "labs",
+					"pod":       "hooktest-service-6d4b5c7f8-abc12",
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(resolve)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	open, _ := store.ListOpen()
+	if len(open) != 0 {
+		t.Errorf("expected legacy ticket resolved despite filter, still open: %d", len(open))
+	}
+}
+
+func TestAlertHandlerDedupBumpsUpdatedAt(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {})
+
+	payload := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname": "PodCrashLooping",
+					"namespace": "billing",
+					"pod":       "api-6d4b5c7f8-abc12",
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(payload)
+
+	// First fire: creates ticket.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	open, _ := store.ListOpen()
+	if len(open) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(open))
+	}
+	firstUpdated := open[0].UpdatedAt
+
+	// Force a gap, then fire the duplicate. Touch should advance UpdatedAt.
+	time.Sleep(20 * time.Millisecond)
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	open, _ = store.ListOpen()
+	if len(open) != 1 {
+		t.Fatalf("expected 1 ticket after dup, got %d", len(open))
+	}
+	if !open[0].UpdatedAt.After(firstUpdated) {
+		t.Errorf("expected UpdatedAt to advance on duplicate alert; was %v, is %v",
+			firstUpdated, open[0].UpdatedAt)
 	}
 }
