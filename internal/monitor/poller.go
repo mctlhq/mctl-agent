@@ -72,8 +72,12 @@ func (p *Poller) poll() {
 }
 
 // pollDegraded reports whether the degraded-service scan completed
-// successfully. A false return means downstream stale-ticket GC must
-// be skipped this cycle.
+// successfully for every service. A false return — triggered by
+// ListServices failing or ANY per-service GetServiceStatus failing —
+// means open Degraded tickets could not all be Touch-refreshed this
+// cycle, so downstream stale-ticket GC must be skipped to avoid
+// auto-resolving incidents whose UpdatedAt stalled on a transient
+// status-endpoint error rather than real recovery.
 func (p *Poller) pollDegraded() bool {
 	services, err := p.client.ListServices()
 	if err != nil {
@@ -83,6 +87,7 @@ func (p *Poller) pollDegraded() bool {
 
 	slog.Debug("poller: checking services", "count", len(services))
 
+	allRefreshed := true
 	for _, svc := range services {
 		team := svc.Team
 		app := svc.App
@@ -92,7 +97,9 @@ func (p *Poller) pollDegraded() bool {
 
 		status, err := p.client.GetServiceStatus(team, app)
 		if err != nil {
-			slog.Debug("poller: failed to get status", "team", team, "app", app, "error", err)
+			slog.Warn("poller: failed to get status; will skip stale GC this cycle",
+				"team", team, "app", app, "error", err)
+			allRefreshed = false
 			continue
 		}
 
@@ -148,7 +155,7 @@ func (p *Poller) pollDegraded() bool {
 			p.onTicket(t)
 		}
 	}
-	return true
+	return allRefreshed
 }
 
 // resolveStale closes open tickets whose UpdatedAt has not advanced
