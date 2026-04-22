@@ -28,6 +28,9 @@ type Poller struct {
 	client   *mctlclient.Client
 	store    *ticket.Store
 	onTicket func(*ticket.Ticket)
+	// StaleAfter enables auto-resolution of open tickets whose UpdatedAt
+	// has not advanced within this window. Zero disables the GC pass.
+	StaleAfter time.Duration
 }
 
 // NewPoller creates a new service health poller.
@@ -57,6 +60,11 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 }
 
 func (p *Poller) poll() {
+	p.pollDegraded()
+	p.resolveStale()
+}
+
+func (p *Poller) pollDegraded() {
 	services, err := p.client.ListServices()
 	if err != nil {
 		slog.Error("poller: failed to list services", "error", err)
@@ -94,6 +102,11 @@ func (p *Poller) poll() {
 			continue
 		}
 		if existing != nil {
+			// Bump UpdatedAt so stale-ticket GC sees the condition is
+			// still active.
+			if err := p.store.Touch(existing.ID); err != nil {
+				slog.Error("poller: failed to touch ticket", "error", err, "id", existing.ID)
+			}
 			continue
 		}
 
@@ -124,5 +137,42 @@ func (p *Poller) poll() {
 		if p.onTicket != nil {
 			p.onTicket(t)
 		}
+	}
+}
+
+// resolveStale closes open tickets whose UpdatedAt has not advanced
+// within StaleAfter. UpdatedAt is refreshed on each duplicate-alert hit
+// (see alerthandler.go and pollDegraded above), so a frozen UpdatedAt
+// means the underlying signal has stopped firing.
+//
+// Only tickets in StatusOpen are considered — tickets the pipeline is
+// actively analyzing or fixing keep their UpdatedAt current through
+// their own status transitions, and we never want to close those out
+// from under the pipeline.
+func (p *Poller) resolveStale() {
+	if p.StaleAfter <= 0 {
+		return
+	}
+	open, err := p.store.ListOpen()
+	if err != nil {
+		slog.Error("poller: failed to list open tickets for stale GC", "error", err)
+		return
+	}
+	cutoff := time.Now().UTC().Add(-p.StaleAfter)
+	for _, t := range open {
+		if t.Status != ticket.StatusOpen {
+			continue
+		}
+		if !t.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if err := p.store.ResolveByID(t.ID); err != nil {
+			slog.Error("poller: failed to auto-resolve stale ticket",
+				"error", err, "id", t.ID)
+			continue
+		}
+		slog.Info("poller: auto-resolved stale ticket",
+			"id", t.ID, "tenant", t.Tenant, "service", t.Service,
+			"type", t.Type, "last_updated", t.UpdatedAt, "stale_after", p.StaleAfter)
 	}
 }

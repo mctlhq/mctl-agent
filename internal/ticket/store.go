@@ -493,6 +493,31 @@ func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName stri
 	return t, nil
 }
 
+// Touch bumps the ticket's UpdatedAt without changing any other field.
+// Used on duplicate-alert firings so stale-ticket GC can tell a still-
+// firing alert from one that stopped firing.
+func (s *Store) Touch(id string) error {
+	now := time.Now().UTC()
+	query := `UPDATE tickets SET updated_at=? WHERE id=?`
+	_, err := s.db.Exec(s.rebind(query), now, id)
+	return err
+}
+
+// ResolveByID marks a single ticket as resolved. Used by the stale-ticket
+// GC in the poller when an open ticket has not been refreshed within the
+// configured window.
+func (s *Store) ResolveByID(id string) error {
+	now := time.Now().UTC()
+	query := `
+		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
+		WHERE id=? AND status NOT IN (?, ?)`
+	_, err := s.db.Exec(s.rebind(query),
+		StatusResolved, now, now,
+		id, StatusResolved, StatusSuppressed,
+	)
+	return err
+}
+
 // ResolveByTenantService resolves open tickets matching tenant+service.
 func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
 	now := time.Now().UTC()

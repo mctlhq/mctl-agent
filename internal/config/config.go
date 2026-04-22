@@ -22,28 +22,30 @@ import (
 )
 
 type Config struct {
-	Port                string
-	MctlAPIURL          string
-	MctlAPIToken        string
-	AnthropicAPIKey     string
-	GitHubToken         string
-	GitHubOwner         string
-	GitHubRepo          string
-	GitHubWebhookSecret string
-	TelegramBotToken    string
-	TelegramChatID      string
-	OpenClawBotUsername string
-	PollInterval        time.Duration
-	DryRun              bool
-	DatabaseURL         string
-	MaxPRPerHour        int
-	MaxPRPerDay         int
-	AutoMergeEnabled    bool
-	EscalationTag       string
-	WebhookEnabled      bool
-	WebhookCallbackURL  string
-	WebhookDefaultTTL   time.Duration
-	AlertFlapCooldown   time.Duration
+	Port                    string
+	MctlAPIURL              string
+	MctlAPIToken            string
+	AnthropicAPIKey         string
+	GitHubToken             string
+	GitHubOwner             string
+	GitHubRepo              string
+	GitHubWebhookSecret     string
+	TelegramBotToken        string
+	TelegramChatID          string
+	OpenClawBotUsername     string
+	PollInterval            time.Duration
+	DryRun                  bool
+	DatabaseURL             string
+	MaxPRPerHour            int
+	MaxPRPerDay             int
+	AutoMergeEnabled        bool
+	EscalationTag           string
+	WebhookEnabled          bool
+	WebhookCallbackURL      string
+	WebhookDefaultTTL       time.Duration
+	AlertFlapCooldown       time.Duration
+	AutoResolveStaleAfter   time.Duration
+	AlertIgnoreServiceRegex string
 }
 
 func Load() Config {
@@ -97,6 +99,18 @@ func Load() Config {
 		}
 	}
 
+	autoResolveStaleAfter := 24 * time.Hour
+	if v := os.Getenv("AUTO_RESOLVE_STALE_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			autoResolveStaleAfter = d
+		}
+	}
+
+	alertIgnoreServiceRegex := envOr(
+		"ALERT_IGNORE_SERVICE_REGEX",
+		`^(openclawpr\d+|.*-demo\d*|hooktest-.*|svcprobe-.*|external-agent-demo.*|auto-remediation-demo)$`,
+	)
+
 	// Priority: DATABASE_URL > DB_PATH > default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -113,28 +127,30 @@ func Load() Config {
 	}
 
 	return Config{
-		Port:                envOr("PORT", "8081"),
-		MctlAPIURL:          envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
-		MctlAPIToken:        mctlAPIToken,
-		AnthropicAPIKey:     os.Getenv("ANTHROPIC_API_KEY"),
-		GitHubToken:         githubToken,
-		GitHubOwner:         envOr("GITHUB_OWNER", "mctlhq"),
-		GitHubRepo:          envOr("GITHUB_REPO", "mctl-gitops"),
-		GitHubWebhookSecret: os.Getenv("GITHUB_WEBHOOK_SECRET"),
-		TelegramBotToken:    os.Getenv("TELEGRAM_BOT_TOKEN"),
-		TelegramChatID:      os.Getenv("TELEGRAM_CHAT_ID"),
-		OpenClawBotUsername: envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
-		PollInterval:        pollInterval,
-		DryRun:              dryRun,
-		DatabaseURL:         dbURL,
-		MaxPRPerHour:        maxPRPerHour,
-		MaxPRPerDay:         maxPRPerDay,
-		AutoMergeEnabled:    autoMergeEnabled,
-		EscalationTag:       envOr("ESCALATION_TAG", "@mashkovd"),
-		WebhookEnabled:      webhookEnabled,
-		WebhookCallbackURL:  envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
-		WebhookDefaultTTL:   webhookDefaultTTL,
-		AlertFlapCooldown:   alertFlapCooldown,
+		Port:                    envOr("PORT", "8081"),
+		MctlAPIURL:              envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
+		MctlAPIToken:            mctlAPIToken,
+		AnthropicAPIKey:         os.Getenv("ANTHROPIC_API_KEY"),
+		GitHubToken:             githubToken,
+		GitHubOwner:             envOr("GITHUB_OWNER", "mctlhq"),
+		GitHubRepo:              envOr("GITHUB_REPO", "mctl-gitops"),
+		GitHubWebhookSecret:     os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		TelegramBotToken:        os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:          os.Getenv("TELEGRAM_CHAT_ID"),
+		OpenClawBotUsername:     envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
+		PollInterval:            pollInterval,
+		DryRun:                  dryRun,
+		DatabaseURL:             dbURL,
+		MaxPRPerHour:            maxPRPerHour,
+		MaxPRPerDay:             maxPRPerDay,
+		AutoMergeEnabled:        autoMergeEnabled,
+		EscalationTag:           envOr("ESCALATION_TAG", "@mashkovd"),
+		WebhookEnabled:          webhookEnabled,
+		WebhookCallbackURL:      envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
+		WebhookDefaultTTL:       webhookDefaultTTL,
+		AlertFlapCooldown:       alertFlapCooldown,
+		AutoResolveStaleAfter:   autoResolveStaleAfter,
+		AlertIgnoreServiceRegex: alertIgnoreServiceRegex,
 	}
 }
 
