@@ -96,7 +96,7 @@ func TestPollerResolvesStaleOpenTicket(t *testing.T) {
 	}
 	backdate(t, store, analyzing.ID, time.Now().UTC().Add(-30*time.Hour))
 
-	p.resolveStale()
+	p.resolveStale(refreshState{})
 
 	// Verify: oldTicket is resolved, others still open.
 	got, err := store.Get(oldTicket.ID)
@@ -187,10 +187,96 @@ func TestPollerResolveStaleDisabledWhenZero(t *testing.T) {
 	}
 	backdate(t, store, stale.ID, time.Now().UTC().Add(-30*24*time.Hour))
 
-	p.resolveStale()
+	p.resolveStale(refreshState{})
 
 	got, _ := store.Get(stale.ID)
 	if got.Status == ticket.StatusResolved {
 		t.Error("StaleAfter=0 must disable the GC; ticket was still resolved")
+	}
+}
+
+func TestResolveStaleArgoGatedOnRefresh(t *testing.T) {
+	// ArgoCDDegraded tickets must only be GC'd when the current cycle
+	// actually reached the underlying service. AlertManager-based
+	// tickets (e.g. pod_crashloop) are unaffected and must still GC.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 24 * time.Hour
+
+	mkTicket := func(typ, service string) string {
+		tk := &ticket.Ticket{
+			Source:   ticket.SourcePolling,
+			Type:     typ,
+			Tenant:   "labs",
+			Service:  service,
+			Summary:  "x",
+			Severity: ticket.SeverityWarning,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+		backdate(t, store, tk.ID, time.Now().UTC().Add(-30*time.Hour))
+		return tk.ID
+	}
+
+	argoRefreshed := mkTicket(ticket.TypeArgoCDDegraded, "svc-ok")
+	argoFailed := mkTicket(ticket.TypeArgoCDDegraded, "svc-broken")
+	podCrash := mkTicket(ticket.TypePodCrashloop, "some-pod")
+
+	// Run with partial failure: svc-broken's status fetch failed.
+	state := refreshState{failedServices: map[string]bool{"labs/svc-broken": true}}
+	p.resolveStale(state)
+
+	if got, _ := store.Get(argoRefreshed); got.Status != ticket.StatusResolved {
+		t.Errorf("argo ticket for refreshed service: status=%q, want resolved", got.Status)
+	}
+	if got, _ := store.Get(argoFailed); got.Status == ticket.StatusResolved {
+		t.Errorf("argo ticket for failed service must NOT be resolved; telemetry gap")
+	}
+	if got, _ := store.Get(podCrash); got.Status != ticket.StatusResolved {
+		t.Errorf("pod_crashloop ticket is AlertManager-based; must GC regardless; got %q", got.Status)
+	}
+}
+
+func TestResolveStaleArgoSkippedWhenAllUnknown(t *testing.T) {
+	// ListServices failed entirely — every ArgoCDDegraded ticket must
+	// be skipped, but AlertManager-based tickets still GC.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 24 * time.Hour
+
+	argoTicket := &ticket.Ticket{
+		Source:   ticket.SourcePolling,
+		Type:     ticket.TypeArgoCDDegraded,
+		Tenant:   "labs",
+		Service:  "any-svc",
+		Summary:  "x",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(argoTicket); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, argoTicket.ID, time.Now().UTC().Add(-30*time.Hour))
+
+	amTicket := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeResourceLimit,
+		Tenant:   "labs",
+		Service:  "throttler",
+		Summary:  "x",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(amTicket); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, amTicket.ID, time.Now().UTC().Add(-30*time.Hour))
+
+	p.resolveStale(refreshState{allUnknown: true})
+
+	if got, _ := store.Get(argoTicket.ID); got.Status == ticket.StatusResolved {
+		t.Error("ArgoCDDegraded ticket must not be resolved when allUnknown=true")
+	}
+	if got, _ := store.Get(amTicket.ID); got.Status != ticket.StatusResolved {
+		t.Errorf("AlertManager ticket must still GC; got %q", got.Status)
 	}
 }

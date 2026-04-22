@@ -59,35 +59,47 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-func (p *Poller) poll() {
-	// Stale-ticket GC is gated on a successful health refresh. If mctl-api
-	// is unreachable, open degraded tickets do not get their UpdatedAt
-	// touched, so running the GC would auto-resolve them based on a
-	// telemetry outage rather than real recovery.
-	if !p.pollDegraded() {
-		slog.Warn("poller: skipping stale-ticket GC, pollDegraded did not complete")
-		return
-	}
-	p.resolveStale()
+// refreshState captures which ArgoCD service health refreshes succeeded
+// this poll cycle. resolveStale uses it to avoid closing
+// TypeArgoCDDegraded tickets whose underlying service status could not
+// be checked — a stalled UpdatedAt in that case is telemetry gap, not
+// recovery. AlertManager-based tickets are independent of mctl-api
+// health and are always eligible for GC.
+type refreshState struct {
+	// allUnknown is true when the poller could not enumerate services
+	// (ListServices failed). Every ArgoCDDegraded ticket must be skipped
+	// in that cycle.
+	allUnknown bool
+	// failedServices holds "tenant/service" keys for services whose
+	// GetServiceStatus call failed. Only consulted when allUnknown=false.
+	failedServices map[string]bool
 }
 
-// pollDegraded reports whether the degraded-service scan completed
-// successfully for every service. A false return — triggered by
-// ListServices failing or ANY per-service GetServiceStatus failing —
-// means open Degraded tickets could not all be Touch-refreshed this
-// cycle, so downstream stale-ticket GC must be skipped to avoid
-// auto-resolving incidents whose UpdatedAt stalled on a transient
-// status-endpoint error rather than real recovery.
-func (p *Poller) pollDegraded() bool {
+func (rs refreshState) argoRefreshed(tenant, service string) bool {
+	if rs.allUnknown {
+		return false
+	}
+	return !rs.failedServices[tenant+"/"+service]
+}
+
+func (p *Poller) poll() {
+	state := p.pollDegraded()
+	p.resolveStale(state)
+}
+
+// pollDegraded scans all services for ArgoCD Degraded/Missing health,
+// creating or touching tickets, and returns the refresh outcome for
+// downstream GC gating.
+func (p *Poller) pollDegraded() refreshState {
 	services, err := p.client.ListServices()
 	if err != nil {
 		slog.Error("poller: failed to list services", "error", err)
-		return false
+		return refreshState{allUnknown: true}
 	}
 
 	slog.Debug("poller: checking services", "count", len(services))
 
-	allRefreshed := true
+	failed := map[string]bool{}
 	for _, svc := range services {
 		team := svc.Team
 		app := svc.App
@@ -97,9 +109,9 @@ func (p *Poller) pollDegraded() bool {
 
 		status, err := p.client.GetServiceStatus(team, app)
 		if err != nil {
-			slog.Warn("poller: failed to get status; will skip stale GC this cycle",
+			slog.Warn("poller: failed to get status; will skip stale GC for this service",
 				"team", team, "app", app, "error", err)
-			allRefreshed = false
+			failed[team+"/"+app] = true
 			continue
 		}
 
@@ -155,7 +167,7 @@ func (p *Poller) pollDegraded() bool {
 			p.onTicket(t)
 		}
 	}
-	return allRefreshed
+	return refreshState{failedServices: failed}
 }
 
 // resolveStale closes open tickets whose UpdatedAt has not advanced
@@ -167,7 +179,16 @@ func (p *Poller) pollDegraded() bool {
 // actively analyzing or fixing keep their UpdatedAt current through
 // their own status transitions, and we never want to close those out
 // from under the pipeline.
-func (p *Poller) resolveStale() {
+//
+// For TypeArgoCDDegraded tickets, GC is further gated on the current
+// cycle having reached the underlying service. If mctl-api could not
+// enumerate services or the specific service's health fetch failed,
+// the ticket is skipped this cycle — its stalled UpdatedAt is a
+// telemetry gap, not real recovery. AlertManager-based ticket types
+// (pod_crashloop, resource_limit, workflow_failed, generic) are
+// independent of mctl-api health and are GC'd purely by UpdatedAt, so
+// a partial poller outage does not block noise cleanup.
+func (p *Poller) resolveStale(state refreshState) {
 	if p.StaleAfter <= 0 {
 		return
 	}
@@ -182,6 +203,11 @@ func (p *Poller) resolveStale() {
 			continue
 		}
 		if !t.UpdatedAt.Before(cutoff) {
+			continue
+		}
+		if t.Type == ticket.TypeArgoCDDegraded && !state.argoRefreshed(t.Tenant, t.Service) {
+			slog.Debug("poller: skipping ArgoCDDegraded stale GC, refresh not confirmed",
+				"id", t.ID, "tenant", t.Tenant, "service", t.Service)
 			continue
 		}
 		if err := p.store.ResolveByID(t.ID); err != nil {
