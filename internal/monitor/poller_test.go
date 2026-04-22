@@ -124,6 +124,51 @@ func TestPollerResolvesStaleOpenTicket(t *testing.T) {
 	}
 }
 
+func TestResolveByIDIgnoresNonOpenTickets(t *testing.T) {
+	// Guards the race where the pipeline promotes a ticket from open →
+	// analyzing between resolveStale's ListOpen read and its ResolveByID
+	// write. The UPDATE must refuse to close anything that has since
+	// moved out of status=open.
+	store := newTestStore(t)
+
+	for _, status := range []string{
+		ticket.StatusAnalyzing,
+		ticket.StatusFixProposed,
+		ticket.StatusFixApplied,
+	} {
+		t.Run(status, func(t *testing.T) {
+			tk := &ticket.Ticket{
+				Source:   ticket.SourceAlertManager,
+				Type:     ticket.TypeGeneric,
+				Tenant:   "labs",
+				Service:  "svc-" + status,
+				Summary:  "in pipeline",
+				Severity: ticket.SeverityWarning,
+			}
+			if err := store.Create(tk); err != nil {
+				t.Fatal(err)
+			}
+			tk.Status = status
+			if err := store.Update(tk); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := store.ResolveByID(tk.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			got, err := store.Get(tk.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != status {
+				t.Errorf("ResolveByID overwrote status=%s → %s; should be a no-op",
+					status, got.Status)
+			}
+		})
+	}
+}
+
 func TestPollerResolveStaleDisabledWhenZero(t *testing.T) {
 	store := newTestStore(t)
 	p := NewPoller(nil, store, nil)

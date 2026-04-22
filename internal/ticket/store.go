@@ -503,17 +503,20 @@ func (s *Store) Touch(id string) error {
 	return err
 }
 
-// ResolveByID marks a single ticket as resolved. Used by the stale-ticket
-// GC in the poller when an open ticket has not been refreshed within the
-// configured window.
+// ResolveByID marks a single open ticket as resolved. The UPDATE is
+// gated on status=open so concurrent pipeline transitions (a ticket
+// moving from open → analyzing / fix_proposed / fix_applied) are not
+// silently overwritten by the stale-ticket GC; the resolver reads
+// ListOpen and calls ResolveByID, and the pipeline can race between
+// those two steps.
 func (s *Store) ResolveByID(id string) error {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
-		WHERE id=? AND status NOT IN (?, ?)`
+		WHERE id=? AND status=?`
 	_, err := s.db.Exec(s.rebind(query),
 		StatusResolved, now, now,
-		id, StatusResolved, StatusSuppressed,
+		id, StatusOpen,
 	)
 	return err
 }
