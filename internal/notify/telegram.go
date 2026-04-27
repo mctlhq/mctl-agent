@@ -31,24 +31,44 @@ import (
 // Telegram handles sending and receiving Telegram messages.
 type Telegram struct {
 	botToken        string
-	chatID          string
+	chatID          string            // global default fallback
+	tenantChatIDs   map[string]string // per-tenant routing (admins/labs/ovk → chat_id)
 	openClawBotUser string
 	httpClient      *http.Client
 }
 
 // NewTelegram creates a new Telegram notifier.
-func NewTelegram(botToken, chatID, openClawBotUser string) *Telegram {
+//
+// chatID is the global default — used when a notification has no tenant
+// context (SendText, SendStatus, SendDailyDigest) or when tenantChatIDs
+// has no entry for the ticket's tenant. Pass nil/empty tenantChatIDs to
+// preserve the previous single-chat behaviour.
+func NewTelegram(botToken, chatID, openClawBotUser string, tenantChatIDs map[string]string) *Telegram {
 	if openClawBotUser == "" {
 		openClawBotUser = "@mctl_me_bot"
 	}
 	return &Telegram{
 		botToken:        botToken,
 		chatID:          chatID,
+		tenantChatIDs:   tenantChatIDs,
 		openClawBotUser: openClawBotUser,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// chatIDFor returns the chat ID to use for a notification originating from
+// the given tenant. Falls back to the global default chatID when there's
+// no per-tenant override (preserves previous behaviour for unconfigured
+// tenants and for empty/unknown tenant strings).
+func (tg *Telegram) chatIDFor(tenant string) string {
+	if tenant != "" && len(tg.tenantChatIDs) > 0 {
+		if id, ok := tg.tenantChatIDs[tenant]; ok && id != "" {
+			return id
+		}
+	}
+	return tg.chatID
 }
 
 // TelegramCommand represents a parsed inbound Telegram command.
@@ -67,7 +87,7 @@ ID: <code>%s</code>`,
 		icon, t.Type, t.Tenant, t.Service, t.Severity,
 		escapeHTML(t.Summary), t.ID[:8])
 
-	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
+	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendDiagnosis notifies about a completed diagnosis.
@@ -80,7 +100,7 @@ ID: <code>%s</code>`,
 		t.Tenant, t.Service, confIcon, confidence,
 		escapeHTML(diagnosis), action, t.ID[:8])
 
-	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
+	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendPRCreated notifies about a PR being created.
@@ -92,14 +112,14 @@ func (tg *Telegram) SendPRCreated(t *ticket.Ticket, prURL, summary string) error
 <code>/approve %s</code> | <code>/reject %s reason</code>`,
 		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8], t.ID[:8])
 
-	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
+	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendPRAutoMerged notifies that a PR was auto-merged (informational, no action needed).
 func (tg *Telegram) SendPRAutoMerged(t *ticket.Ticket, prURL, summary string) error {
 	msg := fmt.Sprintf("✅ AUTO-MERGED %s/%s\n%s\n%s\nID: <code>%s</code>",
 		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8])
-	return tg.sendMessage(msg)
+	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg, nil)
 }
 
 // SendPRNeedsReview notifies that a PR needs human review, tagging the escalation contact.
@@ -110,7 +130,7 @@ func (tg *Telegram) SendPRNeedsReview(t *ticket.Ticket, prURL, summary, escalati
 		msg += "\n" + escapeHTML(reason)
 	}
 	msg += fmt.Sprintf("\n\n<code>/approve %s</code> | <code>/reject %s reason</code>", t.ID[:8], t.ID[:8])
-	return tg.doSend(msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
+	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg, openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // SendStatus sends a summary of open tickets.
@@ -150,7 +170,7 @@ func (tg *Telegram) SendTicketDetail(t *ticket.Ticket) error {
 	}
 	fmt.Fprintf(&sb, "<b>Created:</b> %s\n", t.CreatedAt.Format(time.RFC3339))
 
-	return tg.sendMessage(sb.String())
+	return tg.doSendTo(tg.chatIDFor(t.Tenant), sb.String(), nil)
 }
 
 // SendDailyDigest sends a morning summary of ticket and PR activity.
@@ -191,8 +211,12 @@ func (tg *Telegram) SendText(text string) error {
 }
 
 func (tg *Telegram) SendExternalAgentResult(t *ticket.Ticket, agentID, summary, messageTemplate string, artifacts map[string]string) error {
+	tenant := ""
+	if t != nil {
+		tenant = t.Tenant
+	}
 	if messageTemplate != "" {
-		return tg.sendMessage(escapeHTML(messageTemplate))
+		return tg.doSendTo(tg.chatIDFor(tenant), escapeHTML(messageTemplate), nil)
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "🤖 External agent update from <b>%s</b>\n", escapeHTML(agentID))
@@ -213,7 +237,7 @@ func (tg *Telegram) SendExternalAgentResult(t *ticket.Ticket, agentID, summary, 
 	if t.ID != "" {
 		fmt.Fprintf(&sb, "ID: <code>%s</code>", t.ID[:8])
 	}
-	return tg.doSend(sb.String(), openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
+	return tg.doSendTo(tg.chatIDFor(t.Tenant), sb.String(), openClawKeyboard(tg.openClawBotUser, t.ID[:8]))
 }
 
 // ParseCommand parses an inbound Telegram message into a command.
@@ -286,14 +310,23 @@ func (tg *Telegram) sendMessage(text string) error {
 	return tg.doSend(text, nil)
 }
 
+// doSend posts to the global default chat. Use doSendTo when the
+// notification has tenant context — that variant routes per tenant.
 func (tg *Telegram) doSend(text string, markup any) error {
-	if tg.botToken == "" || tg.chatID == "" {
+	return tg.doSendTo(tg.chatID, text, markup)
+}
+
+// doSendTo posts to a specific chat. The empty-config short-circuit treats
+// missing botToken or missing chatID as a no-op (matches previous behaviour
+// when the agent runs without Telegram configured).
+func (tg *Telegram) doSendTo(chatID, text string, markup any) error {
+	if tg.botToken == "" || chatID == "" {
 		slog.Debug("telegram: skipping send (not configured)", "text_len", len(text))
 		return nil
 	}
 
 	payload := map[string]any{
-		"chat_id":    tg.chatID,
+		"chat_id":    chatID,
 		"text":       text,
 		"parse_mode": "HTML",
 	}
