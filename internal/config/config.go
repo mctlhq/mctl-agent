@@ -31,7 +31,8 @@ type Config struct {
 	GitHubRepo              string
 	GitHubWebhookSecret     string
 	TelegramBotToken        string
-	TelegramChatID          string
+	TelegramChatID          string            // global default fallback
+	TelegramTenantChatIDs   map[string]string // per-tenant routing (admins/labs/ovk → chat_id)
 	OpenClawBotUsername     string
 	PollInterval            time.Duration
 	DryRun                  bool
@@ -139,6 +140,7 @@ func Load() Config {
 		GitHubWebhookSecret:     os.Getenv("GITHUB_WEBHOOK_SECRET"),
 		TelegramBotToken:        os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:          os.Getenv("TELEGRAM_CHAT_ID"),
+		TelegramTenantChatIDs:   parseTenantChatIDs(),
 		OpenClawBotUsername:     envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
 		PollInterval:            pollInterval,
 		DryRun:                  dryRun,
@@ -161,4 +163,56 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// parseTenantChatIDs reads per-tenant Telegram chat overrides from env.
+// Two formats are accepted (env var checked in order):
+//
+//  1. TELEGRAM_TENANT_CHAT_IDS="admins=123,labs=456,ovk=789"
+//     comma-separated key=value pairs. Whitespace around = and , is ignored.
+//
+//  2. TELEGRAM_CHAT_ID_<TENANT>=<id> per-tenant variables (e.g.
+//     TELEGRAM_CHAT_ID_ADMINS, TELEGRAM_CHAT_ID_LABS) — uppercase tenant.
+//     Used as a fallback for any tenant absent from the comma-list.
+//
+// Returns nil when no overrides are set; callers must fall back to the
+// global Config.TelegramChatID in that case.
+func parseTenantChatIDs() map[string]string {
+	out := map[string]string{}
+	if csv := strings.TrimSpace(os.Getenv("TELEGRAM_TENANT_CHAT_IDS")); csv != "" {
+		for _, pair := range strings.Split(csv, ",") {
+			kv := strings.SplitN(pair, "=", 2)
+			if len(kv) != 2 {
+				continue
+			}
+			tenant := strings.TrimSpace(kv[0])
+			chatID := strings.TrimSpace(kv[1])
+			if tenant != "" && chatID != "" {
+				out[tenant] = chatID
+			}
+		}
+	}
+	// Per-tenant env fallback (only fills tenants not already set above).
+	for _, env := range os.Environ() {
+		const prefix = "TELEGRAM_CHAT_ID_"
+		if !strings.HasPrefix(env, prefix) {
+			continue
+		}
+		eq := strings.Index(env, "=")
+		if eq <= len(prefix) {
+			continue
+		}
+		tenant := strings.ToLower(env[len(prefix):eq])
+		chatID := env[eq+1:]
+		if tenant == "" || chatID == "" {
+			continue
+		}
+		if _, exists := out[tenant]; !exists {
+			out[tenant] = chatID
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

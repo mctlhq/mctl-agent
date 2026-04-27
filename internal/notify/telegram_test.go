@@ -69,7 +69,7 @@ func TestSendTextWithMockServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tg := NewTelegram("test-token", "12345", "")
+	tg := NewTelegram("test-token", "12345", "", nil)
 	// Override the URL by replacing the httpClient with one that redirects.
 	tg.httpClient = srv.Client()
 	// We need to actually hit the mock server, so let's use a custom approach:
@@ -79,14 +79,14 @@ func TestSendTextWithMockServer(t *testing.T) {
 
 	// Unfortunately, Telegram.sendMessage hard-codes the URL.
 	// Let's test the no-config path instead.
-	tgEmpty := NewTelegram("", "", "")
+	tgEmpty := NewTelegram("", "", "", nil)
 	if err := tgEmpty.SendText("hello"); err != nil {
 		t.Errorf("expected nil error for unconfigured telegram, got %v", err)
 	}
 }
 
 func TestSendNewTicketUnconfigured(t *testing.T) {
-	tg := NewTelegram("", "", "")
+	tg := NewTelegram("", "", "", nil)
 	tk := &ticket.Ticket{
 		ID:       "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
 		Type:     ticket.TypePodCrashloop,
@@ -102,7 +102,7 @@ func TestSendNewTicketUnconfigured(t *testing.T) {
 }
 
 func TestSendStatusEmptyTickets(t *testing.T) {
-	tg := NewTelegram("", "", "")
+	tg := NewTelegram("", "", "", nil)
 	if err := tg.SendStatus(nil); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -133,7 +133,7 @@ func TestConfidenceIcon(t *testing.T) {
 }
 
 func TestSendPRAutoMergedUnconfigured(t *testing.T) {
-	tg := NewTelegram("", "", "")
+	tg := NewTelegram("", "", "", nil)
 	tk := &ticket.Ticket{
 		ID:      "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
 		Tenant:  "billing",
@@ -145,7 +145,7 @@ func TestSendPRAutoMergedUnconfigured(t *testing.T) {
 }
 
 func TestSendPRNeedsReviewUnconfigured(t *testing.T) {
-	tg := NewTelegram("", "", "")
+	tg := NewTelegram("", "", "", nil)
 	tk := &ticket.Ticket{
 		ID:      "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
 		Tenant:  "billing",
@@ -163,5 +163,36 @@ func TestSendPRNeedsReviewUnconfigured(t *testing.T) {
 func TestEscapeHTML(t *testing.T) {
 	if got := escapeHTML("a<b>c&d"); got != "a&lt;b&gt;c&amp;d" {
 		t.Errorf("escapeHTML = %q", got)
+	}
+}
+
+func TestChatIDForRouting(t *testing.T) {
+	tg := NewTelegram("token", "default-chat", "", map[string]string{
+		"admins": "admins-chat",
+		"labs":   "labs-chat",
+	})
+
+	tests := []struct {
+		name   string
+		tenant string
+		want   string
+	}{
+		{"known tenant routes to its chat", "admins", "admins-chat"},
+		{"another known tenant", "labs", "labs-chat"},
+		{"unknown tenant falls back to default", "ovk", "default-chat"},
+		{"empty tenant falls back to default", "", "default-chat"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tg.chatIDFor(tc.tenant); got != tc.want {
+				t.Errorf("chatIDFor(%q) = %q; want %q", tc.tenant, got, tc.want)
+			}
+		})
+	}
+
+	// nil map should always return default (preserves pre-routing behaviour).
+	tgNoMap := NewTelegram("token", "default-only", "", nil)
+	if got := tgNoMap.chatIDFor("admins"); got != "default-only" {
+		t.Errorf("chatIDFor(admins) with nil map = %q; want default-only", got)
 	}
 }

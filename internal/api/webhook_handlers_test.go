@@ -24,7 +24,7 @@ func newWebhookEnabledRouter(t *testing.T) http.Handler {
 	return NewRouter(Options{
 		Store:        store,
 		Pipeline:     pipe,
-		Telegram:     notify.NewTelegram("", "", ""),
+		Telegram:     notify.NewTelegram("", "", "", nil),
 		WebhookStore: webhookStore,
 		WebhookTTL:   15 * time.Minute,
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
@@ -115,7 +115,7 @@ func TestExternalClaimAndResult(t *testing.T) {
 	router := NewRouter(Options{
 		Store:        store,
 		Pipeline:     pipe,
-		Telegram:     notify.NewTelegram("", "", ""),
+		Telegram:     notify.NewTelegram("", "", "", nil),
 		WebhookStore: webhookStore,
 		WebhookTTL:   15 * time.Minute,
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +216,7 @@ func TestExternalClaimRejectsWrongBearerToken(t *testing.T) {
 	router := NewRouter(Options{
 		Store:        store,
 		Pipeline:     pipe,
-		Telegram:     notify.NewTelegram("", "", ""),
+		Telegram:     notify.NewTelegram("", "", "", nil),
 		WebhookStore: webhookStore,
 		WebhookTTL:   15 * time.Minute,
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {

@@ -82,7 +82,7 @@ func TestExternalWebhookEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	telegram := notify.NewTelegram("", "", "")
+	telegram := notify.NewTelegram("", "", "", nil)
 	agentSrv := httptest.NewServer(nil)
 	defer agentSrv.Close()
 	dispatcher := webhook.NewDispatcher(webhookStore, agentSrv.URL, 15*time.Minute)
