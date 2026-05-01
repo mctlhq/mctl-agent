@@ -18,6 +18,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -48,6 +49,11 @@ func NewStore(connStr string) (*Store, error) {
 	if driver == "sqlite" {
 		// WAL mode for better read concurrency — best-effort, non-fatal.
 		_, _ = db.Exec("PRAGMA journal_mode=WAL")
+		// Log embedded SQLite version for audit/observability.
+		var sqliteVersion string
+		if err := db.QueryRow("SELECT sqlite_version()").Scan(&sqliteVersion); err == nil {
+			slog.Info("sqlite driver initialised", "sqlite_version", sqliteVersion)
+		}
 	}
 
 	s := &Store{db: db, dialect: driver}
