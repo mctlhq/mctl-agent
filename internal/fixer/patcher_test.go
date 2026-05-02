@@ -189,6 +189,33 @@ sidecar:
 		}
 	})
 
+	t.Run("indented image: block (platform inline-values shape)", func(t *testing.T) {
+		content := `spec:
+  source:
+    helm:
+      values: |
+        image:
+          repository: ghcr.io/mctlhq/mctl-agent
+          tag: "broken-2.0"
+        service:
+          port: 8080`
+
+		newContent, summary, err := GenerateImageRollback(content, "good-1.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, `tag: "good-1.0"`) {
+			t.Errorf("expected indented tag to be flipped, got:\n%s", newContent)
+		}
+		if !strings.Contains(summary, "broken-2.0") {
+			t.Errorf("summary should reference old tag: %s", summary)
+		}
+		// Indent on the rewritten line must match the original 10-space depth.
+		if !strings.Contains(newContent, `          tag: "good-1.0"`) {
+			t.Errorf("expected 10-space indent preserved, got:\n%s", newContent)
+		}
+	})
+
 	t.Run("nested map under image with its own tag is not rewritten", func(t *testing.T) {
 		content := `image:
   pullPolicy: IfNotPresent

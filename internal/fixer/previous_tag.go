@@ -65,44 +65,50 @@ func indentOf(line string) string {
 // chartImageTagLineIndex returns the index of the chart-level
 // `image.tag:` line, or -1 when the file has no such declaration.
 //
-// "Chart-level" is anchored on two structural rules:
-//  1. The owning `image:` key sits at column 0 (top-level Helm values).
-//  2. The matching `tag:` line is a *direct child* of that block — its
-//     leading indent equals the indent of the FIRST non-blank child of
-//     the `image:` block. Lines indented deeper belong to nested maps
-//     (sub-objects under sibling keys of `tag:`) and do NOT count.
+// Two indent shapes need to work:
+//  1. Tenant `services/<tenant>/<svc>/values.yaml` — `image:` is at
+//     column 0 with `tag:` indented two spaces under it.
+//  2. Platform `apps/templates/<svc>.yaml` — the chart values are
+//     inlined under `helm.values: |`, so `image:` ends up indented
+//     several levels deep (typically 8 spaces) with `tag:` deeper still.
 //
-// Lines that sit at top-level (column 0) other than `image:` close the
-// block. Comments and blanks are transparent.
+// Algorithm: scan top-down. Each line whose trimmed text is exactly
+// `image:` opens a candidate block. From there, we walk forward over
+// strictly more-indented lines, lock the "direct child indent" from
+// the first child, and return the first `tag:` at that exact depth.
+// If the block ends (a line at indent ≤ the `image:` indent) without
+// finding a `tag:`, we keep scanning for the next `image:` block.
+//
+// Comments and blanks inside a block are transparent.
 func chartImageTagLineIndex(lines []string) int {
-	inImageBlock := false
-	childIndent := ""
 	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		if strings.TrimSpace(line) != "image:" {
 			continue
 		}
-		// Column-0 key.
-		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
-			inImageBlock = trimmed == "image:"
-			childIndent = ""
-			continue
-		}
-		if !inImageBlock {
-			continue
-		}
-		ind := indentOf(line)
-		if childIndent == "" {
-			childIndent = ind
-		}
-		// Strict equality — deeper indent means we're inside a sub-map
-		// (e.g. `image:\n  someField:\n    tag: nested`), not a direct
-		// sibling of the chart's repository/tag.
-		if ind != childIndent {
-			continue
-		}
-		if _, _, _, ok := parseTagLine(line); ok {
-			return i
+		imageIndent := len(indentOf(line))
+		childIndent := ""
+		for j := i + 1; j < len(lines); j++ {
+			l := lines[j]
+			trimmed := strings.TrimSpace(l)
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			ind := indentOf(l)
+			// Indent <= imageIndent means we left the block.
+			if len(ind) <= imageIndent {
+				break
+			}
+			if childIndent == "" {
+				childIndent = ind
+			}
+			// Direct children only — anything deeper belongs to a
+			// nested map under one of the chart's sibling fields.
+			if ind != childIndent {
+				continue
+			}
+			if _, _, _, ok := parseTagLine(l); ok {
+				return j
+			}
 		}
 	}
 	return -1

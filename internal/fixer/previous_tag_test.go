@@ -121,6 +121,22 @@ service:
 			want:   "real-chart",
 			wantOK: true,
 		},
+		{
+			name: "indented image: block (helm.values inline-string shape)",
+			content: `apiVersion: argoproj.io/v1alpha1
+kind: Application
+spec:
+  source:
+    helm:
+      values: |
+        image:
+          repository: ghcr.io/mctlhq/mctl-agent
+          tag: "1.6.0"
+        service:
+          port: 8080`,
+			want:   "1.6.0",
+			wantOK: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
