@@ -137,6 +137,42 @@ func TestGenerateProbeFix(t *testing.T) {
 	}
 }
 
+func TestGenerateImageRollback(t *testing.T) {
+	t.Run("rewrites only the chart-level tag", func(t *testing.T) {
+		// Mirrors openclaw values.yaml shape: chart-level image at the top,
+		// sidecar / init container images deeper with their own `tag:` keys
+		// that must NOT be touched by a rollback.
+		content := `image:
+  repository: ghcr.io/mctlhq/mctl-openclaw
+  tag: "2026.4.29-beta.2"
+sidecar:
+  image:
+    repository: ghcr.io/mctlhq/whisper-builder
+    tag: "2026.3.24-beta.19"`
+
+		newContent, summary, err := GenerateImageRollback(content, "2026.4.29-beta.1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, `tag: "2026.4.29-beta.1"`) {
+			t.Errorf("expected new chart tag, got:\n%s", newContent)
+		}
+		if !strings.Contains(newContent, `tag: "2026.3.24-beta.19"`) {
+			t.Errorf("sidecar tag must remain untouched, got:\n%s", newContent)
+		}
+		if !strings.Contains(summary, "2026.4.29-beta.2") || !strings.Contains(summary, "2026.4.29-beta.1") {
+			t.Errorf("summary missing tag transition: %s", summary)
+		}
+	})
+
+	t.Run("missing tag returns error", func(t *testing.T) {
+		_, _, err := GenerateImageRollback("image:\n  repository: foo", "1.0.0")
+		if err == nil {
+			t.Error("expected error when no tag found")
+		}
+	})
+}
+
 func TestBumpCPU(t *testing.T) {
 	tests := []struct {
 		input, want string

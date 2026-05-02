@@ -158,6 +158,69 @@ func TestLookupPreviousImageTag(t *testing.T) {
 		}
 	})
 
+	t.Run("404 at one revision is skipped, walk continues", func(t *testing.T) {
+		f, cleanup := fakeGH(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/commits"):
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"sha": "head"},
+					{"sha": "missing"},
+					{"sha": "pre-bump"},
+				})
+			case strings.HasPrefix(r.URL.Path, "/repos/mctlhq/mctl-gitops/contents/"):
+				ref := r.URL.Query().Get("ref")
+				if ref == "missing" {
+					http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+					return
+				}
+				body := current
+				if ref == "pre-bump" {
+					body = prev
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"name":     "values.yaml",
+					"sha":      ref + "-blob",
+					"content":  encodeContent(body),
+					"encoding": "base64",
+				})
+			}
+		})
+		defer cleanup()
+
+		got, err := f.LookupPreviousImageTag(context.Background(), path, "2026.4.29-beta.2")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "2026.4.29-beta.1" {
+			t.Errorf("got %q, want %q", got, "2026.4.29-beta.1")
+		}
+	})
+
+	t.Run("non-404 error propagates", func(t *testing.T) {
+		f, cleanup := fakeGH(t, func(w http.ResponseWriter, r *http.Request) {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/commits"):
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode([]map[string]any{
+					{"sha": "head"},
+				})
+			case strings.HasPrefix(r.URL.Path, "/repos/mctlhq/mctl-gitops/contents/"):
+				http.Error(w, `{"message":"server overloaded"}`, http.StatusServiceUnavailable)
+			}
+		})
+		defer cleanup()
+
+		_, err := f.LookupPreviousImageTag(context.Background(), path, "anything")
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "reading") {
+			t.Errorf("error should mention what failed; got %q", err.Error())
+		}
+	})
+
 	t.Run("no prior distinct tag returns empty", func(t *testing.T) {
 		f, cleanup := fakeGH(t, func(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(r.URL.Path, "/commits") {

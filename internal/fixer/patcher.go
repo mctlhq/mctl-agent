@@ -88,29 +88,37 @@ func GenerateMemoryBump(content string) (string, string, error) {
 	return strings.Join(modified, "\n"), summary, nil
 }
 
-// GenerateImageRollback creates a patch that rolls back the image tag.
+// GenerateImageRollback creates a patch that rolls back the chart-level
+// image tag. Only the FIRST `tag:` line in the file is rewritten — values
+// files routinely embed sidecar / initContainer images deeper in the
+// document with their own `tag:` keys, and a rollback must not collateral-
+// damage those. This matches ExtractImageTag's first-occurrence semantics
+// so the read-back invariant holds.
 func GenerateImageRollback(content, previousTag string) (string, string, error) {
 	lines := strings.Split(content, "\n")
-	var modified []string
 	var summary string
+	rewritten := false
 
-	for _, line := range lines {
+	for i, line := range lines {
+		if rewritten {
+			break
+		}
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "tag:") {
-			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-			currentTag := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "tag:")), "\"'")
-			modified = append(modified, fmt.Sprintf(`%stag: "%s"`, indent, previousTag))
-			summary = fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previousTag)
+		if !strings.HasPrefix(trimmed, "tag:") {
 			continue
 		}
-		modified = append(modified, line)
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		currentTag := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "tag:")), "\"'")
+		lines[i] = fmt.Sprintf(`%stag: "%s"`, indent, previousTag)
+		summary = fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previousTag)
+		rewritten = true
 	}
 
-	if summary == "" {
+	if !rewritten {
 		return content, "", fmt.Errorf("could not find image tag to rollback")
 	}
 
-	return strings.Join(modified, "\n"), summary, nil
+	return strings.Join(lines, "\n"), summary, nil
 }
 
 // GenerateFromDiagnosis applies a Claude-suggested fix.

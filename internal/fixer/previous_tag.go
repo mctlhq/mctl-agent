@@ -16,6 +16,7 @@ package fixer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -33,9 +34,9 @@ const PreviousTagLookupCommitCap = 20
 // The first `tag:` line directly under the top-level `image:` block is the
 // chart image. Sub-image declarations (initContainers, sidecars) may also
 // have `tag:` keys but are not the rollback target — they live in nested
-// blocks deeper in the file. Matching the first occurrence is used for
-// rollback source detection; note that GenerateImageRollback rewrites
-// all `tag:` lines in the file.
+// blocks deeper in the file. Both ExtractImageTag (read) and
+// GenerateImageRollback (write) take the first occurrence so the
+// read-then-rewrite invariant holds.
 //
 // Both double-quoted and single-quoted tags are handled; the capture group
 // excludes the surrounding quote characters.
@@ -80,9 +81,17 @@ func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, cu
 				// Context was cancelled or timed out — stop immediately.
 				return "", ctx.Err()
 			}
-			// File didn't exist at this revision (e.g. service was
-			// onboarded after this commit). Skip.
-			continue
+			// 404 = file didn't exist at this revision (e.g. service
+			// was onboarded after this commit). Skip and keep walking.
+			// Anything else (rate limit, 5xx, auth) means we can't
+			// trust the rest of the walk — propagate so the caller
+			// degrades to diagnosis-only Telegram instead of silently
+			// returning "no previous tag found".
+			var ghErr *github.ErrorResponse
+			if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == 404 {
+				continue
+			}
+			return "", fmt.Errorf("reading %s at %s: %w", valuesPath, sha, err)
 		}
 		tag, ok := ExtractImageTag(content)
 		if !ok || tag == "" {
