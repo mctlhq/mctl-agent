@@ -29,23 +29,57 @@ import (
 // rather than chase a wild rollback target.
 const PreviousTagLookupCommitCap = 20
 
-// imageTagPattern matches the chart-level `image.tag:` declaration.
-//
-// The first `tag:` line directly under the top-level `image:` block is the
-// chart image. Sub-image declarations (initContainers, sidecars) may also
-// have `tag:` keys but are not the rollback target — they live in nested
-// blocks deeper in the file. Both ExtractImageTag (read) and
-// GenerateImageRollback (write) take the first occurrence so the
-// read-then-rewrite invariant holds.
-//
-// Both double-quoted and single-quoted tags are handled; the capture group
-// excludes the surrounding quote characters.
-var imageTagPattern = regexp.MustCompile(`(?m)^\s*tag:\s*["']?([^"'\s]+)["']?\s*$`)
+// tagLinePattern matches a `tag:` line and captures the value with quotes
+// stripped. Used only after we've located the chart-level `image:` block —
+// it does NOT identify the chart image on its own.
+var tagLinePattern = regexp.MustCompile(`^\s*tag:\s*["']?([^"'\s]+)["']?\s*$`)
 
-// ExtractImageTag returns the first `tag:` value found in content.
-// Returns ok=false when no tag line is present.
+// chartImageTagLineIndex returns the index of the `tag:` line directly
+// under the top-level `image:` block, or -1 if not found.
+//
+// "Directly under" means: scanning forward from a column-0 `image:` key
+// until either a `tag:` line is hit or another column-0 key appears. We
+// deliberately ignore `tag:` keys that sit under siblings like
+// `global:` / `sidecar:` / `extraContainers:` — only the chart-level
+// image tag is the rollback target.
+//
+// Comment lines and blank lines inside the block are skipped.
+func chartImageTagLineIndex(lines []string) int {
+	inImageBlock := false
+	for i, line := range lines {
+		// Treat blank / comment lines as transparent — they don't change
+		// block context.
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		// A line at column 0 is a top-level key. Entering "image:" opens
+		// the block; entering anything else closes it.
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			inImageBlock = trimmed == "image:"
+			continue
+		}
+		// Indented line. Only relevant while we're inside `image:`.
+		if !inImageBlock {
+			continue
+		}
+		if tagLinePattern.MatchString(line) {
+			return i
+		}
+	}
+	return -1
+}
+
+// ExtractImageTag returns the chart-level `image.tag` value.
+// Returns ok=false when the file has no top-level `image:` block or
+// when that block does not declare a `tag:`.
 func ExtractImageTag(content string) (string, bool) {
-	m := imageTagPattern.FindStringSubmatch(content)
+	lines := strings.Split(content, "\n")
+	idx := chartImageTagLineIndex(lines)
+	if idx < 0 {
+		return "", false
+	}
+	m := tagLinePattern.FindStringSubmatch(lines[idx])
 	if len(m) < 2 {
 		return "", false
 	}

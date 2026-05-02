@@ -89,35 +89,25 @@ func GenerateMemoryBump(content string) (string, string, error) {
 }
 
 // GenerateImageRollback creates a patch that rolls back the chart-level
-// image tag. Only the FIRST `tag:` line in the file is rewritten — values
-// files routinely embed sidecar / initContainer images deeper in the
-// document with their own `tag:` keys, and a rollback must not collateral-
-// damage those. This matches ExtractImageTag's first-occurrence semantics
-// so the read-back invariant holds.
+// image tag. Only the `tag:` line directly under the top-level `image:`
+// block is rewritten — values files routinely embed sidecar /
+// initContainer images deeper in the document, and unrelated tag keys
+// like `global.tag` may appear earlier in the file. Both
+// chartImageTagLineIndex (location) and ExtractImageTag (read) agree
+// on what counts as the chart image, so the read-then-rewrite
+// invariant holds.
 func GenerateImageRollback(content, previousTag string) (string, string, error) {
 	lines := strings.Split(content, "\n")
-	var summary string
-	rewritten := false
-
-	for i, line := range lines {
-		if rewritten {
-			break
-		}
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "tag:") {
-			continue
-		}
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		currentTag := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "tag:")), "\"'")
-		lines[i] = fmt.Sprintf(`%stag: "%s"`, indent, previousTag)
-		summary = fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previousTag)
-		rewritten = true
+	idx := chartImageTagLineIndex(lines)
+	if idx < 0 {
+		return content, "", fmt.Errorf("could not find chart-level image.tag to rollback")
 	}
-
-	if !rewritten {
-		return content, "", fmt.Errorf("could not find image tag to rollback")
-	}
-
+	line := lines[idx]
+	indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+	trimmed := strings.TrimSpace(line)
+	currentTag := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "tag:")), "\"'")
+	lines[idx] = fmt.Sprintf(`%stag: "%s"`, indent, previousTag)
+	summary := fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previousTag)
 	return strings.Join(lines, "\n"), summary, nil
 }
 

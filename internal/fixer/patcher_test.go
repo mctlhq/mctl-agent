@@ -171,6 +171,28 @@ sidecar:
 			t.Error("expected error when no tag found")
 		}
 	})
+
+	t.Run("global.tag earlier in file is not the rollback target", func(t *testing.T) {
+		content := `global:
+  tag: "do-not-touch"
+image:
+  repository: ghcr.io/mctlhq/mctl-openclaw
+  tag: "broken-2.0"`
+
+		newContent, summary, err := GenerateImageRollback(content, "good-1.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, `tag: "do-not-touch"`) {
+			t.Errorf("global.tag must remain untouched, got:\n%s", newContent)
+		}
+		if !strings.Contains(newContent, `tag: "good-1.0"`) {
+			t.Errorf("expected chart tag to be flipped to good-1.0, got:\n%s", newContent)
+		}
+		if !strings.Contains(summary, "broken-2.0") {
+			t.Errorf("summary should reference the chart tag, not the global one: %s", summary)
+		}
+	})
 }
 
 func TestBumpCPU(t *testing.T) {

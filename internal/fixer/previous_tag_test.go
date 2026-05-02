@@ -75,6 +75,24 @@ extra:
 			want:   "1.2.3",
 			wantOK: true,
 		},
+		{
+			name: "global.tag above image.tag is ignored",
+			content: `global:
+  tag: "ignored-global"
+image:
+  repository: foo
+  tag: "real-chart"`,
+			want:   "real-chart",
+			wantOK: true,
+		},
+		{
+			name: "tag outside image block (no image: declared)",
+			content: `global:
+  tag: "1.0.0"
+service:
+  name: foo`,
+			wantOK: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
