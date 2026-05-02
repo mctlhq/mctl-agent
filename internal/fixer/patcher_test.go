@@ -25,11 +25,11 @@ func TestGenerateMemoryBump(t *testing.T) {
 
 func TestGenerateCPUBump(t *testing.T) {
 	tests := []struct {
-		name       string
-		content    string
-		wantCPU    string
-		wantSumm   string
-		wantErr    bool
+		name     string
+		content  string
+		wantCPU  string
+		wantSumm string
+		wantErr  bool
 	}{
 		{
 			name: "millicore bump",
