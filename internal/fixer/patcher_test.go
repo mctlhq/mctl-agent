@@ -189,6 +189,30 @@ sidecar:
 		}
 	})
 
+	t.Run("sub-image block earlier in file is not the rollback target", func(t *testing.T) {
+		content := `sidecar:
+  image:
+    repository: ghcr.io/foo/sidecar
+    tag: "do-not-touch-sub"
+image:
+  repository: ghcr.io/mctlhq/mctl-openclaw
+  tag: "broken-2.0"`
+
+		newContent, summary, err := GenerateImageRollback(content, "good-1.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, `tag: "do-not-touch-sub"`) {
+			t.Errorf("sub-image tag must remain untouched, got:\n%s", newContent)
+		}
+		if !strings.Contains(newContent, `tag: "good-1.0"`) {
+			t.Errorf("chart tag must be flipped, got:\n%s", newContent)
+		}
+		if !strings.Contains(summary, "broken-2.0") {
+			t.Errorf("summary should reference chart's old tag: %s", summary)
+		}
+	})
+
 	t.Run("indented image: block (platform inline-values shape)", func(t *testing.T) {
 		content := `spec:
   source:

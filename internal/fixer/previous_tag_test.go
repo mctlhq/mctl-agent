@@ -122,6 +122,18 @@ service:
 			wantOK: true,
 		},
 		{
+			name: "sub-image declared before chart image — chart wins on min-indent",
+			content: `sidecar:
+  image:
+    repository: ghcr.io/foo/sidecar
+    tag: "ignored-sub"
+image:
+  repository: ghcr.io/mctlhq/mctl-openclaw
+  tag: "real-chart"`,
+			want:   "real-chart",
+			wantOK: true,
+		},
+		{
 			name: "indented image: block (helm.values inline-string shape)",
 			content: `apiVersion: argoproj.io/v1alpha1
 kind: Application

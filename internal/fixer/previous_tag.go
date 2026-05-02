@@ -72,43 +72,71 @@ func indentOf(line string) string {
 //     inlined under `helm.values: |`, so `image:` ends up indented
 //     several levels deep (typically 8 spaces) with `tag:` deeper still.
 //
-// Algorithm: scan top-down. Each line whose trimmed text is exactly
-// `image:` opens a candidate block. From there, we walk forward over
-// strictly more-indented lines, lock the "direct child indent" from
-// the first child, and return the first `tag:` at that exact depth.
-// If the block ends (a line at indent ≤ the `image:` indent) without
-// finding a `tag:`, we keep scanning for the next `image:` block.
+// Algorithm: collect every `image:` line in the file, then prefer the
+// one(s) at the SHALLOWEST indent — that's the chart image both for
+// tenant values (indent 0) and for platform inline-values (indent 8,
+// the only `image:` in the document). Sub-image declarations like
+// `sidecar.image:` or `extraContainers[].image:` always sit at a
+// deeper indent than the chart image, so anchoring on min-indent
+// avoids the "first match wins" trap where a sub-image declared
+// before the chart image would steal the rollback target.
 //
-// Comments and blanks inside a block are transparent.
+// Among shallowest candidates (rare — would mean two top-level
+// `image:` siblings), the first to expose a direct `tag:` child wins.
+// "Direct" means at the indent of the block's first non-blank child;
+// deeper-indented `tag:` keys belong to nested maps and don't count.
 func chartImageTagLineIndex(lines []string) int {
+	type candidate struct {
+		idx    int
+		indent int
+	}
+	var cands []candidate
+	minIndent := -1
 	for i, line := range lines {
 		if strings.TrimSpace(line) != "image:" {
 			continue
 		}
-		imageIndent := len(indentOf(line))
-		childIndent := ""
-		for j := i + 1; j < len(lines); j++ {
-			l := lines[j]
-			trimmed := strings.TrimSpace(l)
-			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-				continue
-			}
-			ind := indentOf(l)
-			// Indent <= imageIndent means we left the block.
-			if len(ind) <= imageIndent {
-				break
-			}
-			if childIndent == "" {
-				childIndent = ind
-			}
-			// Direct children only — anything deeper belongs to a
-			// nested map under one of the chart's sibling fields.
-			if ind != childIndent {
-				continue
-			}
-			if _, _, _, ok := parseTagLine(l); ok {
-				return j
-			}
+		ind := len(indentOf(line))
+		cands = append(cands, candidate{idx: i, indent: ind})
+		if minIndent == -1 || ind < minIndent {
+			minIndent = ind
+		}
+	}
+	for _, c := range cands {
+		if c.indent != minIndent {
+			continue
+		}
+		if idx := tagInImageBlock(lines, c.idx, c.indent); idx >= 0 {
+			return idx
+		}
+	}
+	return -1
+}
+
+// tagInImageBlock walks forward from imageIdx (a line whose trimmed
+// text is `image:`) and returns the index of the direct-child `tag:`
+// line, or -1 if the block has no such child. The block ends when a
+// line at indent ≤ imageIndent appears.
+func tagInImageBlock(lines []string, imageIdx, imageIndent int) int {
+	childIndent := ""
+	for j := imageIdx + 1; j < len(lines); j++ {
+		l := lines[j]
+		trimmed := strings.TrimSpace(l)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		ind := indentOf(l)
+		if len(ind) <= imageIndent {
+			return -1
+		}
+		if childIndent == "" {
+			childIndent = ind
+		}
+		if ind != childIndent {
+			continue
+		}
+		if _, _, _, ok := parseTagLine(l); ok {
+			return j
 		}
 	}
 	return -1
