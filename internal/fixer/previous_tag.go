@@ -29,41 +29,79 @@ import (
 // rather than chase a wild rollback target.
 const PreviousTagLookupCommitCap = 20
 
-// tagLinePattern matches a `tag:` line and captures the value with quotes
-// stripped. Used only after we've located the chart-level `image:` block —
-// it does NOT identify the chart image on its own.
-var tagLinePattern = regexp.MustCompile(`^\s*tag:\s*["']?([^"'\s]+)["']?\s*$`)
+// tagLinePattern matches a `tag:` line, optionally with surrounding
+// quotes and a trailing inline comment. Three alternatives in the value
+// alternation: double-quoted, single-quoted, unquoted-non-whitespace.
+// Group 5 (if present) captures the inline comment (`# ...`) including
+// the whitespace before `#`, so a rewrite can re-attach it intact.
+//
+// Used only after we've located the chart-level `image:` block via
+// chartImageTagLineIndex — this regex on its own does NOT identify
+// the chart image.
+var tagLinePattern = regexp.MustCompile(`^(\s*tag:\s*)(?:"([^"]*)"|'([^']*)'|([^\s"'#][^\s#]*))(\s*#.*)?\s*$`)
 
-// chartImageTagLineIndex returns the index of the `tag:` line directly
-// under the top-level `image:` block, or -1 if not found.
+// parseTagLine returns the tag value and any inline comment (with leading
+// whitespace + `#`) for a line that matches tagLinePattern.
+func parseTagLine(line string) (value, prefix, comment string, ok bool) {
+	m := tagLinePattern.FindStringSubmatch(line)
+	if len(m) == 0 {
+		return "", "", "", false
+	}
+	prefix = m[1]
+	comment = m[5]
+	for _, g := range m[2:5] {
+		if g != "" {
+			return g, prefix, comment, true
+		}
+	}
+	return "", "", "", false
+}
+
+// indentOf returns the leading-whitespace span of line.
+func indentOf(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+}
+
+// chartImageTagLineIndex returns the index of the chart-level
+// `image.tag:` line, or -1 when the file has no such declaration.
 //
-// "Directly under" means: scanning forward from a column-0 `image:` key
-// until either a `tag:` line is hit or another column-0 key appears. We
-// deliberately ignore `tag:` keys that sit under siblings like
-// `global:` / `sidecar:` / `extraContainers:` — only the chart-level
-// image tag is the rollback target.
+// "Chart-level" is anchored on two structural rules:
+//  1. The owning `image:` key sits at column 0 (top-level Helm values).
+//  2. The matching `tag:` line is a *direct child* of that block — its
+//     leading indent equals the indent of the FIRST non-blank child of
+//     the `image:` block. Lines indented deeper belong to nested maps
+//     (sub-objects under sibling keys of `tag:`) and do NOT count.
 //
-// Comment lines and blank lines inside the block are skipped.
+// Lines that sit at top-level (column 0) other than `image:` close the
+// block. Comments and blanks are transparent.
 func chartImageTagLineIndex(lines []string) int {
 	inImageBlock := false
+	childIndent := ""
 	for i, line := range lines {
-		// Treat blank / comment lines as transparent — they don't change
-		// block context.
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		// A line at column 0 is a top-level key. Entering "image:" opens
-		// the block; entering anything else closes it.
+		// Column-0 key.
 		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
 			inImageBlock = trimmed == "image:"
+			childIndent = ""
 			continue
 		}
-		// Indented line. Only relevant while we're inside `image:`.
 		if !inImageBlock {
 			continue
 		}
-		if tagLinePattern.MatchString(line) {
+		ind := indentOf(line)
+		if childIndent == "" {
+			childIndent = ind
+		}
+		// Strict equality — deeper indent means we're inside a sub-map
+		// (e.g. `image:\n  someField:\n    tag: nested`), not a direct
+		// sibling of the chart's repository/tag.
+		if ind != childIndent {
+			continue
+		}
+		if _, _, _, ok := parseTagLine(line); ok {
 			return i
 		}
 	}
@@ -72,18 +110,18 @@ func chartImageTagLineIndex(lines []string) int {
 
 // ExtractImageTag returns the chart-level `image.tag` value.
 // Returns ok=false when the file has no top-level `image:` block or
-// when that block does not declare a `tag:`.
+// when that block does not declare a direct `tag:` child.
 func ExtractImageTag(content string) (string, bool) {
 	lines := strings.Split(content, "\n")
 	idx := chartImageTagLineIndex(lines)
 	if idx < 0 {
 		return "", false
 	}
-	m := tagLinePattern.FindStringSubmatch(lines[idx])
-	if len(m) < 2 {
+	val, _, _, ok := parseTagLine(lines[idx])
+	if !ok {
 		return "", false
 	}
-	return strings.TrimSpace(m[1]), true
+	return val, true
 }
 
 // LookupPreviousImageTag walks the GitHub history of valuesPath and returns

@@ -172,6 +172,44 @@ sidecar:
 		}
 	})
 
+	t.Run("preserves trailing inline comment", func(t *testing.T) {
+		content := `image:
+  repository: ghcr.io/mctlhq/mctl-openclaw
+  tag: "broken-2.0"  # bumped 2026-04-30 by deploy bot`
+
+		newContent, _, err := GenerateImageRollback(content, "good-1.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, `# bumped 2026-04-30 by deploy bot`) {
+			t.Errorf("inline comment must be preserved, got:\n%s", newContent)
+		}
+		if !strings.Contains(newContent, `tag: "good-1.0"`) {
+			t.Errorf("tag must be flipped, got:\n%s", newContent)
+		}
+	})
+
+	t.Run("nested map under image with its own tag is not rewritten", func(t *testing.T) {
+		content := `image:
+  pullPolicy: IfNotPresent
+  pullSecrets:
+    - name: ghcr
+      tag: "do-not-touch-nested"
+  repository: foo
+  tag: "broken-2.0"`
+
+		newContent, _, err := GenerateImageRollback(content, "good-1.0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, `tag: "do-not-touch-nested"`) {
+			t.Errorf("nested tag must remain untouched, got:\n%s", newContent)
+		}
+		if !strings.Contains(newContent, `tag: "good-1.0"`) {
+			t.Errorf("chart tag must be flipped, got:\n%s", newContent)
+		}
+	})
+
 	t.Run("global.tag earlier in file is not the rollback target", func(t *testing.T) {
 		content := `global:
   tag: "do-not-touch"

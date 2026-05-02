@@ -93,6 +93,34 @@ service:
   name: foo`,
 			wantOK: false,
 		},
+		{
+			name: "trailing inline comment",
+			content: `image:
+  repository: ghcr.io/mctlhq/mctl-openclaw
+  tag: "2026.4.29-beta.2"  # managed by gitops`,
+			want:   "2026.4.29-beta.2",
+			wantOK: true,
+		},
+		{
+			name: "trailing inline comment unquoted",
+			content: `image:
+  repository: foo
+  tag: 1.2.3 # bumped 2026-04-30`,
+			want:   "1.2.3",
+			wantOK: true,
+		},
+		{
+			name: "nested map under image is skipped, sibling tag wins",
+			content: `image:
+  pullPolicy: IfNotPresent
+  pullSecrets:
+    - name: ghcr
+      tag: "ignored-nested"
+  repository: foo
+  tag: "real-chart"`,
+			want:   "real-chart",
+			wantOK: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
