@@ -510,7 +510,7 @@ func (p *Pipeline) rollbackImage(ctx context.Context, valuesPath, content string
 		return "", "", fmt.Errorf("looking up previous image tag: %w", err)
 	}
 	if prevTag == "" {
-		return "", "", fmt.Errorf("no prior distinct image tag found in last %d commits of %s", 20, valuesPath)
+		return "", "", fmt.Errorf("no prior distinct image tag found in last %d commits of %s", fixer.PreviousTagLookupCommitCap, valuesPath)
 	}
 	return fixer.GenerateImageRollback(content, prevTag)
 }

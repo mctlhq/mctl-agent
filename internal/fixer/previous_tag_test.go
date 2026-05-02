@@ -67,6 +67,14 @@ extra:
 			content: `image:\n  repository: foo`,
 			wantOK:  false,
 		},
+		{
+			name: "single-quoted tag",
+			content: `image:
+  repository: foo
+  tag: '1.2.3'`,
+			want:   "1.2.3",
+			wantOK: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

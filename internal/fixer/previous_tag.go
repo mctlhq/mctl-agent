@@ -23,20 +23,23 @@ import (
 	"github.com/google/go-github/v68/github"
 )
 
-// previousTagLookupCommitCap bounds how far back we walk a values file's
+// PreviousTagLookupCommitCap bounds how far back we walk a values file's
 // history searching for a prior distinct image tag. Beyond this, we stop
 // rather than chase a wild rollback target.
-const previousTagLookupCommitCap = 20
+const PreviousTagLookupCommitCap = 20
 
 // imageTagPattern matches the chart-level `image.tag:` declaration.
 //
 // The first `tag:` line directly under the top-level `image:` block is the
 // chart image. Sub-image declarations (initContainers, sidecars) may also
 // have `tag:` keys but are not the rollback target — they live in nested
-// blocks deeper in the file. Matching the first occurrence keeps us
-// aligned with GenerateImageRollback (which also rewrites the first
-// `tag:` line it sees).
-var imageTagPattern = regexp.MustCompile(`(?m)^\s*tag:\s*"?([^"\s]+)"?\s*$`)
+// blocks deeper in the file. Matching the first occurrence is used for
+// rollback source detection; note that GenerateImageRollback rewrites
+// all `tag:` lines in the file.
+//
+// Both double-quoted and single-quoted tags are handled; the capture group
+// excludes the surrounding quote characters.
+var imageTagPattern = regexp.MustCompile(`(?m)^\s*tag:\s*["']?([^"'\s]+)["']?\s*$`)
 
 // ExtractImageTag returns the first `tag:` value found in content.
 // Returns ok=false when no tag line is present.
@@ -59,7 +62,7 @@ func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, cu
 	commits, _, err := f.client.Repositories.ListCommits(ctx, f.owner, f.repo, &github.CommitsListOptions{
 		Path: valuesPath,
 		ListOptions: github.ListOptions{
-			PerPage: previousTagLookupCommitCap,
+			PerPage: PreviousTagLookupCommitCap,
 		},
 	})
 	if err != nil {
@@ -73,6 +76,10 @@ func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, cu
 		}
 		content, err := f.GetFileContent(ctx, valuesPath, sha)
 		if err != nil {
+			if ctx.Err() != nil {
+				// Context was cancelled or timed out — stop immediately.
+				return "", ctx.Err()
+			}
 			// File didn't exist at this revision (e.g. service was
 			// onboarded after this commit). Skip.
 			continue
