@@ -98,6 +98,21 @@ func isImageBlockKey(trimmed string) bool {
 // `image:` siblings), the first to expose a direct `tag:` child wins.
 // "Direct" means at the indent of the block's first non-blank child;
 // deeper-indented `tag:` keys belong to nested maps and don't count.
+//
+// Known limitations (deliberately deferred — neither shape exists in
+// today's mctl-gitops; revisit if a future values file regresses):
+//   - `tag: ""` / `tag: ''` (empty quoted) is treated as no-tag.
+//     Helm sometimes uses this when defaults supply the effective tag,
+//     but rollback has nothing to roll back to in that case anyway.
+//   - If the SHALLOWEST `image:` block has no direct `tag:` child but
+//     a deeper one does, we return -1 instead of falling back to the
+//     deeper block. A wrapped manifest with a non-chart shallow
+//     `image:` map plus chart values further down would degrade to
+//     diagnosis-only; the operator can still merge a manual rollback
+//     PR. Switching the line-scanner to a YAML-AST walker would
+//     eliminate both — left to a follow-up since the cost (yaml.v3
+//     decoder + line-tracking via yaml.Node.Line) outweighs the
+//     benefit until a real values file actually breaks.
 func chartImageTagLineIndex(lines []string) int {
 	type candidate struct {
 		idx    int
