@@ -62,6 +62,18 @@ func indentOf(line string) string {
 	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 }
 
+// isImageBlockKey reports whether trimmed is `image:` opening a mapping
+// block — value-less, with an optional trailing inline comment.
+// Examples:  `image:` / `image: # primary app image` → true
+//            `image: foo` / `images:` → false
+func isImageBlockKey(trimmed string) bool {
+	if !strings.HasPrefix(trimmed, "image:") {
+		return false
+	}
+	rest := strings.TrimSpace(trimmed[len("image:"):])
+	return rest == "" || strings.HasPrefix(rest, "#")
+}
+
 // chartImageTagLineIndex returns the index of the chart-level
 // `image.tag:` line, or -1 when the file has no such declaration.
 //
@@ -93,7 +105,7 @@ func chartImageTagLineIndex(lines []string) int {
 	var cands []candidate
 	minIndent := -1
 	for i, line := range lines {
-		if strings.TrimSpace(line) != "image:" {
+		if !isImageBlockKey(strings.TrimSpace(line)) {
 			continue
 		}
 		ind := len(indentOf(line))

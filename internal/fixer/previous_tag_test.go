@@ -134,6 +134,14 @@ image:
 			wantOK: true,
 		},
 		{
+			name: "image: line with trailing inline comment",
+			content: `image: # primary chart image
+  repository: foo
+  tag: "1.2.3"`,
+			want:   "1.2.3",
+			wantOK: true,
+		},
+		{
 			name: "indented image: block (helm.values inline-string shape)",
 			content: `apiVersion: argoproj.io/v1alpha1
 kind: Application
