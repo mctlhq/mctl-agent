@@ -31,7 +31,7 @@ import (
 )
 
 const (
-	quietAlertRecordingRulesNoData = "RecordingRulesNoData"
+	quietAlertRecordingRulesNoData   = "RecordingRulesNoData"
 	quietAlertScrapePoolHasNoTargets = "ScrapePoolHasNoTargets"
 	quietAlertTooManyScrapeErrors    = "TooManyScrapeErrors"
 	quietAlertTooManyLogs            = "TooManyLogs"
@@ -379,7 +379,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	case "fix_appproject_whitelist":
 		newContent, summary, patchErr = fixer.GenerateAppProjectWhitelistFix(content)
 	case "rollback_image":
-		patchErr = fmt.Errorf("image rollback requires previous tag — not yet implemented")
+		newContent, summary, patchErr = p.rollbackImage(ctx, filePath, content)
 	default:
 		// For LLM-generated fixes, try to apply from diagnosis fields.
 		if diag.CurrentValue != "" && diag.SuggestedValue != "" {
@@ -498,3 +498,27 @@ func toLegacyDiag(d *skill.DiagnosisResult) *legacyDiag {
 
 // legacyDiag mirrors diagnosis.DiagnosisResult for backward compatibility with fixer.
 type legacyDiag = fixer.DiagnosisCompat
+
+// rollbackImage resolves the previous distinct image tag from the GitOps
+// history of valuesPath and produces a patch flipping the current tag back.
+// On any miss (no prior commit, network error, file not parseable) it
+// returns a non-nil error so the caller surfaces "Fix identified but
+// patch generation failed" via Telegram instead of silently no-oping.
+func (p *Pipeline) rollbackImage(ctx context.Context, valuesPath, content string) (string, string, error) {
+	prevTag, err := p.github.LookupPreviousImageTag(ctx, valuesPath, currentImageTag(content))
+	if err != nil {
+		return "", "", fmt.Errorf("looking up previous image tag: %w", err)
+	}
+	if prevTag == "" {
+		return "", "", fmt.Errorf("no prior distinct image tag found in last %d commits of %s", fixer.PreviousTagLookupCommitCap, valuesPath)
+	}
+	return fixer.GenerateImageRollback(content, prevTag)
+}
+
+// currentImageTag is a thin wrapper around fixer.ExtractImageTag exposed
+// for the rollback path. Returns "" when no tag line is present (the
+// lookup will then return any prior tag without filtering).
+func currentImageTag(content string) string {
+	tag, _ := fixer.ExtractImageTag(content)
+	return tag
+}

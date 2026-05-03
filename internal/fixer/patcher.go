@@ -88,29 +88,30 @@ func GenerateMemoryBump(content string) (string, string, error) {
 	return strings.Join(modified, "\n"), summary, nil
 }
 
-// GenerateImageRollback creates a patch that rolls back the image tag.
+// GenerateImageRollback creates a patch that rolls back the chart-level
+// image tag. Only the `tag:` line that's a direct child of the top-level
+// `image:` block is rewritten — values files routinely embed sidecar /
+// initContainer images deeper in the document, and unrelated tag keys
+// like `global.tag` may appear earlier in the file. Inline comments on
+// the tag line (e.g. `tag: "1.2.3"  # bumped 2026-04-30`) are preserved.
+//
+// chartImageTagLineIndex (location), parseTagLine (read), and the rewrite
+// here all agree on what counts as the chart image, so the
+// read-then-rewrite invariant holds.
 func GenerateImageRollback(content, previousTag string) (string, string, error) {
 	lines := strings.Split(content, "\n")
-	var modified []string
-	var summary string
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "tag:") {
-			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-			currentTag := strings.Trim(strings.TrimSpace(strings.TrimPrefix(trimmed, "tag:")), "\"'")
-			modified = append(modified, fmt.Sprintf(`%stag: "%s"`, indent, previousTag))
-			summary = fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previousTag)
-			continue
-		}
-		modified = append(modified, line)
+	idx := chartImageTagLineIndex(lines)
+	if idx < 0 {
+		return content, "", fmt.Errorf("could not find chart-level image.tag to rollback")
 	}
-
-	if summary == "" {
-		return content, "", fmt.Errorf("could not find image tag to rollback")
+	currentTag, prefix, comment, ok := parseTagLine(lines[idx])
+	if !ok {
+		return content, "", fmt.Errorf("chart-level tag line is not parseable: %q", lines[idx])
 	}
-
-	return strings.Join(modified, "\n"), summary, nil
+	indent := prefix[:len(prefix)-len(strings.TrimLeft(prefix, " \t"))]
+	lines[idx] = fmt.Sprintf(`%stag: "%s"%s`, indent, previousTag, comment)
+	summary := fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previousTag)
+	return strings.Join(lines, "\n"), summary, nil
 }
 
 // GenerateFromDiagnosis applies a Claude-suggested fix.
