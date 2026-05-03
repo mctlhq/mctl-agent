@@ -65,7 +65,8 @@ func indentOf(line string) string {
 // isImageBlockKey reports whether trimmed is `image:` opening a mapping
 // block — value-less, with an optional trailing inline comment.
 // Examples:  `image:` / `image: # primary app image` → true
-//            `image: foo` / `images:` → false
+//
+//	`image: foo` / `images:` → false
 func isImageBlockKey(trimmed string) bool {
 	if !strings.HasPrefix(trimmed, "image:") {
 		return false
