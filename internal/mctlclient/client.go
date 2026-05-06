@@ -45,10 +45,17 @@ func NewClient(baseURL, token string) *Client {
 }
 
 // Service represents a service from mctl-api.
+//
+// mctl-api emits the service name under the JSON key "name". The Go
+// field is named App to match how the rest of mctl-agent talks about
+// service identity (poller iterates `svc.App`, alerthandler uses the
+// same naming convention via `extractService`). The dropped duplicate
+// `Name` field used to receive the same value implicitly and was
+// referenced nowhere — it is removed so future readers do not have
+// to wonder which one is authoritative.
 type Service struct {
 	Team string `json:"team"`
-	App  string `json:"app"`
-	Name string `json:"name"`
+	App  string `json:"name"`
 }
 
 // StatusResponse is the response from GET /api/v1/status/{team}/{app}.
