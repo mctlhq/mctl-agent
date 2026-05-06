@@ -95,6 +95,21 @@ func (h *AlertHandler) processAlert(a alert) {
 	if tType == ticket.TypeWorkflowFailed && workflow != "" {
 		service = workflow
 	}
+	if tType == ticket.TypeArgoCDDegraded {
+		// ArgoCD app health metrics carry the Application identity in
+		// `name` (with optional `dest_namespace` / `project`), not in
+		// `pod`. Without this branch every Degraded app collapses onto
+		// the same (tenant="", service="") dedup key and
+		// collectEvidence skips argocd_status (it gates on service !=
+		// ""), so the argocd_sync_failed skill never sees the data it
+		// needs to diagnose.
+		if app := a.Labels["name"]; app != "" {
+			service = app
+		}
+		if dest := a.Labels["dest_namespace"]; dest != "" {
+			tenant = dest
+		}
+	}
 
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
@@ -201,6 +216,17 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 		return ticket.TypeResourceLimit, ticket.SeverityWarning
 	case "VaultSealed":
 		return ticket.TypeResourceLimit, ticket.SeverityCritical
+	case "ArgoCDApplicationDegraded",
+		"ArgoCDApplicationOutOfSyncLong",
+		// ArgoCDApplicationSyncFailed is the original (mis-)name from
+		// mctl-gitops PR #142 first commit; it was renamed to
+		// ArgoCDApplicationOutOfSyncLong after Codex P2 (the alert
+		// fires on prolonged OutOfSync drift, not a sync-failure
+		// signal). Keep the old name in this switch so the two PRs
+		// stay merge-order-independent — drop after both have
+		// landed and the chart has rolled out.
+		"ArgoCDApplicationSyncFailed":
+		return ticket.TypeArgoCDDegraded, ticket.SeverityWarning
 	default:
 		return ticket.TypeGeneric, ticket.SeverityWarning
 	}
