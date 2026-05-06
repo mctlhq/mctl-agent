@@ -201,6 +201,8 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 		return ticket.TypeResourceLimit, ticket.SeverityWarning
 	case "VaultSealed":
 		return ticket.TypeResourceLimit, ticket.SeverityCritical
+	case "ArgoCDApplicationDegraded", "ArgoCDApplicationSyncFailed":
+		return ticket.TypeArgoCDDegraded, ticket.SeverityWarning
 	default:
 		return ticket.TypeGeneric, ticket.SeverityWarning
 	}

@@ -172,6 +172,93 @@ func TestArgoCDDriftSkillMatch(t *testing.T) {
 	}
 }
 
+func TestArgoCDSyncFailedSkillMatch(t *testing.T) {
+	s := NewArgoCDSyncFailedSkill()
+	ctx := context.Background()
+	tk := &ticket.Ticket{}
+
+	tests := []struct {
+		name             string
+		status           string
+		wantMatched      bool
+		wantMinPriority  int
+		wantHighConfDiag bool
+	}{
+		{
+			name:        "OutOfSync + Healthy (drift, leave to ArgoCDDriftSkill)",
+			status:      `{"syncStatus":"OutOfSync","health":"Healthy"}`,
+			wantMatched: false,
+		},
+		{
+			name:        "Synced + Healthy (nothing to do)",
+			status:      `{"syncStatus":"Synced","health":"Healthy"}`,
+			wantMatched: false,
+		},
+		{
+			name:            "OutOfSync + Degraded (sync stuck)",
+			status:          `{"syncStatus":"OutOfSync","health":"Degraded"}`,
+			wantMatched:     true,
+			wantMinPriority: 60,
+		},
+		{
+			name:             "Degraded with storedVersion conflict signature",
+			status:           `{"syncStatus":"OutOfSync","health":"Degraded","message":"CustomResourceDefinition externalsecrets is invalid: status.storedVersions[1]: Invalid value: \"v1\": missing from spec.versions"}`,
+			wantMatched:      true,
+			wantMinPriority:  80,
+			wantHighConfDiag: true,
+		},
+		{
+			name:             "Degraded with invalid group/version signature",
+			status:           `{"syncStatus":"OutOfSync","health":"Degraded","message":"request to convert CR from an invalid group/version: external-secrets.io/v1"}`,
+			wantMatched:      true,
+			wantMinPriority:  80,
+			wantHighConfDiag: true,
+		},
+		{
+			name:            "Degraded only (no sync info)",
+			status:          `{"health":"Degraded"}`,
+			wantMatched:     true,
+			wantMinPriority: 55,
+		},
+		{name: "no status", status: "", wantMatched: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := skill.NewEvidenceSet([]ticket.Evidence{
+				{Type: "argocd_status", Content: tt.status},
+			})
+			result := s.Match(ctx, tk, ev)
+			if result.Matched != tt.wantMatched {
+				t.Fatalf("Match() = %v, want %v (reason=%q)", result.Matched, tt.wantMatched, result.Reason)
+			}
+			if !tt.wantMatched {
+				return
+			}
+			if result.Priority < tt.wantMinPriority {
+				t.Errorf("Match() priority = %d, want >= %d", result.Priority, tt.wantMinPriority)
+			}
+			diag, err := s.Diagnose(ctx, tk, ev)
+			if err != nil {
+				t.Fatalf("Diagnose() error = %v", err)
+			}
+			if diag.SkillName != s.Name() {
+				t.Errorf("Diagnose() skill name = %q, want %q", diag.SkillName, s.Name())
+			}
+			if diag.Fixable {
+				t.Error("Diagnose() should not advertise auto-fixable for cluster-side recovery")
+			}
+			if tt.wantHighConfDiag && diag.Confidence != ticket.ConfidenceHigh {
+				t.Errorf("Diagnose() confidence = %q, want HIGH", diag.Confidence)
+			}
+			fix, err := s.Fix(ctx, tk, diag)
+			if err != nil || fix != nil {
+				t.Errorf("Fix() = (%v, %v), want (nil, nil)", fix, err)
+			}
+		})
+	}
+}
+
 func TestLLMDiagnosisSkillMatchNoKey(t *testing.T) {
 	s := NewLLMDiagnosisSkill("")
 	result := s.Match(context.Background(), &ticket.Ticket{}, skill.NewEvidenceSet(nil))
@@ -212,8 +299,8 @@ func TestAllSkillsRegistered(t *testing.T) {
 	RegisterAll(reg, "test-key")
 
 	infos := reg.List()
-	if len(infos) != 11 {
-		t.Fatalf("expected 11 skills, got %d", len(infos))
+	if len(infos) != 12 {
+		t.Fatalf("expected 12 skills, got %d", len(infos))
 	}
 
 	names := map[string]bool{}
@@ -229,8 +316,8 @@ func TestAllSkillsRegistered(t *testing.T) {
 
 	expected := []string{
 		"oomkilled", "imagepull", "post_deploy_rollback", "argocd_drift",
-		"llm_diagnosis", "probe_fix", "cpu_throttle", "quota_adjust", "scale_up",
-		"github_actions", "workflow_fixer",
+		"argocd_sync_failed", "llm_diagnosis", "probe_fix", "cpu_throttle",
+		"quota_adjust", "scale_up", "github_actions", "workflow_fixer",
 	}
 	for _, name := range expected {
 		if !names[name] {
