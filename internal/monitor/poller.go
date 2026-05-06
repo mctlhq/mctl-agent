@@ -339,6 +339,13 @@ func (p *Poller) pruneOrphans(state refreshState) {
 	if state.allUnknown {
 		return
 	}
+	// An empty inventory is indistinguishable from a partial outage that
+	// returned HTTP 200 with no items. Resolving every open ticket on
+	// that basis would mass-close active incidents — guard accordingly.
+	if len(state.knownServices) == 0 {
+		slog.Warn("poller: orphan prune skipped, service inventory is empty")
+		return
+	}
 
 	open, err := p.store.ListOpen()
 	if err != nil {
@@ -352,7 +359,11 @@ func (p *Poller) pruneOrphans(state refreshState) {
 		default:
 			continue
 		}
-		if t.Source == ticket.SourceManual {
+		// Orphan pruning is an inventory-membership check; only sources
+		// whose (Tenant, Service) maps to mctl service inventory are
+		// safe. GitHub webhook tickets (and manual tickets) carry repo
+		// metadata or operator-supplied names — never auto-resolve those.
+		if t.Source != ticket.SourceAlertManager && t.Source != ticket.SourcePolling {
 			continue
 		}
 		if state.knownServices[t.Tenant+"/"+t.Service] {

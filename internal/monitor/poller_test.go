@@ -617,8 +617,10 @@ func TestSkipsManualOrphanTicket(t *testing.T) {
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
 
+	// Non-empty inventory so the empty-inventory guard does not fire and
+	// we genuinely exercise the source allow-list.
 	state := refreshState{
-		knownServices: map[string]bool{}, // empty: service not present
+		knownServices: map[string]bool{"ovk/something-else": true},
 	}
 	p.pruneOrphans(state)
 
@@ -628,5 +630,81 @@ func TestSkipsManualOrphanTicket(t *testing.T) {
 	}
 	if got.Status == ticket.StatusResolved {
 		t.Errorf("SourceManual ticket must be spared by orphan pruning; got status=%q", got.Status)
+	}
+}
+
+func TestSkipsOrphanPruneOnEmptyInventory(t *testing.T) {
+	// An empty service list returned by mctl-api (HTTP 200 but no items —
+	// e.g. partial outage in the upstream listing) is indistinguishable
+	// from "no services exist" and must NOT cause a mass-resolve. Codex
+	// P1 review on PR #12.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypePodCrashloop,
+		Tenant:   "ovk",
+		Service:  "real-service",
+		Summary:  "real alert",
+		Severity: ticket.SeverityCritical,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	// allUnknown=false but the inventory came back empty. Must not resolve.
+	state := refreshState{
+		knownServices: map[string]bool{},
+	}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("orphan prune must be skipped when inventory is empty; got status=%q", got.Status)
+	}
+}
+
+func TestSkipsOrphanPruneForGitHubWebhookSource(t *testing.T) {
+	// SourceGitHubWebhook tickets carry repo metadata in (Tenant, Service),
+	// which does NOT map to mctl service inventory. Auto-resolving them
+	// would drop legitimate CI failures. Only AlertManager and Polling
+	// sources are inventory-backed and safe to orphan-prune. Codex P1
+	// review on PR #12.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceGitHubWebhook,
+		Type:     ticket.TypeGitHubActionsFailed,
+		Tenant:   "mctlhq",
+		Service:  "mctl-agent",
+		Summary:  "build failed on main",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	// (mctlhq/mctl-agent) is intentionally absent from the mctl service
+	// inventory — the inventory keys on tenant+app, not GitHub org+repo.
+	state := refreshState{
+		knownServices: map[string]bool{"ovk/something-else": true},
+	}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("GitHub-webhook ticket must be spared by orphan pruning; got status=%q", got.Status)
 	}
 }
