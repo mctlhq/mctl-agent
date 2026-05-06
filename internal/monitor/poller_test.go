@@ -478,3 +478,233 @@ func TestPollerKeepsRecentAnalyzingTicket(t *testing.T) {
 		t.Errorf("analyzing ticket only 24h old (threshold=48h): should not be resolved, got status=%q", got.Status)
 	}
 }
+
+func TestPrunesOrphanTicketAfterGracePeriod(t *testing.T) {
+	// A ticket on a service NOT in the inventory, past the grace period,
+	// must be resolved with the orphan reason.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	statuses := []string{
+		ticket.StatusOpen,
+		ticket.StatusAnalyzing,
+		ticket.StatusFixProposed,
+	}
+	for _, status := range statuses {
+		t.Run(status, func(t *testing.T) {
+			tk := &ticket.Ticket{
+				Source:   ticket.SourceAlertManager,
+				Type:     ticket.TypePodCrashloop,
+				Tenant:   "ovk",
+				Service:  "smoke",
+				Summary:  "synthetic alert",
+				Severity: ticket.SeverityCritical,
+			}
+			if err := store.Create(tk); err != nil {
+				t.Fatal(err)
+			}
+			if status != ticket.StatusOpen {
+				tk.Status = status
+				if err := store.Update(tk); err != nil {
+					t.Fatal(err)
+				}
+			}
+			backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+			state := refreshState{
+				knownServices: map[string]bool{"ovk/real-service": true},
+			}
+			p.pruneOrphans(state)
+
+			got, err := store.Get(tk.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != ticket.StatusResolved {
+				t.Errorf("status=%s: want resolved, got %q", status, got.Status)
+			}
+			const wantSubstr = "Auto-resolved: service does not exist"
+			if !strings.Contains(got.Analysis, wantSubstr) {
+				t.Errorf("status=%s: analysis=%q, want to contain %q", status, got.Analysis, wantSubstr)
+			}
+		})
+	}
+}
+
+func TestKeepsTicketWhoseServiceExists(t *testing.T) {
+	// A ticket whose (tenant, service) IS in the inventory must not be resolved.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypePodCrashloop,
+		Tenant:   "ovk",
+		Service:  "real-service",
+		Summary:  "real alert",
+		Severity: ticket.SeverityCritical,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	state := refreshState{
+		knownServices: map[string]bool{"ovk/real-service": true},
+	}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("ticket for known service must not be orphan-pruned; got status=%q", got.Status)
+	}
+}
+
+func TestSkipsOrphanPruneWhenInventoryUnknown(t *testing.T) {
+	// When allUnknown=true (ListServices failed), no ticket must be resolved
+	// by the orphan prune pass, even if backdated past the grace period.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypePodCrashloop,
+		Tenant:   "ovk",
+		Service:  "does-not-exist",
+		Summary:  "orphan",
+		Severity: ticket.SeverityCritical,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	state := refreshState{allUnknown: true}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("orphan prune must be skipped when inventory is unknown; got status=%q", got.Status)
+	}
+}
+
+func TestSkipsManualOrphanTicket(t *testing.T) {
+	// SourceManual tickets must never be orphan-pruned, even if the service
+	// does not exist and the ticket is past the grace period.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceManual,
+		Type:     ticket.TypeArgoCDDegraded,
+		Tenant:   "ovk",
+		Service:  "does-not-exist",
+		Summary:  "operator investigation",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	// Non-empty inventory so the empty-inventory guard does not fire and
+	// we genuinely exercise the source allow-list.
+	state := refreshState{
+		knownServices: map[string]bool{"ovk/something-else": true},
+	}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("SourceManual ticket must be spared by orphan pruning; got status=%q", got.Status)
+	}
+}
+
+func TestSkipsOrphanPruneOnEmptyInventory(t *testing.T) {
+	// An empty service list returned by mctl-api (HTTP 200 but no items —
+	// e.g. partial outage in the upstream listing) is indistinguishable
+	// from "no services exist" and must NOT cause a mass-resolve. Codex
+	// P1 review on PR #12.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypePodCrashloop,
+		Tenant:   "ovk",
+		Service:  "real-service",
+		Summary:  "real alert",
+		Severity: ticket.SeverityCritical,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	// allUnknown=false but the inventory came back empty. Must not resolve.
+	state := refreshState{
+		knownServices: map[string]bool{},
+	}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("orphan prune must be skipped when inventory is empty; got status=%q", got.Status)
+	}
+}
+
+func TestSkipsOrphanPruneForGitHubWebhookSource(t *testing.T) {
+	// SourceGitHubWebhook tickets carry repo metadata in (Tenant, Service),
+	// which does NOT map to mctl service inventory. Auto-resolving them
+	// would drop legitimate CI failures. Only AlertManager and Polling
+	// sources are inventory-backed and safe to orphan-prune. Codex P1
+	// review on PR #12.
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceGitHubWebhook,
+		Type:     ticket.TypeGitHubActionsFailed,
+		Tenant:   "mctlhq",
+		Service:  "mctl-agent",
+		Summary:  "build failed on main",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	// (mctlhq/mctl-agent) is intentionally absent from the mctl service
+	// inventory — the inventory keys on tenant+app, not GitHub org+repo.
+	state := refreshState{
+		knownServices: map[string]bool{"ovk/something-else": true},
+	}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("GitHub-webhook ticket must be spared by orphan pruning; got status=%q", got.Status)
+	}
+}

@@ -38,6 +38,9 @@ type Poller struct {
 	// FixProposedAfter enables auto-resolution of tickets stuck in StatusFixProposed
 	// beyond this window. Zero disables this GC pass.
 	FixProposedAfter time.Duration
+	// OrphanAfter enables auto-resolution of open tickets whose (tenant, service)
+	// is absent from the service inventory. Zero (or negative) disables this pass.
+	OrphanAfter time.Duration
 }
 
 // NewPoller creates a new service health poller.
@@ -80,6 +83,9 @@ type refreshState struct {
 	// failedServices holds "tenant/service" keys for services whose
 	// GetServiceStatus call failed. Only consulted when allUnknown=false.
 	failedServices map[string]bool
+	// knownServices holds "tenant/service" keys for all services returned
+	// by the most recent ListServices() call. Nil when allUnknown is true.
+	knownServices map[string]bool
 }
 
 func (rs refreshState) argoRefreshed(tenant, service string) bool {
@@ -92,6 +98,7 @@ func (rs refreshState) argoRefreshed(tenant, service string) bool {
 func (p *Poller) poll() {
 	state := p.pollDegraded()
 	p.resolveStale(state)
+	p.pruneOrphans(state)
 }
 
 // pollDegraded scans all services for ArgoCD Degraded/Missing health,
@@ -107,12 +114,14 @@ func (p *Poller) pollDegraded() refreshState {
 	slog.Debug("poller: checking services", "count", len(services))
 
 	failed := map[string]bool{}
+	known := make(map[string]bool, len(services))
 	for _, svc := range services {
 		team := svc.Team
 		app := svc.App
 		if team == "" || app == "" {
 			continue
 		}
+		known[team+"/"+app] = true
 
 		status, err := p.client.GetServiceStatus(team, app)
 		if err != nil {
@@ -174,7 +183,7 @@ func (p *Poller) pollDegraded() refreshState {
 			p.onTicket(t)
 		}
 	}
-	return refreshState{failedServices: failed}
+	return refreshState{failedServices: failed, knownServices: known}
 }
 
 // heartbeatTicketTypes lists ticket types whose creation path has a
@@ -316,5 +325,66 @@ func (p *Poller) resolveStale(state refreshState) {
 			slog.Info("poller: stale TTL resolved",
 				"ticket", t.ID, "status", t.Status, "age", age, "threshold", cutoff)
 		}
+	}
+}
+
+// pruneOrphans auto-resolves open tickets whose (tenant, service) is not
+// present in the current service inventory, after OrphanAfter has elapsed.
+// It is skipped when OrphanAfter <= 0 (disabled) or when the inventory is
+// stale (allUnknown=true).
+func (p *Poller) pruneOrphans(state refreshState) {
+	if p.OrphanAfter <= 0 {
+		return
+	}
+	if state.allUnknown {
+		return
+	}
+	// An empty inventory is indistinguishable from a partial outage that
+	// returned HTTP 200 with no items. Resolving every open ticket on
+	// that basis would mass-close active incidents — guard accordingly.
+	if len(state.knownServices) == 0 {
+		slog.Warn("poller: orphan prune skipped, service inventory is empty")
+		return
+	}
+
+	open, err := p.store.ListOpen()
+	if err != nil {
+		slog.Error("poller: failed to list tickets for orphan pruning", "error", err)
+		return
+	}
+
+	for _, t := range open {
+		switch t.Status {
+		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusFixProposed:
+		default:
+			continue
+		}
+		// Orphan pruning is an inventory-membership check; only sources
+		// whose (Tenant, Service) maps to mctl service inventory are
+		// safe. GitHub webhook tickets (and manual tickets) carry repo
+		// metadata or operator-supplied names — never auto-resolve those.
+		if t.Source != ticket.SourceAlertManager && t.Source != ticket.SourcePolling {
+			continue
+		}
+		if state.knownServices[t.Tenant+"/"+t.Service] {
+			continue
+		}
+		if time.Since(t.UpdatedAt) < p.OrphanAfter {
+			continue
+		}
+
+		const reason = "Auto-resolved: service does not exist (likely synthetic / orphaned alert)"
+		resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+		if err != nil {
+			slog.Warn("poller: orphan prune failed", "ticket", t.ID, "err", err)
+			continue
+		}
+		if !resolved {
+			slog.Debug("poller: orphan prune no-op, ticket advanced concurrently", "id", t.ID)
+			continue
+		}
+		slog.Info("poller: orphan-pruned",
+			"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
+			"status", t.Status, "age", time.Since(t.UpdatedAt).Round(time.Hour))
 	}
 }
