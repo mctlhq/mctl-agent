@@ -15,6 +15,7 @@
 package monitor
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -365,5 +366,115 @@ func TestResolveStaleArgoSkippedWhenAllUnknown(t *testing.T) {
 	}
 	if got, _ := store.Get(amTicket.ID); got.Status != ticket.StatusResolved {
 		t.Errorf("AlertManager ticket must still GC; got %q", got.Status)
+	}
+}
+
+func TestPollerResolvesStaleAnalyzingTicket(t *testing.T) {
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 24 * time.Hour
+	p.AnalyzingAfter = 48 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypePodCrashloop,
+		Tenant:   "labs",
+		Service:  "stuck-analyzing",
+		Summary:  "stuck in analyzing",
+		Severity: ticket.SeverityCritical,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-72*time.Hour))
+
+	p.resolveStale(refreshState{})
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("analyzing ticket past 48h: status = %q, want resolved", got.Status)
+	}
+	wantSubstr := "Auto-resolved by stale TTL GC (status=analyzing"
+	if !strings.Contains(got.Analysis, wantSubstr) {
+		t.Errorf("analysis field = %q, want to contain %q", got.Analysis, wantSubstr)
+	}
+}
+
+func TestPollerResolvesStaleFixProposedTicket(t *testing.T) {
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 24 * time.Hour
+	p.FixProposedAfter = 168 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeResourceLimit,
+		Tenant:   "admins",
+		Service:  "old-pr-service",
+		Summary:  "fix proposed, PR abandoned",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusFixProposed
+	if err := store.Update(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-200*time.Hour))
+
+	p.resolveStale(refreshState{})
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("fix_proposed ticket past 168h: status = %q, want resolved", got.Status)
+	}
+	wantSubstr := "Auto-resolved by stale TTL GC (status=fix_proposed"
+	if !strings.Contains(got.Analysis, wantSubstr) {
+		t.Errorf("analysis field = %q, want to contain %q", got.Analysis, wantSubstr)
+	}
+}
+
+func TestPollerKeepsRecentAnalyzingTicket(t *testing.T) {
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 24 * time.Hour
+	p.AnalyzingAfter = 48 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeGeneric,
+		Tenant:   "ovk",
+		Service:  "recent-analyzing",
+		Summary:  "only 24h old, should not resolve",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-24*time.Hour))
+
+	p.resolveStale(refreshState{})
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("analyzing ticket only 24h old (threshold=48h): should not be resolved, got status=%q", got.Status)
 	}
 }

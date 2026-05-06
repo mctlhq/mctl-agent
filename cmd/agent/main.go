@@ -110,6 +110,8 @@ func main() {
 	}
 	poller := monitor.NewPoller(mctlClient, store, pipe.ProcessTicket)
 	poller.StaleAfter = cfg.AutoResolveStaleAfter
+	poller.AnalyzingAfter = cfg.AutoResolveAnalyzingAfter
+	poller.FixProposedAfter = cfg.AutoResolveFixProposedAfter
 
 	// GitHub Actions webhook handler (optional — enabled when GITHUB_WEBHOOK_SECRET is set).
 	var ghWebhookHandler *monitor.GitHubWebhookHandler

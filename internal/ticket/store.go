@@ -538,6 +538,48 @@ func (s *Store) ResolveByID(id string) (bool, error) {
 	return n > 0, nil
 }
 
+// ResolveByIDFromStatus marks a ticket as resolved when it is in the
+// specified fromStatus. Unlike ResolveByID (which gates on StatusOpen),
+// this is used by the stale-TTL GC for StatusAnalyzing and
+// StatusFixProposed tickets, and it also appends reason to the analysis
+// field so operators can distinguish automatic from manual resolutions.
+//
+// Returns true when a row was actually updated, false when the gate
+// filtered the write (ticket was already promoted to another status).
+func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, error) {
+	now := time.Now().UTC()
+	query := `
+		UPDATE tickets SET
+			status=?,
+			resolved_at=?,
+			updated_at=?,
+			analysis = CASE WHEN analysis='' THEN ? ELSE analysis || E'\n' || ? END
+		WHERE id=? AND status=?`
+	// SQLite does not support E'\n' escape syntax; use literal newline.
+	if s.dialect != "postgres" {
+		query = `
+		UPDATE tickets SET
+			status=?,
+			resolved_at=?,
+			updated_at=?,
+			analysis = CASE WHEN analysis='' THEN ? ELSE analysis || char(10) || ? END
+		WHERE id=? AND status=?`
+	}
+	res, err := s.db.Exec(s.rebind(query),
+		StatusResolved, now, now,
+		reason, reason,
+		id, fromStatus,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // ResolveByTenantService resolves open tickets matching tenant+service.
 func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
 	now := time.Now().UTC()

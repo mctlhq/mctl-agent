@@ -16,6 +16,7 @@ package monitor
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -31,6 +32,12 @@ type Poller struct {
 	// StaleAfter enables auto-resolution of open tickets whose UpdatedAt
 	// has not advanced within this window. Zero disables the GC pass.
 	StaleAfter time.Duration
+	// AnalyzingAfter enables auto-resolution of tickets stuck in StatusAnalyzing
+	// beyond this window. Zero disables this GC pass.
+	AnalyzingAfter time.Duration
+	// FixProposedAfter enables auto-resolution of tickets stuck in StatusFixProposed
+	// beyond this window. Zero disables this GC pass.
+	FixProposedAfter time.Duration
 }
 
 // NewPoller creates a new service health poller.
@@ -199,6 +206,18 @@ var heartbeatTicketSources = map[string]bool{
 	ticket.SourceGitHubWebhook: true,
 }
 
+// eligibleType reports whether the given ticket type is GC-eligible
+// (i.e. its source emits a Touch heartbeat on every recurring event).
+func (p *Poller) eligibleType(typ string) bool {
+	return heartbeatTicketTypes[typ]
+}
+
+// eligibleSource reports whether the given ticket source emits heartbeats
+// that keep UpdatedAt current while the underlying signal is active.
+func (p *Poller) eligibleSource(src string) bool {
+	return heartbeatTicketSources[src]
+}
+
 // resolveStale closes open tickets whose UpdatedAt has not advanced
 // within StaleAfter. UpdatedAt is refreshed on each duplicate-signal
 // hit (see alerthandler.go, github_webhook.go, and pollDegraded
@@ -222,7 +241,7 @@ var heartbeatTicketSources = map[string]bool{
 // do not depend on mctl-api reachability and are GC'd purely by
 // UpdatedAt, so a partial poller outage does not block noise cleanup.
 func (p *Poller) resolveStale(state refreshState) {
-	if p.StaleAfter <= 0 {
+	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.FixProposedAfter <= 0 {
 		return
 	}
 	open, err := p.store.ListOpen()
@@ -230,20 +249,24 @@ func (p *Poller) resolveStale(state refreshState) {
 		slog.Error("poller: failed to list open tickets for stale GC", "error", err)
 		return
 	}
-	cutoff := time.Now().UTC().Add(-p.StaleAfter)
+
+	thresholds := map[string]time.Duration{
+		ticket.StatusOpen:        p.StaleAfter,
+		ticket.StatusAnalyzing:   p.AnalyzingAfter,
+		ticket.StatusFixProposed: p.FixProposedAfter,
+	}
+
 	for _, t := range open {
-		if t.Status != ticket.StatusOpen {
+		cutoff, ok := thresholds[t.Status]
+		if !ok || cutoff <= 0 {
 			continue
 		}
-		if !t.UpdatedAt.Before(cutoff) {
-			continue
-		}
-		if !heartbeatTicketSources[t.Source] {
+		if !p.eligibleSource(t.Source) {
 			slog.Debug("poller: skipping stale GC, ticket source has no heartbeat",
 				"id", t.ID, "source", t.Source)
 			continue
 		}
-		if !heartbeatTicketTypes[t.Type] {
+		if !p.eligibleType(t.Type) {
 			slog.Debug("poller: skipping stale GC, ticket type has no heartbeat",
 				"id", t.ID, "type", t.Type)
 			continue
@@ -253,22 +276,45 @@ func (p *Poller) resolveStale(state refreshState) {
 				"id", t.ID, "tenant", t.Tenant, "service", t.Service)
 			continue
 		}
-		resolved, err := p.store.ResolveByID(t.ID)
-		if err != nil {
-			slog.Error("poller: failed to auto-resolve stale ticket",
-				"error", err, "id", t.ID)
+		if time.Since(t.UpdatedAt) < cutoff {
 			continue
 		}
-		if !resolved {
-			// Ticket was promoted out of status=open between ListOpen
-			// and ResolveByID — pipeline owns it, do not claim a false
-			// resolution.
-			slog.Debug("poller: stale GC no-op, ticket advanced concurrently",
-				"id", t.ID)
-			continue
+
+		age := time.Since(t.UpdatedAt).Round(time.Hour)
+
+		if t.Status == ticket.StatusOpen {
+			// StatusOpen: existing behavior — no reason appended to analysis.
+			resolved, err := p.store.ResolveByID(t.ID)
+			if err != nil {
+				slog.Error("poller: failed to auto-resolve stale ticket",
+					"error", err, "id", t.ID)
+				continue
+			}
+			if !resolved {
+				slog.Debug("poller: stale GC no-op, ticket advanced concurrently",
+					"id", t.ID)
+				continue
+			}
+			slog.Info("poller: auto-resolved stale ticket",
+				"id", t.ID, "tenant", t.Tenant, "service", t.Service,
+				"type", t.Type, "last_updated", t.UpdatedAt, "stale_after", p.StaleAfter)
+		} else {
+			reason := fmt.Sprintf(
+				"Auto-resolved by stale TTL GC (status=%s, age=%s, threshold=%s)",
+				t.Status, age, cutoff,
+			)
+			resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+			if err != nil {
+				slog.Warn("poller: stale TTL resolve failed", "ticket", t.ID, "err", err)
+				continue
+			}
+			if !resolved {
+				slog.Debug("poller: stale GC no-op, ticket advanced concurrently",
+					"id", t.ID)
+				continue
+			}
+			slog.Info("poller: stale TTL resolved",
+				"ticket", t.ID, "status", t.Status, "age", age, "threshold", cutoff)
 		}
-		slog.Info("poller: auto-resolved stale ticket",
-			"id", t.ID, "tenant", t.Tenant, "service", t.Service,
-			"type", t.Type, "last_updated", t.UpdatedAt, "stale_after", p.StaleAfter)
 	}
 }

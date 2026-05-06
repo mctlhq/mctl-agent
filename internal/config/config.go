@@ -45,8 +45,10 @@ type Config struct {
 	WebhookCallbackURL      string
 	WebhookDefaultTTL       time.Duration
 	AlertFlapCooldown       time.Duration
-	AutoResolveStaleAfter   time.Duration
-	AlertIgnoreServiceRegex string
+	AutoResolveStaleAfter      time.Duration
+	AutoResolveAnalyzingAfter  time.Duration
+	AutoResolveFixProposedAfter time.Duration
+	AlertIgnoreServiceRegex    string
 }
 
 func Load() Config {
@@ -107,6 +109,20 @@ func Load() Config {
 		}
 	}
 
+	autoResolveAnalyzingAfter := 48 * time.Hour
+	if v := os.Getenv("AUTO_RESOLVE_ANALYZING_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			autoResolveAnalyzingAfter = d
+		}
+	}
+
+	autoResolveFixProposedAfter := 168 * time.Hour
+	if v := os.Getenv("AUTO_RESOLVE_FIX_PROPOSED_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			autoResolveFixProposedAfter = d
+		}
+	}
+
 	// Default pattern; empty env explicitly disables the filter, so we
 	// cannot use envOr (which treats "" as "fall back to default").
 	alertIgnoreServiceRegex := `^(openclawpr\d+|.*-demo\d*|hooktest-.*|svcprobe-.*|external-agent-demo.*|auto-remediation-demo)$`
@@ -153,8 +169,10 @@ func Load() Config {
 		WebhookCallbackURL:      envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
 		WebhookDefaultTTL:       webhookDefaultTTL,
 		AlertFlapCooldown:       alertFlapCooldown,
-		AutoResolveStaleAfter:   autoResolveStaleAfter,
-		AlertIgnoreServiceRegex: alertIgnoreServiceRegex,
+		AutoResolveStaleAfter:       autoResolveStaleAfter,
+		AutoResolveAnalyzingAfter:   autoResolveAnalyzingAfter,
+		AutoResolveFixProposedAfter: autoResolveFixProposedAfter,
+		AlertIgnoreServiceRegex:     alertIgnoreServiceRegex,
 	}
 }
 
