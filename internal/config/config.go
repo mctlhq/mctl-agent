@@ -50,6 +50,10 @@ type Config struct {
 	AutoResolveFixProposedAfter time.Duration
 	AutoResolveOrphanAfter      time.Duration
 	AlertIgnoreServiceRegex     string
+	AlertManagerURL    string
+	AMReconcileEnabled bool
+	AMReconcileTimeout time.Duration
+	AMReconcileMinAge  time.Duration
 }
 
 func Load() Config {
@@ -138,6 +142,27 @@ func Load() Config {
 		alertIgnoreServiceRegex = v
 	}
 
+	alertManagerURL := envOr("ALERTMANAGER_URL", "http://vmalertmanager-monitoring-victoria-metrics-k8s-stack.monitoring.svc:9093")
+
+	amReconcileEnabled := true
+	if v := os.Getenv("AM_RECONCILE_ENABLED"); v == "false" {
+		amReconcileEnabled = false
+	}
+
+	amReconcileTimeout := 10 * time.Second
+	if v := os.Getenv("AM_RECONCILE_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			amReconcileTimeout = d
+		}
+	}
+
+	amReconcileMinAge := 15 * time.Minute
+	if v := os.Getenv("AM_RECONCILE_MIN_AGE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			amReconcileMinAge = d
+		}
+	}
+
 	// Priority: DATABASE_URL > DB_PATH > default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -182,6 +207,10 @@ func Load() Config {
 		AutoResolveFixProposedAfter: autoResolveFixProposedAfter,
 		AutoResolveOrphanAfter:      autoResolveOrphanAfter,
 		AlertIgnoreServiceRegex:     alertIgnoreServiceRegex,
+		AlertManagerURL:    alertManagerURL,
+		AMReconcileEnabled: amReconcileEnabled,
+		AMReconcileTimeout: amReconcileTimeout,
+		AMReconcileMinAge:  amReconcileMinAge,
 	}
 }
 

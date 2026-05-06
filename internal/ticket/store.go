@@ -165,6 +165,12 @@ func (s *Store) migrate() error {
 	if err := s.ensureColumn("tickets", "pr_commit_sha", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn("tickets", "alert_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureIndex("idx_tickets_alert_fingerprint", "tickets", "alert_fingerprint"); err != nil {
+		return err
+	}
 
 	_, err = s.db.Exec(`
 		CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
@@ -188,6 +194,12 @@ func (s *Store) ensureColumn(table, column, definition string) error {
 	return nil
 }
 
+func (s *Store) ensureIndex(name, table, column string) error {
+	query := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(%s)", name, table, column)
+	_, err := s.db.Exec(query)
+	return err
+}
+
 // Create inserts a new ticket, generating a UUID.
 func (s *Store) Create(t *Ticket) error {
 	t.ID = uuid.New().String()
@@ -200,12 +212,12 @@ func (s *Store) Create(t *Ticket) error {
 
 	query := `
 		INSERT INTO tickets (id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
 	_, err := s.db.Exec(s.rebind(query),
 		t.ID, t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
-		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence,
+		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence, t.AlertFingerprint,
 		t.CreatedAt, t.UpdatedAt, t.ResolvedAt,
 	)
 	return err
@@ -217,13 +229,13 @@ func (s *Store) Update(t *Ticket) error {
 	query := `
 		UPDATE tickets SET source=?, alert_name=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
 			analysis=?, proposed_fix=?, pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?, confidence=?,
-			updated_at=?, resolved_at=?
+			alert_fingerprint=?, updated_at=?, resolved_at=?
 		WHERE id=?`
 
 	_, err := s.db.Exec(s.rebind(query),
 		t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
 		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence,
-		t.UpdatedAt, t.ResolvedAt, t.ID,
+		t.AlertFingerprint, t.UpdatedAt, t.ResolvedAt, t.ID,
 	)
 	return err
 }
@@ -234,11 +246,11 @@ func (s *Store) Get(id string) (*Ticket, error) {
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets WHERE id=?`
 
 	err := s.db.QueryRow(s.rebind(query), id).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err != nil {
@@ -272,7 +284,7 @@ func (s *Store) ListAll() ([]*Ticket, error) {
 func (s *Store) ListByFilters(status, tenant, service string, limit int) ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets`
 	var clauses []string
 	var args []interface{}
@@ -308,7 +320,7 @@ func (s *Store) ListByFilters(status, tenant, service string, limit int) ([]*Tic
 func (s *Store) listByStatus(statuses ...string) ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets WHERE status IN (`
 	args := make([]interface{}, len(statuses))
 	for i, st := range statuses {
@@ -335,7 +347,7 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 		var resolvedAt sql.NullTime
 		if err := rows.Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary,
 			&t.Severity, &t.Status, &t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA,
-			&t.Confidence, &t.CreatedAt, &t.UpdatedAt, &resolvedAt); err != nil {
+			&t.Confidence, &t.AlertFingerprint, &t.CreatedAt, &t.UpdatedAt, &resolvedAt); err != nil {
 			return nil, err
 		}
 		if resolvedAt.Valid {
@@ -352,7 +364,7 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
 		ORDER BY created_at DESC LIMIT 1`
@@ -360,7 +372,7 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 	err := s.db.QueryRow(s.rebind(query),
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -439,7 +451,7 @@ func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket,
 	since := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE type=? AND status=? AND id != ? AND created_at > ?
 		ORDER BY created_at DESC LIMIT ?`
@@ -476,7 +488,7 @@ func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName stri
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status=? AND resolved_at > ?
 		ORDER BY resolved_at DESC LIMIT 1`
@@ -484,7 +496,7 @@ func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName stri
 	err := s.db.QueryRow(s.rebind(query),
 		tenant, service, ticketType, alertName, StatusResolved, since,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -507,6 +519,70 @@ func (s *Store) Touch(id string) error {
 	query := `UPDATE tickets SET updated_at=? WHERE id=?`
 	_, err := s.db.Exec(s.rebind(query), now, id)
 	return err
+}
+
+// TouchWithFingerprint bumps UpdatedAt and merges the supplied alert
+// fingerprint into the ticket's fingerprint set. The set is stored as
+// a comma-separated string in the alert_fingerprint column.
+//
+// Tickets are deduplicated by (tenant, service, type) in the
+// AlertHandler, so a single ticket can represent multiple concurrent
+// AlertManager alerts (e.g. the same alertname firing on two pods of
+// the same service). The reconciliation pass only resolves a ticket
+// when ALL of its fingerprints are absent from AM's active set, so we
+// must accumulate every fingerprint we have seen for the ticket — not
+// overwrite with the most recent one.
+//
+// The merge is performed atomically inside a single UPDATE so that
+// concurrent duplicate-alert touches for the same ticket cannot lose
+// fingerprints via a read/modify/write race. The CASE expression
+// computes the new value using only the existing column value — no
+// preceding SELECT is needed.
+func (s *Store) TouchWithFingerprint(id, fingerprint string) error {
+	if fingerprint == "" {
+		return s.Touch(id)
+	}
+	now := time.Now().UTC()
+
+	// CASE branches:
+	//   1. column is empty / NULL                                     → set to fingerprint
+	//   2. fingerprint already present (LIKE '%,fp,%' on the padded value) → leave column unchanged
+	//   3. otherwise                                                   → append ',fingerprint'
+	// LIKE-with-||-padding is supported by both SQLite and PostgreSQL.
+	query := `
+		UPDATE tickets
+		SET alert_fingerprint = CASE
+			WHEN alert_fingerprint = '' OR alert_fingerprint IS NULL THEN ?
+			WHEN ',' || alert_fingerprint || ',' LIKE '%,' || ? || ',%' THEN alert_fingerprint
+			ELSE alert_fingerprint || ',' || ?
+		END,
+		updated_at = ?
+		WHERE id = ?`
+	_, err := s.db.Exec(s.rebind(query), fingerprint, fingerprint, fingerprint, now, id)
+	return err
+}
+
+// mergeFingerprint appends fingerprint to the comma-separated set in
+// existing, preserving order and skipping duplicates and empty
+// strings. Returns the original set unchanged if fingerprint is empty
+// or already present.
+//
+// Kept around as a Go-side reference implementation that mirrors the
+// atomic SQL CASE expression in TouchWithFingerprint and is used by
+// unit tests to validate set semantics independent of the database.
+func mergeFingerprint(existing, fingerprint string) string {
+	if fingerprint == "" {
+		return existing
+	}
+	if existing == "" {
+		return fingerprint
+	}
+	for _, fp := range strings.Split(existing, ",") {
+		if strings.TrimSpace(fp) == fingerprint {
+			return existing
+		}
+	}
+	return existing + "," + fingerprint
 }
 
 // ResolveByID marks a single open ticket as resolved. The UPDATE is

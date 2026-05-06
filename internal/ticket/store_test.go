@@ -1,6 +1,7 @@
 package ticket
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -362,5 +363,130 @@ func TestEvidenceJSON(t *testing.T) {
 	got := EvidenceJSON(data)
 	if got != `{"health":"Degraded"}` {
 		t.Errorf("unexpected JSON: %s", got)
+	}
+}
+
+// TestTouchWithFingerprintMergesNotOverwrites guards the Codex P1 fix
+// on PR #13. Tickets are deduplicated by (tenant, service, type), so
+// duplicate-touch from a second AlertManager alert with a different
+// fingerprint must accumulate the fingerprint into a CSV set rather
+// than overwrite. The reconciliation pass downstream only resolves the
+// ticket when ALL fingerprints are absent from AM.
+func TestTouchWithFingerprintMergesNotOverwrites(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source:           SourceAlertManager,
+		Type:             TypePodCrashloop,
+		Tenant:           "labs",
+		Service:          "svc",
+		Summary:          "first alert",
+		Severity:         SeverityCritical,
+		AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.TouchWithFingerprint(tk.ID, "fp-B"); err != nil {
+		t.Fatalf("touch fp-B: %v", err)
+	}
+	if err := store.TouchWithFingerprint(tk.ID, "fp-A"); err != nil {
+		t.Fatalf("touch fp-A again (dup): %v", err)
+	}
+	if err := store.TouchWithFingerprint(tk.ID, "fp-C"); err != nil {
+		t.Fatalf("touch fp-C: %v", err)
+	}
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AlertFingerprint != "fp-A,fp-B,fp-C" {
+		t.Errorf("expected merged CSV 'fp-A,fp-B,fp-C', got %q", got.AlertFingerprint)
+	}
+}
+
+// TestTouchWithFingerprintRepeatedSequential exercises the atomic
+// CASE-expression merge under repeated calls. Sequential order — pure
+// goroutine concurrency hits SQLite's per-DB-file write lock, which
+// is a separate (pre-existing) operational concern. The atomicity of
+// the merge itself is provable by inspection: the new value is
+// computed from the existing column inside a single UPDATE statement,
+// so no read/modify/write window exists at the application layer.
+func TestTouchWithFingerprintRepeatedSequential(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source:           SourceAlertManager,
+		Type:             TypePodCrashloop,
+		Tenant:           "labs",
+		Service:          "svc",
+		Summary:          "many-fp",
+		Severity:         SeverityCritical,
+		AlertFingerprint: "",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	const N = 16
+	fps := make([]string, N)
+	for i := 0; i < N; i++ {
+		fps[i] = "fp-" + string(rune('A'+i))
+	}
+	for _, fp := range fps {
+		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+			t.Fatalf("TouchWithFingerprint(%s): %v", fp, err)
+		}
+	}
+	// Idempotency: second pass must not duplicate or drop entries.
+	for _, fp := range fps {
+		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+			t.Fatalf("TouchWithFingerprint repeat(%s): %v", fp, err)
+		}
+	}
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := strings.Split(got.AlertFingerprint, ",")
+	if len(have) != N {
+		t.Fatalf("expected %d unique fingerprints, got %d in %q",
+			N, len(have), got.AlertFingerprint)
+	}
+	seen := map[string]bool{}
+	for _, fp := range have {
+		if seen[fp] {
+			t.Errorf("duplicate fingerprint in result: %q", fp)
+		}
+		seen[fp] = true
+	}
+	for _, want := range fps {
+		if !seen[want] {
+			t.Errorf("fingerprint %q missing from set; got %q", want, got.AlertFingerprint)
+		}
+	}
+}
+
+func TestMergeFingerprintHelper(t *testing.T) {
+	cases := []struct {
+		existing, fp, want string
+	}{
+		{"", "", ""},
+		{"", "fp-A", "fp-A"},
+		{"fp-A", "", "fp-A"},
+		{"fp-A", "fp-A", "fp-A"},
+		{"fp-A", "fp-B", "fp-A,fp-B"},
+		{"fp-A,fp-B", "fp-A", "fp-A,fp-B"},
+		{"fp-A,fp-B", "fp-C", "fp-A,fp-B,fp-C"},
+	}
+	for _, tc := range cases {
+		got := mergeFingerprint(tc.existing, tc.fp)
+		if got != tc.want {
+			t.Errorf("mergeFingerprint(%q, %q) = %q; want %q",
+				tc.existing, tc.fp, got, tc.want)
+		}
 	}
 }

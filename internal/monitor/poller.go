@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
@@ -41,6 +42,13 @@ type Poller struct {
 	// OrphanAfter enables auto-resolution of open tickets whose (tenant, service)
 	// is absent from the service inventory. Zero (or negative) disables this pass.
 	OrphanAfter time.Duration
+	// AMReconcileEnabled enables the AlertManager reconciliation pass.
+	AMReconcileEnabled bool
+	// AMReconcileMinAge is the minimum ticket age before AM reconcile
+	// will auto-resolve it (prevents resolving during transient flap windows).
+	AMReconcileMinAge time.Duration
+	// AMClient is the AlertManager API client. Nil disables the pass.
+	AMClient *AlertManagerClient
 }
 
 // NewPoller creates a new service health poller.
@@ -99,6 +107,7 @@ func (p *Poller) poll() {
 	state := p.pollDegraded()
 	p.resolveStale(state)
 	p.pruneOrphans(state)
+	p.reconcileWithAlertManager(context.Background())
 }
 
 // pollDegraded scans all services for ArgoCD Degraded/Missing health,
@@ -325,6 +334,86 @@ func (p *Poller) resolveStale(state refreshState) {
 			slog.Info("poller: stale TTL resolved",
 				"ticket", t.ID, "status", t.Status, "age", age, "threshold", cutoff)
 		}
+	}
+}
+
+// reconcileWithAlertManager checks each open AlertManager-sourced ticket's
+// fingerprint against the current active alert set. If a ticket's fingerprint
+// is absent and the ticket is old enough (AMReconcileMinAge), it is resolved.
+// The pass is skipped entirely on any AM error or empty active set.
+func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
+	if !p.AMReconcileEnabled {
+		return
+	}
+	if p.AMClient == nil {
+		return
+	}
+	active, err := p.AMClient.ActiveFingerprints(ctx)
+	if err != nil {
+		slog.Warn("poller: AM reconcile skipped, fetch failed", "err", err)
+		return
+	}
+	if len(active) == 0 {
+		slog.Warn("poller: AM reconcile skipped, empty active alert set")
+		return
+	}
+
+	open, err := p.store.ListOpen()
+	if err != nil {
+		slog.Error("poller: AM reconcile failed to list open tickets", "err", err)
+		return
+	}
+
+	for _, t := range open {
+		if t.Source != ticket.SourceAlertManager {
+			continue
+		}
+		if t.AlertFingerprint == "" {
+			continue // pre-Phase-2 ticket; leave to Phase 1 TTL GC
+		}
+		switch t.Status {
+		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusFixProposed:
+		default:
+			continue
+		}
+		// AlertHandler deduplicates by (tenant, service, type) so a
+		// single ticket can represent multiple concurrent AM alerts
+		// with different fingerprints. Resolve only when ALL of the
+		// ticket's fingerprints are absent from the active set; if any
+		// one is still firing, the underlying incident is still real.
+		anyStillFiring := false
+		for _, fp := range strings.Split(t.AlertFingerprint, ",") {
+			fp = strings.TrimSpace(fp)
+			if fp == "" {
+				continue
+			}
+			if _, ok := active[fp]; ok {
+				anyStillFiring = true
+				break
+			}
+		}
+		if anyStillFiring {
+			continue
+		}
+		if time.Since(t.UpdatedAt) < p.AMReconcileMinAge {
+			continue // age gate against transient flap windows
+		}
+		reason := fmt.Sprintf(
+			"Auto-resolved by AM reconcile (fingerprints=%s, last_seen_active=%s)",
+			t.AlertFingerprint, t.UpdatedAt.Format(time.RFC3339),
+		)
+		resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+		if err != nil {
+			slog.Warn("poller: AM reconcile resolve failed", "ticket", t.ID, "err", err)
+			continue
+		}
+		if !resolved {
+			slog.Debug("poller: AM reconcile no-op, ticket advanced concurrently", "id", t.ID)
+			continue
+		}
+		slog.Info("poller: AM reconcile resolved",
+			"ticket", t.ID, "fingerprint", t.AlertFingerprint,
+			"status", t.Status, "tenant", t.Tenant, "service", t.Service)
 	}
 }
 
