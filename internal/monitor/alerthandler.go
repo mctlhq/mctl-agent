@@ -95,6 +95,21 @@ func (h *AlertHandler) processAlert(a alert) {
 	if tType == ticket.TypeWorkflowFailed && workflow != "" {
 		service = workflow
 	}
+	if tType == ticket.TypeArgoCDDegraded {
+		// ArgoCD app health metrics carry the Application identity in
+		// `name` (with optional `dest_namespace` / `project`), not in
+		// `pod`. Without this branch every Degraded app collapses onto
+		// the same (tenant="", service="") dedup key and
+		// collectEvidence skips argocd_status (it gates on service !=
+		// ""), so the argocd_sync_failed skill never sees the data it
+		// needs to diagnose.
+		if app := a.Labels["name"]; app != "" {
+			service = app
+		}
+		if dest := a.Labels["dest_namespace"]; dest != "" {
+			tenant = dest
+		}
+	}
 
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {

@@ -42,6 +42,8 @@ func TestClassifyAlert(t *testing.T) {
 		{"KubeStatefulSetReplicasMismatch", ticket.TypeGeneric, ticket.SeverityWarning},
 		{"VaultSealed", ticket.TypeResourceLimit, ticket.SeverityCritical},
 		{"NodeHighCPU", ticket.TypeResourceLimit, ticket.SeverityWarning},
+		{"ArgoCDApplicationDegraded", ticket.TypeArgoCDDegraded, ticket.SeverityWarning},
+		{"ArgoCDApplicationSyncFailed", ticket.TypeArgoCDDegraded, ticket.SeverityWarning},
 		{"UnknownAlert", ticket.TypeGeneric, ticket.SeverityWarning},
 	}
 
@@ -132,6 +134,54 @@ func TestAlertHandlerServeHTTP(t *testing.T) {
 	}
 	if received[0].AlertName != "PodCrashLooping" {
 		t.Errorf("expected alert name PodCrashLooping, got %s", received[0].AlertName)
+	}
+}
+
+func TestAlertHandlerArgoCDLabels(t *testing.T) {
+	// ArgoCD app health alerts must extract the application name from
+	// `name` (and namespace from `dest_namespace`) instead of the
+	// generic `pod` path. Without this each Degraded application
+	// collapses onto a single (tenant="", service="") dedup key and
+	// pipeline.collectEvidence skips argocd_status (gated on
+	// service != ""), preventing the argocd_sync_failed skill from
+	// diagnosing the actual failing app.
+	store := newTestStore(t)
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname":      "ArgoCDApplicationDegraded",
+					"namespace":      "argocd",
+					"name":           "tenant-labs",
+					"dest_namespace": "labs",
+					"project":        "platform",
+				},
+				Annotations: map[string]string{"summary": "tenant-labs Degraded"},
+			},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(received))
+	}
+	if received[0].Service != "tenant-labs" {
+		t.Errorf("service: got %q, want %q", received[0].Service, "tenant-labs")
+	}
+	if received[0].Tenant != "labs" {
+		t.Errorf("tenant: got %q, want %q (dest_namespace label)", received[0].Tenant, "labs")
+	}
+	if received[0].Type != ticket.TypeArgoCDDegraded {
+		t.Errorf("type: got %q, want %q", received[0].Type, ticket.TypeArgoCDDegraded)
 	}
 }
 
