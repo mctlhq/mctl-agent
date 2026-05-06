@@ -947,3 +947,55 @@ func TestAMReconcileSkipsWhenDisabled(t *testing.T) {
 		t.Errorf("want open (disabled), got %s", got.Status)
 	}
 }
+
+// TestAMReconcileKeepsTicketWhenAnyFingerprintActive guards against the
+// bug Codex flagged on PR #13 (P1): tickets are deduplicated by
+// (tenant, service, type), so a single ticket can carry multiple
+// fingerprints when several concurrent alerts collapse onto it (e.g.
+// the same alertname firing on two pods of the same service). The
+// reconciliation pass must keep the ticket open as long as ANY of its
+// fingerprints is still in AM's active set; only when every one is
+// absent is the underlying incident really resolved.
+func TestAMReconcileKeepsTicketWhenAnyFingerprintActive(t *testing.T) {
+	srv := makeAMServer(t, "fp-A") // only A is active; B is gone
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, "fp-A,fp-B", ticket.StatusOpen)
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("ticket with one still-firing fingerprint must NOT be resolved; got status=%q", got.Status)
+	}
+}
+
+// TestAMReconcileResolvesWhenAllFingerprintsAbsent is the positive
+// counterpart: a ticket carrying a CSV set of fingerprints, ALL of
+// which are absent from AM's active set, is correctly resolved.
+func TestAMReconcileResolvesWhenAllFingerprintsAbsent(t *testing.T) {
+	srv := makeAMServer(t, "fp-other")
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, "fp-A,fp-B,fp-C", ticket.StatusOpen)
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("ticket with all fingerprints absent must be resolved; got status=%q", got.Status)
+	}
+	if !strings.Contains(got.Analysis, "fp-A,fp-B,fp-C") {
+		t.Errorf("resolution reason should reference all fingerprints; got analysis=%q", got.Analysis)
+	}
+}

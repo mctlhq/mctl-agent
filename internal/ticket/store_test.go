@@ -364,3 +364,65 @@ func TestEvidenceJSON(t *testing.T) {
 		t.Errorf("unexpected JSON: %s", got)
 	}
 }
+
+// TestTouchWithFingerprintMergesNotOverwrites guards the Codex P1 fix
+// on PR #13. Tickets are deduplicated by (tenant, service, type), so
+// duplicate-touch from a second AlertManager alert with a different
+// fingerprint must accumulate the fingerprint into a CSV set rather
+// than overwrite. The reconciliation pass downstream only resolves the
+// ticket when ALL fingerprints are absent from AM.
+func TestTouchWithFingerprintMergesNotOverwrites(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source:           SourceAlertManager,
+		Type:             TypePodCrashloop,
+		Tenant:           "labs",
+		Service:          "svc",
+		Summary:          "first alert",
+		Severity:         SeverityCritical,
+		AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.TouchWithFingerprint(tk.ID, "fp-B"); err != nil {
+		t.Fatalf("touch fp-B: %v", err)
+	}
+	if err := store.TouchWithFingerprint(tk.ID, "fp-A"); err != nil {
+		t.Fatalf("touch fp-A again (dup): %v", err)
+	}
+	if err := store.TouchWithFingerprint(tk.ID, "fp-C"); err != nil {
+		t.Fatalf("touch fp-C: %v", err)
+	}
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AlertFingerprint != "fp-A,fp-B,fp-C" {
+		t.Errorf("expected merged CSV 'fp-A,fp-B,fp-C', got %q", got.AlertFingerprint)
+	}
+}
+
+func TestMergeFingerprintHelper(t *testing.T) {
+	cases := []struct {
+		existing, fp, want string
+	}{
+		{"", "", ""},
+		{"", "fp-A", "fp-A"},
+		{"fp-A", "", "fp-A"},
+		{"fp-A", "fp-A", "fp-A"},
+		{"fp-A", "fp-B", "fp-A,fp-B"},
+		{"fp-A,fp-B", "fp-A", "fp-A,fp-B"},
+		{"fp-A,fp-B", "fp-C", "fp-A,fp-B,fp-C"},
+	}
+	for _, tc := range cases {
+		got := mergeFingerprint(tc.existing, tc.fp)
+		if got != tc.want {
+			t.Errorf("mergeFingerprint(%q, %q) = %q; want %q",
+				tc.existing, tc.fp, got, tc.want)
+		}
+	}
+}

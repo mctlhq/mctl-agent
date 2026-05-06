@@ -521,14 +521,49 @@ func (s *Store) Touch(id string) error {
 	return err
 }
 
-// TouchWithFingerprint bumps UpdatedAt and updates the stored alert
-// fingerprint to the latest observed value. Used on duplicate-alert
-// firings so the AM reconciliation pass always has a fresh fingerprint.
+// TouchWithFingerprint bumps UpdatedAt and merges the supplied alert
+// fingerprint into the ticket's fingerprint set. The set is stored as
+// a comma-separated string in the alert_fingerprint column.
+//
+// Tickets are deduplicated by (tenant, service, type) in the
+// AlertHandler, so a single ticket can represent multiple concurrent
+// AlertManager alerts (e.g. the same alertname firing on two pods of
+// the same service). The reconciliation pass only resolves a ticket
+// when ALL of its fingerprints are absent from AM's active set, so we
+// must accumulate every fingerprint we have seen for the ticket — not
+// overwrite with the most recent one.
 func (s *Store) TouchWithFingerprint(id, fingerprint string) error {
 	now := time.Now().UTC()
+
+	var existing string
+	row := s.db.QueryRow(s.rebind(`SELECT alert_fingerprint FROM tickets WHERE id=?`), id)
+	if err := row.Scan(&existing); err != nil {
+		return err
+	}
+	merged := mergeFingerprint(existing, fingerprint)
+
 	query := `UPDATE tickets SET updated_at=?, alert_fingerprint=? WHERE id=?`
-	_, err := s.db.Exec(s.rebind(query), now, fingerprint, id)
+	_, err := s.db.Exec(s.rebind(query), now, merged, id)
 	return err
+}
+
+// mergeFingerprint appends fingerprint to the comma-separated set in
+// existing, preserving order and skipping duplicates and empty
+// strings. Returns the original set unchanged if fingerprint is empty
+// or already present.
+func mergeFingerprint(existing, fingerprint string) string {
+	if fingerprint == "" {
+		return existing
+	}
+	if existing == "" {
+		return fingerprint
+	}
+	for _, fp := range strings.Split(existing, ",") {
+		if strings.TrimSpace(fp) == fingerprint {
+			return existing
+		}
+	}
+	return existing + "," + fingerprint
 }
 
 // ResolveByID marks a single open ticket as resolved. The UPDATE is

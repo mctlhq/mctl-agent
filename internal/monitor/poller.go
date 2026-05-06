@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
@@ -375,14 +376,30 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 		default:
 			continue
 		}
-		if _, stillFiring := active[t.AlertFingerprint]; stillFiring {
+		// AlertHandler deduplicates by (tenant, service, type) so a
+		// single ticket can represent multiple concurrent AM alerts
+		// with different fingerprints. Resolve only when ALL of the
+		// ticket's fingerprints are absent from the active set; if any
+		// one is still firing, the underlying incident is still real.
+		anyStillFiring := false
+		for _, fp := range strings.Split(t.AlertFingerprint, ",") {
+			fp = strings.TrimSpace(fp)
+			if fp == "" {
+				continue
+			}
+			if _, ok := active[fp]; ok {
+				anyStillFiring = true
+				break
+			}
+		}
+		if anyStillFiring {
 			continue
 		}
 		if time.Since(t.UpdatedAt) < p.AMReconcileMinAge {
 			continue // age gate against transient flap windows
 		}
 		reason := fmt.Sprintf(
-			"Auto-resolved by AM reconcile (fingerprint=%s, last_seen_active=%s)",
+			"Auto-resolved by AM reconcile (fingerprints=%s, last_seen_active=%s)",
 			t.AlertFingerprint, t.UpdatedAt.Format(time.RFC3339),
 		)
 		resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
