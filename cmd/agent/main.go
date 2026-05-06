@@ -112,6 +112,7 @@ func main() {
 	poller.StaleAfter = cfg.AutoResolveStaleAfter
 	poller.AnalyzingAfter = cfg.AutoResolveAnalyzingAfter
 	poller.FixProposedAfter = cfg.AutoResolveFixProposedAfter
+	poller.OrphanAfter = cfg.AutoResolveOrphanAfter
 
 	// GitHub Actions webhook handler (optional — enabled when GITHUB_WEBHOOK_SECRET is set).
 	var ghWebhookHandler *monitor.GitHubWebhookHandler
