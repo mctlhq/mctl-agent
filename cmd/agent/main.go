@@ -113,6 +113,15 @@ func main() {
 	poller.AnalyzingAfter = cfg.AutoResolveAnalyzingAfter
 	poller.FixProposedAfter = cfg.AutoResolveFixProposedAfter
 	poller.OrphanAfter = cfg.AutoResolveOrphanAfter
+	poller.AMReconcileEnabled = cfg.AMReconcileEnabled
+	poller.AMReconcileMinAge = cfg.AMReconcileMinAge
+	if cfg.AMReconcileEnabled {
+		poller.AMClient = &monitor.AlertManagerClient{
+			BaseURL: cfg.AlertManagerURL,
+			Timeout: cfg.AMReconcileTimeout,
+			HTTP:    &http.Client{Timeout: cfg.AMReconcileTimeout + 5*time.Second},
+		}
+	}
 
 	// GitHub Actions webhook handler (optional — enabled when GITHUB_WEBHOOK_SECRET is set).
 	var ghWebhookHandler *monitor.GitHubWebhookHandler

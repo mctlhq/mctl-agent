@@ -52,6 +52,7 @@ type alertManagerPayload struct {
 }
 
 type alert struct {
+	Fingerprint string            `json:"fingerprint"`
 	Status      string            `json:"status"`
 	Labels      map[string]string `json:"labels"`
 	Annotations map[string]string `json:"annotations"`
@@ -120,7 +121,7 @@ func (h *AlertHandler) processAlert(a alert) {
 	if existing != nil {
 		// Bump UpdatedAt so the stale-ticket GC can distinguish a still-
 		// firing alert from one that has stopped firing.
-		if err := h.store.Touch(existing.ID); err != nil {
+		if err := h.store.TouchWithFingerprint(existing.ID, a.Fingerprint); err != nil {
 			slog.Error("failed to touch ticket on duplicate alert", "error", err, "id", existing.ID)
 		}
 		slog.Debug("duplicate ticket exists", "id", existing.ID, "alertname", alertName)
@@ -152,13 +153,14 @@ func (h *AlertHandler) processAlert(a alert) {
 	}
 
 	t := &ticket.Ticket{
-		Source:    ticket.SourceAlertManager,
-		AlertName: alertName,
-		Type:      tType,
-		Tenant:    tenant,
-		Service:   service,
-		Summary:   summary,
-		Severity:  severity,
+		Source:           ticket.SourceAlertManager,
+		AlertName:        alertName,
+		Type:             tType,
+		Tenant:           tenant,
+		Service:          service,
+		Summary:          summary,
+		Severity:         severity,
+		AlertFingerprint: a.Fingerprint,
 	}
 
 	if err := h.store.Create(t); err != nil {

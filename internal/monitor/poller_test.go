@@ -15,6 +15,10 @@
 package monitor
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -706,5 +710,240 @@ func TestSkipsOrphanPruneForGitHubWebhookSource(t *testing.T) {
 	}
 	if got.Status == ticket.StatusResolved {
 		t.Errorf("GitHub-webhook ticket must be spared by orphan pruning; got status=%q", got.Status)
+	}
+}
+
+func makeAMServer(t *testing.T, fingerprints ...string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		alerts := make([]map[string]interface{}, 0, len(fingerprints))
+		for _, fp := range fingerprints {
+			alerts = append(alerts, map[string]interface{}{
+				"fingerprint": fp,
+				"status":      map[string]interface{}{"state": "active"},
+			})
+		}
+		b, _ := json.Marshal(alerts)
+		_, _ = w.Write(b)
+	}))
+}
+
+func newAMPoller(t *testing.T, srv *httptest.Server) *Poller {
+	t.Helper()
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.AMReconcileEnabled = true
+	p.AMReconcileMinAge = 15 * time.Minute
+	p.AMClient = &AlertManagerClient{
+		BaseURL: srv.URL,
+		Timeout: 5 * time.Second,
+		HTTP:    srv.Client(),
+	}
+	return p
+}
+
+func createAMTicket(t *testing.T, store *ticket.Store, fp, status string) *ticket.Ticket {
+	t.Helper()
+	tk := &ticket.Ticket{
+		Source:           ticket.SourceAlertManager,
+		Type:             ticket.TypePodCrashloop,
+		Tenant:           "labs",
+		Service:          "svc",
+		Summary:          "test",
+		Severity:         ticket.SeverityCritical,
+		AlertFingerprint: fp,
+		Status:           status,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	return tk
+}
+
+func TestAMReconcileResolvesNonFiringTicket(t *testing.T) {
+	srv := makeAMServer(t, "other-fingerprint")
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, "fp-gone", ticket.StatusOpen)
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("want resolved, got %s", got.Status)
+	}
+	if !strings.Contains(got.Analysis, "Auto-resolved by AM reconcile") {
+		t.Errorf("analysis %q missing expected reason", got.Analysis)
+	}
+}
+
+func TestAMReconcileKeepsActiveTicket(t *testing.T) {
+	const fp = "fp-active"
+	srv := makeAMServer(t, fp)
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, fp, ticket.StatusOpen)
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("want open, got %s", got.Status)
+	}
+}
+
+func TestAMReconcileSkipsBelowMinAge(t *testing.T) {
+	srv := makeAMServer(t, "different-fp")
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, "fp-young", ticket.StatusOpen)
+	// age = 5 min < 15 min min age
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-5*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("want open (too young), got %s", got.Status)
+	}
+}
+
+func TestAMReconcileSkipsEmptyActiveSet(t *testing.T) {
+	// AM returns empty array — must not resolve any tickets.
+	srv := makeAMServer(t) // no fingerprints
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, "fp-any", ticket.StatusOpen)
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("want open (empty AM set), got %s", got.Status)
+	}
+}
+
+func TestAMReconcileSkipsOnAMError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, "fp-any", ticket.StatusOpen)
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("want open (AM 500 error), got %s", got.Status)
+	}
+}
+
+func TestAMReconcileSkipsTicketsWithoutFingerprint(t *testing.T) {
+	srv := makeAMServer(t, "some-fp")
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := createAMTicket(t, p.store, "", ticket.StatusOpen) // no fingerprint
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("want open (no fingerprint), got %s", got.Status)
+	}
+}
+
+func TestAMReconcileSkipsNonAlertManagerSource(t *testing.T) {
+	srv := makeAMServer(t, "some-fp")
+	defer srv.Close()
+
+	p := newAMPoller(t, srv)
+	tk := &ticket.Ticket{
+		Source:           ticket.SourcePolling,
+		Type:             ticket.TypeArgoCDDegraded,
+		Tenant:           "labs",
+		Service:          "svc",
+		Summary:          "test",
+		Severity:         ticket.SeverityWarning,
+		AlertFingerprint: "other-fp",
+	}
+	if err := p.store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	got, err := p.store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("want open (polling source), got %s", got.Status)
+	}
+}
+
+func TestAMReconcileSkipsWhenDisabled(t *testing.T) {
+	hitCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hitCount++
+		_, _ = w.Write([]byte(`[]`))
+	}))
+	defer srv.Close()
+
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.AMReconcileEnabled = false
+	p.AMReconcileMinAge = 15 * time.Minute
+	p.AMClient = &AlertManagerClient{
+		BaseURL: srv.URL,
+		Timeout: 5 * time.Second,
+		HTTP:    srv.Client(),
+	}
+
+	tk := createAMTicket(t, store, "fp-any", ticket.StatusOpen)
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	if hitCount != 0 {
+		t.Errorf("AM should not be called when disabled, got %d calls", hitCount)
+	}
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusOpen {
+		t.Errorf("want open (disabled), got %s", got.Status)
 	}
 }

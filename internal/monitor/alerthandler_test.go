@@ -557,3 +557,39 @@ func TestAlertHandlerDedupBumpsUpdatedAt(t *testing.T) {
 			firstUpdated, open[0].UpdatedAt)
 	}
 }
+
+func TestAlertHandlerPersistsFingerprint(t *testing.T) {
+	store := newTestStore(t)
+	h := NewAlertHandler(store, nil)
+
+	payload := `{
+		"status": "firing",
+		"alerts": [{
+			"fingerprint": "deadbeef12345678",
+			"status": "firing",
+			"labels": {"alertname": "PodCrashLooping", "namespace": "labs", "pod": "myapp-abc-xyz"},
+			"annotations": {},
+			"startsAt": "2026-01-01T00:00:00Z",
+			"endsAt": "0001-01-01T00:00:00Z"
+		}]
+	}`
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewBufferString(payload))
+	rw := httptest.NewRecorder()
+	h.ServeHTTP(rw, req)
+
+	if rw.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d", rw.Code)
+	}
+
+	tickets, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tickets) != 1 {
+		t.Fatalf("want 1 ticket, got %d", len(tickets))
+	}
+	if tickets[0].AlertFingerprint != "deadbeef12345678" {
+		t.Errorf("want fingerprint %q, got %q", "deadbeef12345678", tickets[0].AlertFingerprint)
+	}
+}
