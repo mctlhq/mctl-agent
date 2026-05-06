@@ -532,18 +532,33 @@ func (s *Store) Touch(id string) error {
 // when ALL of its fingerprints are absent from AM's active set, so we
 // must accumulate every fingerprint we have seen for the ticket — not
 // overwrite with the most recent one.
+//
+// The merge is performed atomically inside a single UPDATE so that
+// concurrent duplicate-alert touches for the same ticket cannot lose
+// fingerprints via a read/modify/write race. The CASE expression
+// computes the new value using only the existing column value — no
+// preceding SELECT is needed.
 func (s *Store) TouchWithFingerprint(id, fingerprint string) error {
+	if fingerprint == "" {
+		return s.Touch(id)
+	}
 	now := time.Now().UTC()
 
-	var existing string
-	row := s.db.QueryRow(s.rebind(`SELECT alert_fingerprint FROM tickets WHERE id=?`), id)
-	if err := row.Scan(&existing); err != nil {
-		return err
-	}
-	merged := mergeFingerprint(existing, fingerprint)
-
-	query := `UPDATE tickets SET updated_at=?, alert_fingerprint=? WHERE id=?`
-	_, err := s.db.Exec(s.rebind(query), now, merged, id)
+	// CASE branches:
+	//   1. column is empty / NULL                                     → set to fingerprint
+	//   2. fingerprint already present (LIKE '%,fp,%' on the padded value) → leave column unchanged
+	//   3. otherwise                                                   → append ',fingerprint'
+	// LIKE-with-||-padding is supported by both SQLite and PostgreSQL.
+	query := `
+		UPDATE tickets
+		SET alert_fingerprint = CASE
+			WHEN alert_fingerprint = '' OR alert_fingerprint IS NULL THEN ?
+			WHEN ',' || alert_fingerprint || ',' LIKE '%,' || ? || ',%' THEN alert_fingerprint
+			ELSE alert_fingerprint || ',' || ?
+		END,
+		updated_at = ?
+		WHERE id = ?`
+	_, err := s.db.Exec(s.rebind(query), fingerprint, fingerprint, fingerprint, now, id)
 	return err
 }
 
@@ -551,6 +566,10 @@ func (s *Store) TouchWithFingerprint(id, fingerprint string) error {
 // existing, preserving order and skipping duplicates and empty
 // strings. Returns the original set unchanged if fingerprint is empty
 // or already present.
+//
+// Kept around as a Go-side reference implementation that mirrors the
+// atomic SQL CASE expression in TouchWithFingerprint and is used by
+// unit tests to validate set semantics independent of the database.
 func mergeFingerprint(existing, fingerprint string) string {
 	if fingerprint == "" {
 		return existing

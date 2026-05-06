@@ -1,6 +1,7 @@
 package ticket
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -403,6 +404,69 @@ func TestTouchWithFingerprintMergesNotOverwrites(t *testing.T) {
 	}
 	if got.AlertFingerprint != "fp-A,fp-B,fp-C" {
 		t.Errorf("expected merged CSV 'fp-A,fp-B,fp-C', got %q", got.AlertFingerprint)
+	}
+}
+
+// TestTouchWithFingerprintRepeatedSequential exercises the atomic
+// CASE-expression merge under repeated calls. Sequential order — pure
+// goroutine concurrency hits SQLite's per-DB-file write lock, which
+// is a separate (pre-existing) operational concern. The atomicity of
+// the merge itself is provable by inspection: the new value is
+// computed from the existing column inside a single UPDATE statement,
+// so no read/modify/write window exists at the application layer.
+func TestTouchWithFingerprintRepeatedSequential(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source:           SourceAlertManager,
+		Type:             TypePodCrashloop,
+		Tenant:           "labs",
+		Service:          "svc",
+		Summary:          "many-fp",
+		Severity:         SeverityCritical,
+		AlertFingerprint: "",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	const N = 16
+	fps := make([]string, N)
+	for i := 0; i < N; i++ {
+		fps[i] = "fp-" + string(rune('A'+i))
+	}
+	for _, fp := range fps {
+		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+			t.Fatalf("TouchWithFingerprint(%s): %v", fp, err)
+		}
+	}
+	// Idempotency: second pass must not duplicate or drop entries.
+	for _, fp := range fps {
+		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+			t.Fatalf("TouchWithFingerprint repeat(%s): %v", fp, err)
+		}
+	}
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	have := strings.Split(got.AlertFingerprint, ",")
+	if len(have) != N {
+		t.Fatalf("expected %d unique fingerprints, got %d in %q",
+			N, len(have), got.AlertFingerprint)
+	}
+	seen := map[string]bool{}
+	for _, fp := range have {
+		if seen[fp] {
+			t.Errorf("duplicate fingerprint in result: %q", fp)
+		}
+		seen[fp] = true
+	}
+	for _, want := range fps {
+		if !seen[want] {
+			t.Errorf("fingerprint %q missing from set; got %q", want, got.AlertFingerprint)
+		}
 	}
 }
 
