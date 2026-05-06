@@ -60,7 +60,7 @@ func (c *AlertManagerClient) ActiveFingerprints(ctx context.Context) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("alertmanager: request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode/100 != 2 {
 		return nil, fmt.Errorf("alertmanager: HTTP %d", resp.StatusCode)
