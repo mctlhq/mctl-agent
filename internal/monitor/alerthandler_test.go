@@ -43,7 +43,8 @@ func TestClassifyAlert(t *testing.T) {
 		{"VaultSealed", ticket.TypeResourceLimit, ticket.SeverityCritical},
 		{"NodeHighCPU", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"ArgoCDApplicationDegraded", ticket.TypeArgoCDDegraded, ticket.SeverityWarning},
-		{"ArgoCDApplicationSyncFailed", ticket.TypeArgoCDDegraded, ticket.SeverityWarning},
+		{"ArgoCDApplicationOutOfSyncLong", ticket.TypeArgoCDDegraded, ticket.SeverityWarning},
+		{"ArgoCDApplicationSyncFailed", ticket.TypeArgoCDDegraded, ticket.SeverityWarning}, // legacy name pre-rename
 		{"UnknownAlert", ticket.TypeGeneric, ticket.SeverityWarning},
 	}
 

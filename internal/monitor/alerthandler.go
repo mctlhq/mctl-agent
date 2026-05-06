@@ -216,7 +216,16 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 		return ticket.TypeResourceLimit, ticket.SeverityWarning
 	case "VaultSealed":
 		return ticket.TypeResourceLimit, ticket.SeverityCritical
-	case "ArgoCDApplicationDegraded", "ArgoCDApplicationSyncFailed":
+	case "ArgoCDApplicationDegraded",
+		"ArgoCDApplicationOutOfSyncLong",
+		// ArgoCDApplicationSyncFailed is the original (mis-)name from
+		// mctl-gitops PR #142 first commit; it was renamed to
+		// ArgoCDApplicationOutOfSyncLong after Codex P2 (the alert
+		// fires on prolonged OutOfSync drift, not a sync-failure
+		// signal). Keep the old name in this switch so the two PRs
+		// stay merge-order-independent — drop after both have
+		// landed and the chart has rolled out.
+		"ArgoCDApplicationSyncFailed":
 		return ticket.TypeArgoCDDegraded, ticket.SeverityWarning
 	default:
 		return ticket.TypeGeneric, ticket.SeverityWarning
