@@ -21,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -313,6 +314,7 @@ func (p *Poller) resolveStale(state refreshState) {
 					"id", t.ID)
 				continue
 			}
+			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
 			slog.Info("poller: auto-resolved stale ticket",
 				"id", t.ID, "tenant", t.Tenant, "service", t.Service,
 				"type", t.Type, "last_updated", t.UpdatedAt, "stale_after", p.StaleAfter)
@@ -331,6 +333,7 @@ func (p *Poller) resolveStale(state refreshState) {
 					"id", t.ID)
 				continue
 			}
+			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
 			slog.Info("poller: stale TTL resolved",
 				"ticket", t.ID, "status", t.Status, "age", age, "threshold", cutoff)
 		}

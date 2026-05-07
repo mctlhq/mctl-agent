@@ -27,12 +27,14 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
+	_ "github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mcp"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 // Options holds all dependencies for the API router.
@@ -67,6 +69,7 @@ func NewRouter(opts Options) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
+	r.Handle("/metrics", promhttp.Handler())
 
 	// AlertManager webhook.
 	r.Post("/api/v1/alerts", opts.OnAlert)
