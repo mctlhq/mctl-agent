@@ -670,6 +670,37 @@ func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error
 	return err
 }
 
+// StatusSourcePair is a (status, source) tuple used to key the
+// OpenTicketBreakdown result map.
+type StatusSourcePair struct {
+	Status string
+	Source string
+}
+
+// OpenTicketBreakdown returns a count of non-terminal tickets grouped by
+// (status, source). Terminal statuses (resolved, suppressed) are excluded.
+func (s *Store) OpenTicketBreakdown() (map[StatusSourcePair]int, error) {
+	const q = `
+        SELECT status, source, COUNT(*) FROM tickets
+        WHERE status NOT IN ('resolved', 'suppressed')
+        GROUP BY status, source`
+	rows, err := s.db.Query(s.rebind(q))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[StatusSourcePair]int{}
+	for rows.Next() {
+		var k StatusSourcePair
+		var n int
+		if err := rows.Scan(&k.Status, &k.Source, &n); err != nil {
+			return nil, err
+		}
+		out[k] = n
+	}
+	return out, rows.Err()
+}
+
 // Close closes the database.
 func (s *Store) Close() error {
 	return s.db.Close()

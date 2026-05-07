@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/metrics"
+	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "modernc.org/sqlite"
@@ -526,7 +527,12 @@ func TestPrunesOrphanTicketAfterGracePeriod(t *testing.T) {
 			state := refreshState{
 				knownServices: map[string]bool{"ovk/real-service": true},
 			}
+			before := testutil.ToFloat64(metrics.OrphanPruned)
 			p.pruneOrphans(state)
+			after := testutil.ToFloat64(metrics.OrphanPruned)
+			if after-before != 1 {
+				t.Errorf("OrphanPruned delta = %f, want 1", after-before)
+			}
 
 			got, err := store.Get(tk.ID)
 			if err != nil {
@@ -597,7 +603,12 @@ func TestSkipsOrphanPruneWhenInventoryUnknown(t *testing.T) {
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
 
 	state := refreshState{allUnknown: true}
+	before := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_unknown"))
 	p.pruneOrphans(state)
+	after := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_unknown"))
+	if after-before != 1 {
+		t.Errorf("CleanupSkipped{am_unknown} delta = %f, want 1", after-before)
+	}
 
 	got, err := store.Get(tk.ID)
 	if err != nil {
@@ -670,7 +681,12 @@ func TestSkipsOrphanPruneOnEmptyInventory(t *testing.T) {
 	state := refreshState{
 		knownServices: map[string]bool{},
 	}
+	before := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("empty_inventory"))
 	p.pruneOrphans(state)
+	after := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("empty_inventory"))
+	if after-before != 1 {
+		t.Errorf("CleanupSkipped{empty_inventory} delta = %f, want 1", after-before)
+	}
 
 	got, err := store.Get(tk.ID)
 	if err != nil {
@@ -776,7 +792,12 @@ func TestAMReconcileResolvesNonFiringTicket(t *testing.T) {
 	tk := createAMTicket(t, p.store, "fp-gone", ticket.StatusOpen)
 	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
 
+	before := testutil.ToFloat64(metrics.AMReconcileResolved)
 	p.reconcileWithAlertManager(context.Background())
+	after := testutil.ToFloat64(metrics.AMReconcileResolved)
+	if after-before != 1 {
+		t.Errorf("AMReconcileResolved delta = %f, want 1", after-before)
+	}
 
 	got, err := p.store.Get(tk.ID)
 	if err != nil {
@@ -839,7 +860,12 @@ func TestAMReconcileSkipsEmptyActiveSet(t *testing.T) {
 	tk := createAMTicket(t, p.store, "fp-any", ticket.StatusOpen)
 	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
 
+	before := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_empty_set"))
 	p.reconcileWithAlertManager(context.Background())
+	after := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_empty_set"))
+	if after-before != 1 {
+		t.Errorf("CleanupSkipped{am_empty_set} delta = %f, want 1", after-before)
+	}
 
 	got, err := p.store.Get(tk.ID)
 	if err != nil {
@@ -860,7 +886,12 @@ func TestAMReconcileSkipsOnAMError(t *testing.T) {
 	tk := createAMTicket(t, p.store, "fp-any", ticket.StatusOpen)
 	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
 
+	before := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_fetch_error"))
 	p.reconcileWithAlertManager(context.Background())
+	after := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_fetch_error"))
+	if after-before != 1 {
+		t.Errorf("CleanupSkipped{am_fetch_error} delta = %f, want 1", after-before)
+	}
 
 	got, err := p.store.Get(tk.ID)
 	if err != nil {
@@ -993,7 +1024,12 @@ func TestAMReconcileResolvesWhenAllFingerprintsAbsent(t *testing.T) {
 	tk := createAMTicket(t, p.store, "fp-A,fp-B,fp-C", ticket.StatusOpen)
 	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
 
+	before := testutil.ToFloat64(metrics.AMReconcileResolved)
 	p.reconcileWithAlertManager(context.Background())
+	after := testutil.ToFloat64(metrics.AMReconcileResolved)
+	if after-before != 1 {
+		t.Errorf("AMReconcileResolved delta = %f, want 1", after-before)
+	}
 
 	got, err := p.store.Get(tk.ID)
 	if err != nil {
@@ -1004,5 +1040,81 @@ func TestAMReconcileResolvesWhenAllFingerprintsAbsent(t *testing.T) {
 	}
 	if !strings.Contains(got.Analysis, "fp-A,fp-B,fp-C") {
 		t.Errorf("resolution reason should reference all fingerprints; got analysis=%q", got.Analysis)
+	}
+}
+
+func TestPollerUpdatesOpenTicketsGauge(t *testing.T) {
+	// Set up a mock mctlclient server that returns an empty services list
+	// (HTTP 200 with no items). pollDegraded will then return a non-unknown
+	// refreshState with an empty knownServices map, which skips orphan prune.
+	mctlSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"items":[]}`))
+	}))
+	defer mctlSrv.Close()
+
+	store := newTestStore(t)
+	client := mctlclient.NewClient(mctlSrv.URL, "")
+	p := NewPoller(client, store, nil)
+	p.AMReconcileEnabled = false
+
+	// Create 2 open tickets + 1 analyzing + 1 resolved.
+	for i := 0; i < 2; i++ {
+		tk := &ticket.Ticket{
+			Source:   ticket.SourceAlertManager,
+			Type:     ticket.TypePodCrashloop,
+			Tenant:   "labs",
+			Service:  "svc",
+			Summary:  "open",
+			Severity: ticket.SeverityCritical,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	analyzing := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeResourceLimit,
+		Tenant:   "labs",
+		Service:  "svc2",
+		Summary:  "analyzing",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(analyzing); err != nil {
+		t.Fatal(err)
+	}
+	analyzing.Status = ticket.StatusAnalyzing
+	if err := store.Update(analyzing); err != nil {
+		t.Fatal(err)
+	}
+	resolved := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeGeneric,
+		Tenant:   "labs",
+		Service:  "svc3",
+		Summary:  "done",
+		Severity: ticket.SeverityInfo,
+	}
+	if err := store.Create(resolved); err != nil {
+		t.Fatal(err)
+	}
+	resolved.Status = ticket.StatusResolved
+	if err := store.Update(resolved); err != nil {
+		t.Fatal(err)
+	}
+
+	p.poll()
+
+	openGauge := testutil.ToFloat64(metrics.OpenTickets.WithLabelValues(ticket.StatusOpen, ticket.SourceAlertManager))
+	if openGauge != 2 {
+		t.Errorf("OpenTickets{open, alertmanager} = %f, want 2", openGauge)
+	}
+	analyzingGauge := testutil.ToFloat64(metrics.OpenTickets.WithLabelValues(ticket.StatusAnalyzing, ticket.SourceAlertManager))
+	if analyzingGauge != 1 {
+		t.Errorf("OpenTickets{analyzing, alertmanager} = %f, want 1", analyzingGauge)
+	}
+	resolvedGauge := testutil.ToFloat64(metrics.OpenTickets.WithLabelValues(ticket.StatusResolved, ticket.SourceAlertManager))
+	if resolvedGauge != 0 {
+		t.Errorf("OpenTickets{resolved, alertmanager} = %f, want 0 (terminal tickets must be excluded)", resolvedGauge)
 	}
 }

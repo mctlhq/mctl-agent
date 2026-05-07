@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 )
 
 // AlertManagerClient fetches active alert fingerprints from AlertManager's
@@ -44,6 +46,12 @@ func (c *AlertManagerClient) ActiveFingerprints(ctx context.Context) (map[string
 	reqCtx, cancel := context.WithTimeout(ctx, c.Timeout)
 	defer cancel()
 
+	start := time.Now()
+	outcome := "success"
+	defer func() {
+		metrics.AMRequestDuration.WithLabelValues(outcome).Observe(time.Since(start).Seconds())
+	}()
+
 	url := c.BaseURL + "/api/v2/alerts?active=true&silenced=false"
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
@@ -58,16 +66,19 @@ func (c *AlertManagerClient) ActiveFingerprints(ctx context.Context) (map[string
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
+		outcome = "transport_error"
 		return nil, fmt.Errorf("alertmanager: request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode/100 != 2 {
+		outcome = "http_error"
 		return nil, fmt.Errorf("alertmanager: HTTP %d", resp.StatusCode)
 	}
 
 	var alerts []amAlert
 	if err := json.NewDecoder(resp.Body).Decode(&alerts); err != nil {
+		outcome = "decode_error"
 		return nil, fmt.Errorf("alertmanager: decode: %w", err)
 	}
 
