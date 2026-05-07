@@ -109,6 +109,14 @@ func (p *Poller) poll() {
 	p.resolveStale(state)
 	p.pruneOrphans(state)
 	p.reconcileWithAlertManager(context.Background())
+	if breakdown, err := p.store.OpenTicketBreakdown(); err == nil {
+		metrics.OpenTickets.Reset()
+		for k, v := range breakdown {
+			metrics.OpenTickets.WithLabelValues(k.Status, k.Source).Set(float64(v))
+		}
+	} else {
+		slog.Warn("poller: open-ticket breakdown failed", "err", err)
+	}
 }
 
 // pollDegraded scans all services for ArgoCD Degraded/Missing health,
@@ -354,10 +362,12 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 	active, err := p.AMClient.ActiveFingerprints(ctx)
 	if err != nil {
 		slog.Warn("poller: AM reconcile skipped, fetch failed", "err", err)
+		metrics.CleanupSkipped.WithLabelValues("am_fetch_error").Inc()
 		return
 	}
 	if len(active) == 0 {
 		slog.Warn("poller: AM reconcile skipped, empty active alert set")
+		metrics.CleanupSkipped.WithLabelValues("am_empty_set").Inc()
 		return
 	}
 
@@ -414,6 +424,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 			slog.Debug("poller: AM reconcile no-op, ticket advanced concurrently", "id", t.ID)
 			continue
 		}
+		metrics.AMReconcileResolved.Inc()
 		slog.Info("poller: AM reconcile resolved",
 			"ticket", t.ID, "fingerprint", t.AlertFingerprint,
 			"status", t.Status, "tenant", t.Tenant, "service", t.Service)
@@ -429,6 +440,8 @@ func (p *Poller) pruneOrphans(state refreshState) {
 		return
 	}
 	if state.allUnknown {
+		slog.Warn("poller: orphan prune skipped, service inventory unknown")
+		metrics.CleanupSkipped.WithLabelValues("am_unknown").Inc()
 		return
 	}
 	// An empty inventory is indistinguishable from a partial outage that
@@ -436,6 +449,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 	// that basis would mass-close active incidents — guard accordingly.
 	if len(state.knownServices) == 0 {
 		slog.Warn("poller: orphan prune skipped, service inventory is empty")
+		metrics.CleanupSkipped.WithLabelValues("empty_inventory").Inc()
 		return
 	}
 
@@ -475,6 +489,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 			slog.Debug("poller: orphan prune no-op, ticket advanced concurrently", "id", t.ID)
 			continue
 		}
+		metrics.OrphanPruned.Inc()
 		slog.Info("poller: orphan-pruned",
 			"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
 			"status", t.Status, "age", time.Since(t.UpdatedAt).Round(time.Hour))

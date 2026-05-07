@@ -490,3 +490,80 @@ func TestMergeFingerprintHelper(t *testing.T) {
 		}
 	}
 }
+
+func TestStoreOpenTicketBreakdown(t *testing.T) {
+	store := newTestStore(t)
+
+	// 3 open + alertmanager tickets
+	for i := 0; i < 3; i++ {
+		tk := &Ticket{
+			Source:   SourceAlertManager,
+			Type:     TypePodCrashloop,
+			Tenant:   "labs",
+			Service:  "svc",
+			Summary:  "open alert",
+			Severity: SeverityCritical,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 2 analyzing + alertmanager tickets
+	for i := 0; i < 2; i++ {
+		tk := &Ticket{
+			Source:   SourceAlertManager,
+			Type:     TypeResourceLimit,
+			Tenant:   "labs",
+			Service:  "svc2",
+			Summary:  "analyzing alert",
+			Severity: SeverityWarning,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+		tk.Status = StatusAnalyzing
+		if err := store.Update(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// 1 resolved ticket — must be excluded
+	resolved := &Ticket{
+		Source:   SourceAlertManager,
+		Type:     TypeGeneric,
+		Tenant:   "labs",
+		Service:  "svc3",
+		Summary:  "done",
+		Severity: SeverityInfo,
+	}
+	if err := store.Create(resolved); err != nil {
+		t.Fatal(err)
+	}
+	resolved.Status = StatusResolved
+	if err := store.Update(resolved); err != nil {
+		t.Fatal(err)
+	}
+
+	breakdown, err := store.OpenTicketBreakdown()
+	if err != nil {
+		t.Fatalf("OpenTicketBreakdown: %v", err)
+	}
+	if len(breakdown) != 2 {
+		t.Fatalf("expected 2 pairs, got %d: %v", len(breakdown), breakdown)
+	}
+
+	openKey := StatusSourcePair{Status: StatusOpen, Source: SourceAlertManager}
+	analyzingKey := StatusSourcePair{Status: StatusAnalyzing, Source: SourceAlertManager}
+
+	if got := breakdown[openKey]; got != 3 {
+		t.Errorf("open/alertmanager count = %d, want 3", got)
+	}
+	if got := breakdown[analyzingKey]; got != 2 {
+		t.Errorf("analyzing/alertmanager count = %d, want 2", got)
+	}
+	// resolved ticket must not appear
+	for k := range breakdown {
+		if k.Status == StatusResolved {
+			t.Errorf("resolved tickets must be excluded from breakdown; found key %+v", k)
+		}
+	}
+}

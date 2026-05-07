@@ -20,6 +20,10 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-agent/internal/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 )
 
 func TestAMClientActiveFingerprints_ThreeAlerts(t *testing.T) {
@@ -137,5 +141,63 @@ func TestAMClientActiveFingerprints_OnlyActiveIncluded(t *testing.T) {
 	}
 	if _, ok := got["active1"]; !ok {
 		t.Error("missing active1")
+	}
+}
+
+// histSampleCount returns the sample count from the histogram for the given
+// outcome label value. Uses the dto.Metric Write path to read directly from
+// the in-process collector without involving the global registry.
+func histSampleCount(t *testing.T, outcome string) uint64 {
+	t.Helper()
+	h := metrics.AMRequestDuration.WithLabelValues(outcome)
+	var m dto.Metric
+	if err := h.(prometheus.Metric).Write(&m); err != nil {
+		t.Fatalf("histSampleCount(%s): %v", outcome, err)
+	}
+	return m.GetHistogram().GetSampleCount()
+}
+
+func TestAMRequestDurationObservesOutcomes(t *testing.T) {
+	cases := []struct {
+		name    string
+		handler http.HandlerFunc
+		outcome string
+	}{
+		{
+			name: "success",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`[{"fingerprint":"aaa","status":{"state":"active"}}]`))
+			},
+			outcome: "success",
+		},
+		{
+			name: "http_error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "boom", http.StatusInternalServerError)
+			},
+			outcome: "http_error",
+		},
+		{
+			name: "decode_error",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`not json`))
+			},
+			outcome: "decode_error",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(tc.handler)
+			defer srv.Close()
+			c := &AlertManagerClient{BaseURL: srv.URL, Timeout: 5 * time.Second, HTTP: srv.Client()}
+			before := histSampleCount(t, tc.outcome)
+			_, _ = c.ActiveFingerprints(context.Background())
+			after := histSampleCount(t, tc.outcome)
+			if after-before != 1 {
+				t.Errorf("outcome=%s: AMRequestDuration sample count delta=%d, want 1", tc.outcome, after-before)
+			}
+		})
 	}
 }
