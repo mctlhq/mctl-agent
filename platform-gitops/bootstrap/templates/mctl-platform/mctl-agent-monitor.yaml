@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mctl-agent
+  namespace: monitoring
+  labels:
+    release: monitoring
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: admins-mctl-agent
+      app.kubernetes.io/name: base-service
+  namespaceSelector:
+    matchNames:
+      - admins
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 30s

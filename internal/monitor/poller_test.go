@@ -23,7 +23,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -396,7 +398,12 @@ func TestPollerResolvesStaleAnalyzingTicket(t *testing.T) {
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-72*time.Hour))
 
+	before := testutil.ToFloat64(metrics.StaleTTLResolved.WithLabelValues("analyzing"))
 	p.resolveStale(refreshState{})
+	after := testutil.ToFloat64(metrics.StaleTTLResolved.WithLabelValues("analyzing"))
+	if after-before != 1 {
+		t.Errorf("StaleTTLResolved{analyzing}: delta = %f, want 1", after-before)
+	}
 
 	got, err := store.Get(tk.ID)
 	if err != nil {
