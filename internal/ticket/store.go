@@ -662,16 +662,24 @@ func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, erro
 // `alerts` table) — without them the local SQLite resolve was a dead-end
 // and external incident records stayed `open` forever.
 //
-// IDs are gathered via a SELECT issued before the UPDATE rather than via
-// RETURNING because the SQLite driver in use (modernc.org/sqlite) does
-// not implement RETURNING uniformly across versions; SELECT-then-UPDATE
-// works on both SQLite and PostgreSQL with no dialect branching.
+// The UPDATE uses RETURNING so the set of resolved IDs is gathered
+// atomically with the status transition. A SELECT-then-UPDATE pair
+// would be racy: a concurrent webhook handling the same
+// (tenant, service, type) could insert a new open ticket between the
+// two statements; the UPDATE would then close that ticket but its ID
+// would never appear in the returned slice, leaving the corresponding
+// mctl-api incident `open` forever — the exact drift this propagation
+// channel was added to fix. Both modernc.org/sqlite (SQLite 3.45+) and
+// pgx support UPDATE…RETURNING with identical syntax.
 func (s *Store) ResolveByTenantService(tenant, service, ticketType string) ([]string, error) {
-	selectQuery := `
-		SELECT id FROM tickets
-		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)`
+	now := time.Now().UTC()
+	query := `
+		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
+		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
+		RETURNING id`
 
-	rows, err := s.db.Query(s.rebind(selectQuery),
+	rows, err := s.db.Query(s.rebind(query),
+		StatusResolved, now, now,
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	)
 	if err != nil {
@@ -688,21 +696,6 @@ func (s *Store) ResolveByTenantService(tenant, service, ticketType string) ([]st
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	now := time.Now().UTC()
-	updateQuery := `
-		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
-		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)`
-	if _, err := s.db.Exec(s.rebind(updateQuery),
-		StatusResolved, now, now,
-		tenant, service, ticketType, StatusResolved, StatusSuppressed,
-	); err != nil {
 		return nil, err
 	}
 	return ids, nil
