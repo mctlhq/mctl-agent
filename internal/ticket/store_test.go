@@ -245,8 +245,12 @@ func TestStoreResolveByTenantService(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := store.ResolveByTenantService("billing", "api", TypePodCrashloop); err != nil {
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != tk.ID {
+		t.Errorf("expected resolved ids = [%s], got %v", tk.ID, ids)
 	}
 
 	got, err := store.Get(tk.ID)
@@ -258,6 +262,61 @@ func TestStoreResolveByTenantService(t *testing.T) {
 	}
 	if got.ResolvedAt == nil {
 		t.Error("expected ResolvedAt to be set")
+	}
+}
+
+func TestStoreResolveByTenantServiceReturnsAllOpenIDs(t *testing.T) {
+	store := newTestStore(t)
+
+	// Two open tickets with the same (tenant, service, type) — fan-out
+	// to mctl-api needs every open ID, not just the most recent.
+	t1 := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api"}
+	t2 := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api"}
+	if err := store.Create(t1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create(t2); err != nil {
+		t.Fatal(err)
+	}
+	// Already-resolved ticket on the same key must be excluded from results.
+	t3 := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api", Status: StatusResolved}
+	if err := store.Create(t3); err != nil {
+		t.Fatal(err)
+	}
+	// Ticket on a different service is unrelated and must not be returned.
+	other := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "worker"}
+	if err := store.Create(other); err != nil {
+		t.Fatal(err)
+	}
+
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 {
+		t.Fatalf("expected 2 ids, got %d (%v)", len(ids), ids)
+	}
+	got := map[string]bool{ids[0]: true, ids[1]: true}
+	if !got[t1.ID] || !got[t2.ID] {
+		t.Errorf("expected ids to include %s and %s, got %v", t1.ID, t2.ID, ids)
+	}
+	if got[t3.ID] {
+		t.Errorf("already-resolved ticket %s should not be in returned ids", t3.ID)
+	}
+	if got[other.ID] {
+		t.Errorf("unrelated ticket %s should not be in returned ids", other.ID)
+	}
+}
+
+func TestStoreResolveByTenantServiceNoMatch(t *testing.T) {
+	store := newTestStore(t)
+
+	ids, err := store.ResolveByTenantService("nope", "nope", TypePodCrashloop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Errorf("expected empty ids when no rows match, got %v", ids)
 	}
 }
 

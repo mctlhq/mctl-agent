@@ -656,18 +656,56 @@ func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, erro
 	return n > 0, nil
 }
 
-// ResolveByTenantService resolves open tickets matching tenant+service.
-func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
-	now := time.Now().UTC()
-	query := `
-		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
+// ResolveByTenantService resolves open tickets matching tenant+service+type
+// and returns the IDs of the rows that were transitioned. The IDs let
+// callers fan out the resolution to external systems (e.g. mctl-api's
+// `alerts` table) — without them the local SQLite resolve was a dead-end
+// and external incident records stayed `open` forever.
+//
+// IDs are gathered via a SELECT issued before the UPDATE rather than via
+// RETURNING because the SQLite driver in use (modernc.org/sqlite) does
+// not implement RETURNING uniformly across versions; SELECT-then-UPDATE
+// works on both SQLite and PostgreSQL with no dialect branching.
+func (s *Store) ResolveByTenantService(tenant, service, ticketType string) ([]string, error) {
+	selectQuery := `
+		SELECT id FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)`
 
-	_, err := s.db.Exec(s.rebind(query),
-		StatusResolved, now, now,
+	rows, err := s.db.Query(s.rebind(selectQuery),
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	if len(ids) == 0 {
+		return nil, nil
+	}
+
+	now := time.Now().UTC()
+	updateQuery := `
+		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
+		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)`
+	if _, err := s.db.Exec(s.rebind(updateQuery),
+		StatusResolved, now, now,
+		tenant, service, ticketType, StatusResolved, StatusSuppressed,
+	); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // StatusSourcePair is a (status, source) tuple used to key the

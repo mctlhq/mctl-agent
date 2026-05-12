@@ -79,3 +79,51 @@ func TestListServicesParsesItems(t *testing.T) {
 		}
 	}
 }
+
+// TestResolveAlertHitsCorrectEndpoint pins the resolve-propagation
+// path: AlertManager `resolved` events reach mctl-api via
+// POST /api/v1/incidents/{id}/resolve. A drift here (wrong path,
+// wrong method, missing Bearer) silently leaves mctl-api alerts
+// `open` forever — the exact bug that produced 198 stale rows.
+func TestResolveAlertHitsCorrectEndpoint(t *testing.T) {
+	var (
+		gotMethod string
+		gotPath   string
+		gotAuth   string
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	c.ResolveAlert("ticket-abc-123")
+
+	if gotMethod != http.MethodPost {
+		t.Errorf("method: want POST, got %q", gotMethod)
+	}
+	if want := "/api/v1/incidents/ticket-abc-123/resolve"; gotPath != want {
+		t.Errorf("path: want %q, got %q", want, gotPath)
+	}
+	if want := "Bearer test-token"; gotAuth != want {
+		t.Errorf("auth: want %q, got %q", want, gotAuth)
+	}
+}
+
+// TestResolveAlertSwallowsServerError verifies the AlertManager
+// webhook path is never blocked by a flaky mctl-api: errors must be
+// logged (in the real binary) and returned as no-ops to the caller.
+func TestResolveAlertSwallowsServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token")
+	c.ResolveAlert("ticket-abc-123") // must not panic, must not block.
+}

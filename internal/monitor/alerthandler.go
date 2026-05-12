@@ -38,6 +38,14 @@ type AlertHandler struct {
 	// service name matches the pattern. Resolved alerts still flow through
 	// so pre-filter tickets can close normally. Nil means no filter.
 	IgnoreService *regexp.Regexp
+	// OnResolve, when non-nil, is invoked with the IDs of tickets that
+	// transitioned to resolved as a result of an AlertManager `resolved`
+	// webhook. Used to fan out the resolution to external incident
+	// stores (mctl-api's `alerts` table) that would otherwise remain
+	// `open` forever — a publish-only feed from PublishAlert with no
+	// counterpart resolve channel was the root cause of the 198 stale
+	// incidents accumulated by 2026-05-12.
+	OnResolve func(ids []string)
 }
 
 // NewAlertHandler creates a new AlertManager webhook handler.
@@ -113,10 +121,15 @@ func (h *AlertHandler) processAlert(a alert) {
 
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
-		if err := h.store.ResolveByTenantService(tenant, service, tType); err != nil {
+		ids, err := h.store.ResolveByTenantService(tenant, service, tType)
+		if err != nil {
 			slog.Error("failed to resolve tickets", "error", err, "tenant", tenant, "service", service)
 		}
-		slog.Info("resolved tickets for alert", "alertname", alertName, "tenant", tenant, "service", service)
+		slog.Info("resolved tickets for alert",
+			"alertname", alertName, "tenant", tenant, "service", service, "count", len(ids))
+		if len(ids) > 0 && h.OnResolve != nil {
+			h.OnResolve(ids)
+		}
 		return
 	}
 
