@@ -98,6 +98,11 @@ func main() {
 	// Alert handler (used by both webhook and poller).
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
 	alertHandler.FlapCooldown = cfg.AlertFlapCooldown
+	alertHandler.OnResolve = func(ids []string) {
+		for _, id := range ids {
+			go mctlClient.ResolveAlert(id)
+		}
+	}
 	if cfg.AlertIgnoreServiceRegex != "" {
 		re, err := regexp.Compile(cfg.AlertIgnoreServiceRegex)
 		if err != nil {

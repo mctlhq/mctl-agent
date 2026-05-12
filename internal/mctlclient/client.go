@@ -243,6 +243,22 @@ func (c *Client) PublishAlert(t *ticket.Ticket) {
 	}
 }
 
+// ResolveAlert closes an incident in mctl-api by ID. Used to propagate
+// AlertManager `resolved` events from the local SQLite ticket store
+// into the mctl-api `alerts` table — without this, alerts published
+// via PublishAlert remain `open` forever even after AlertManager
+// signals resolution.
+//
+// Errors are logged and swallowed (mirrors PublishAlert/UpdateAlert) —
+// the caller is the AlertManager webhook path and must not block on a
+// remote write.
+func (c *Client) ResolveAlert(id string) {
+	body := map[string]interface{}{"reason": "alert resolved by AlertManager"}
+	if err := c.doPost("/api/v1/incidents/"+id+"/resolve", body); err != nil {
+		slog.Error("failed to resolve alert in mctl-api", "id", id, "error", err)
+	}
+}
+
 // UpdateAlert sends an incident update to mctl-api.
 func (c *Client) UpdateAlert(t *ticket.Ticket) {
 	body := map[string]interface{}{

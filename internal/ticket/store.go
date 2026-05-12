@@ -656,18 +656,49 @@ func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, erro
 	return n > 0, nil
 }
 
-// ResolveByTenantService resolves open tickets matching tenant+service.
-func (s *Store) ResolveByTenantService(tenant, service, ticketType string) error {
+// ResolveByTenantService resolves open tickets matching tenant+service+type
+// and returns the IDs of the rows that were transitioned. The IDs let
+// callers fan out the resolution to external systems (e.g. mctl-api's
+// `alerts` table) — without them the local SQLite resolve was a dead-end
+// and external incident records stayed `open` forever.
+//
+// The UPDATE uses RETURNING so the set of resolved IDs is gathered
+// atomically with the status transition. A SELECT-then-UPDATE pair
+// would be racy: a concurrent webhook handling the same
+// (tenant, service, type) could insert a new open ticket between the
+// two statements; the UPDATE would then close that ticket but its ID
+// would never appear in the returned slice, leaving the corresponding
+// mctl-api incident `open` forever — the exact drift this propagation
+// channel was added to fix. Both modernc.org/sqlite (SQLite 3.45+) and
+// pgx support UPDATE…RETURNING with identical syntax.
+func (s *Store) ResolveByTenantService(tenant, service, ticketType string) ([]string, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
-		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)`
+		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
+		RETURNING id`
 
-	_, err := s.db.Exec(s.rebind(query),
+	rows, err := s.db.Query(s.rebind(query),
 		StatusResolved, now, now,
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	)
-	return err
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // StatusSourcePair is a (status, source) tuple used to key the

@@ -272,6 +272,104 @@ func TestAlertHandlerResolvedAlert(t *testing.T) {
 	}
 }
 
+func TestAlertHandlerResolveFiresOnResolve(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {})
+
+	var resolvedIDs []string
+	handler.OnResolve = func(ids []string) {
+		resolvedIDs = append(resolvedIDs, ids...)
+	}
+
+	// Pre-existing open ticket matching the resolve key.
+	tk := &ticket.Ticket{
+		Source:  ticket.SourceAlertManager,
+		Type:    ticket.TypePodCrashloop,
+		Tenant:  "billing",
+		Service: "api",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	resolve := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "resolved",
+				Labels: map[string]string{
+					"alertname": "PodCrashLooping",
+					"namespace": "billing",
+					"pod":       "api-6d4b5c7f8-abc12",
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(resolve)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(resolvedIDs) != 1 || resolvedIDs[0] != tk.ID {
+		t.Errorf("expected OnResolve called with [%s], got %v", tk.ID, resolvedIDs)
+	}
+}
+
+func TestAlertHandlerFiringDoesNotFireOnResolve(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {})
+
+	called := false
+	handler.OnResolve = func(ids []string) { called = true }
+
+	fire := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname": "PodCrashLooping",
+					"namespace": "billing",
+					"pod":       "api-6d4b5c7f8-abc12",
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(fire)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if called {
+		t.Error("OnResolve must not fire on a firing alert")
+	}
+}
+
+func TestAlertHandlerResolveWithNoMatchSkipsOnResolve(t *testing.T) {
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {})
+
+	called := false
+	handler.OnResolve = func(ids []string) { called = true }
+
+	// No pre-existing tickets; resolve hits an empty match set.
+	resolve := alertManagerPayload{
+		Alerts: []alert{
+			{
+				Status: "resolved",
+				Labels: map[string]string{
+					"alertname": "PodCrashLooping",
+					"namespace": "ghost",
+					"pod":       "missing-6d4b5c7f8-xxxxx",
+				},
+			},
+		},
+	}
+	body, _ := json.Marshal(resolve)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if called {
+		t.Error("OnResolve must not fire when no tickets match the resolve key")
+	}
+}
+
 func TestAlertHandlerInvalidJSON(t *testing.T) {
 	store := newTestStore(t)
 	handler := NewAlertHandler(store, nil)
