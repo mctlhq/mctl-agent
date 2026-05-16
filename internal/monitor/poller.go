@@ -272,7 +272,7 @@ func (p *Poller) eligibleSource(src string) bool {
 // do not depend on mctl-api reachability and are GC'd purely by
 // UpdatedAt, so a partial poller outage does not block noise cleanup.
 func (p *Poller) resolveStale(state refreshState) {
-	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.FixProposedAfter <= 0 {
+	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.FixProposedAfter <= 0 && p.MaxAnalyzingAge <= 0 {
 		return
 	}
 	open, err := p.store.ListOpen()
@@ -292,7 +292,9 @@ func (p *Poller) resolveStale(state refreshState) {
 		// heartbeats (uses CreatedAt, not UpdatedAt). Takes precedence over the
 		// UpdatedAt-based AnalyzingAfter check below so a flapping alert that
 		// keeps UpdatedAt fresh can't hold a ticket open indefinitely.
-		if t.Status == ticket.StatusAnalyzing && p.MaxAnalyzingAge > 0 {
+		// SourceManual tickets (user-initiated investigations) are excluded —
+		// same contract as the regular stale GC below.
+		if t.Status == ticket.StatusAnalyzing && p.MaxAnalyzingAge > 0 && p.eligibleSource(t.Source) {
 			if time.Since(t.CreatedAt) > p.MaxAnalyzingAge {
 				age := time.Since(t.CreatedAt).Round(time.Hour)
 				reason := fmt.Sprintf(
