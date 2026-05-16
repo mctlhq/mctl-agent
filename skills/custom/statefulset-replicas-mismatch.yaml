@@ -1,0 +1,24 @@
+name: statefulset-replicas-mismatch
+version: "1.0"
+description: "Detects StatefulSet rollout stalls (KubeStatefulSetReplicasMismatch)"
+
+trigger:
+  alert_types:
+    - generic
+  log_patterns:
+    - "StatefulSet.*not been rolled out"
+    - "StatefulSet.*update.*not.*rolled"
+    - "replicas.*mismatch"
+
+diagnosis:
+  template: |
+    StatefulSet in {{.Tenant}} has not fully rolled out.
+    Typical causes: pod stuck in Pending/Terminating, PVC not bound, init container failing.
+    Manual resolution: kubectl delete pod <statefulset-pod-0> -n {{.Tenant}}
+    This forces the StatefulSet controller to recreate the pod on the updated spec.
+  confidence: MEDIUM
+  fixable: false
+
+capabilities:
+  - read_logs
+  - send_notification
