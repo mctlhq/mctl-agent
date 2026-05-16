@@ -118,6 +118,7 @@ func main() {
 	poller.AnalyzingAfter = cfg.AutoResolveAnalyzingAfter
 	poller.FixProposedAfter = cfg.AutoResolveFixProposedAfter
 	poller.OrphanAfter = cfg.AutoResolveOrphanAfter
+	poller.MaxAnalyzingAge = cfg.MaxAnalyzingAge
 	poller.AMReconcileEnabled = cfg.AMReconcileEnabled
 	poller.AMReconcileMinAge = cfg.AMReconcileMinAge
 	if cfg.AMReconcileEnabled {

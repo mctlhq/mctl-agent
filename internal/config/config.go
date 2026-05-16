@@ -54,6 +54,10 @@ type Config struct {
 	AMReconcileEnabled bool
 	AMReconcileTimeout time.Duration
 	AMReconcileMinAge  time.Duration
+	// MaxAnalyzingAge is an absolute TTL for tickets stuck in StatusAnalyzing,
+	// measured from CreatedAt (not reset by flapping alert heartbeats).
+	// Zero disables the cap. Env: MAX_ANALYZING_AGE (e.g. "120h").
+	MaxAnalyzingAge time.Duration
 }
 
 func Load() Config {
@@ -163,6 +167,13 @@ func Load() Config {
 		}
 	}
 
+	maxAnalyzingAge := 120 * time.Hour
+	if v := os.Getenv("MAX_ANALYZING_AGE"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			maxAnalyzingAge = d
+		}
+	}
+
 	// Priority: DATABASE_URL > DB_PATH > default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -211,6 +222,7 @@ func Load() Config {
 		AMReconcileEnabled: amReconcileEnabled,
 		AMReconcileTimeout: amReconcileTimeout,
 		AMReconcileMinAge:  amReconcileMinAge,
+		MaxAnalyzingAge:    maxAnalyzingAge,
 	}
 }
 

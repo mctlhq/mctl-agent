@@ -50,6 +50,10 @@ type Poller struct {
 	AMReconcileMinAge time.Duration
 	// AMClient is the AlertManager API client. Nil disables the pass.
 	AMClient *AlertManagerClient
+	// MaxAnalyzingAge is an absolute TTL for tickets stuck in StatusAnalyzing,
+	// measured from CreatedAt. Unlike AnalyzingAfter (which uses UpdatedAt),
+	// this cap is not reset by flapping alert heartbeats. Zero disables the cap.
+	MaxAnalyzingAge time.Duration
 }
 
 // NewPoller creates a new service health poller.
@@ -268,7 +272,7 @@ func (p *Poller) eligibleSource(src string) bool {
 // do not depend on mctl-api reachability and are GC'd purely by
 // UpdatedAt, so a partial poller outage does not block noise cleanup.
 func (p *Poller) resolveStale(state refreshState) {
-	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.FixProposedAfter <= 0 {
+	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.FixProposedAfter <= 0 && p.MaxAnalyzingAge <= 0 {
 		return
 	}
 	open, err := p.store.ListOpen()
@@ -284,6 +288,34 @@ func (p *Poller) resolveStale(state refreshState) {
 	}
 
 	for _, t := range open {
+		// Absolute age cap for analyzing tickets — not reset by flapping alert
+		// heartbeats (uses CreatedAt, not UpdatedAt). Takes precedence over the
+		// UpdatedAt-based AnalyzingAfter check below so a flapping alert that
+		// keeps UpdatedAt fresh can't hold a ticket open indefinitely.
+		// SourceManual tickets (user-initiated investigations) are excluded —
+		// same contract as the regular stale GC below.
+		if t.Status == ticket.StatusAnalyzing && p.MaxAnalyzingAge > 0 && p.eligibleSource(t.Source) {
+			if time.Since(t.CreatedAt) > p.MaxAnalyzingAge {
+				age := time.Since(t.CreatedAt).Round(time.Hour)
+				reason := fmt.Sprintf(
+					"Auto-resolved: stuck in analyzing for %s (max_age=%s); any re-fire will open a new ticket",
+					age, p.MaxAnalyzingAge,
+				)
+				resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+				if err != nil {
+					slog.Warn("poller: max-age force-resolve failed", "ticket", t.ID, "err", err)
+					continue
+				}
+				if resolved {
+					metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
+					slog.Info("poller: force-resolved stuck analyzing ticket",
+						"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
+						"type", t.Type, "created_at", t.CreatedAt, "age", age)
+				}
+				continue
+			}
+		}
+
 		cutoff, ok := thresholds[t.Status]
 		if !ok || cutoff <= 0 {
 			continue

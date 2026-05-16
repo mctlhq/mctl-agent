@@ -14,9 +14,15 @@
 
 package builtin
 
-import "github.com/mctlhq/mctl-agent/internal/skill"
+import (
+	"os"
+
+	"github.com/mctlhq/mctl-agent/internal/skill"
+)
 
 // RegisterAll registers all built-in skills with the given registry.
+// Set DISABLE_LLM_DIAGNOSIS=true to skip the LLM fallback skill (e.g. when
+// the Anthropic API key is absent or the account balance is exhausted).
 func RegisterAll(reg *skill.Registry, anthropicKey string) {
 	// Pattern-based skills (zero LLM cost).
 	reg.Register(NewOOMKilledSkill())
@@ -31,6 +37,7 @@ func RegisterAll(reg *skill.Registry, anthropicKey string) {
 	reg.Register(NewGitHubActionsSkill())
 	reg.Register(NewWorkflowFixerSkill())
 
-	// LLM-based fallback skill.
-	reg.Register(NewLLMDiagnosisSkill(anthropicKey))
+	if os.Getenv("DISABLE_LLM_DIAGNOSIS") != "true" {
+		reg.Register(NewLLMDiagnosisSkill(anthropicKey))
+	}
 }
