@@ -1118,3 +1118,119 @@ func TestPollerUpdatesOpenTicketsGauge(t *testing.T) {
 		t.Errorf("OpenTickets{resolved, alertmanager} = %f, want 0 (terminal tickets must be excluded)", resolvedGauge)
 	}
 }
+
+// resolveCapture is an httptest server standing in for mctl-api. It records the
+// incident IDs received on POST /api/v1/incidents/{id}/resolve so tests can
+// assert the poller propagated a local resolution (propagateResolve fans out
+// asynchronously, hence the channel).
+type resolveCapture struct {
+	srv *httptest.Server
+	ch  chan string
+}
+
+func newResolveCapture(t *testing.T) *resolveCapture {
+	t.Helper()
+	rc := &resolveCapture{ch: make(chan string, 8)}
+	rc.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost &&
+			strings.HasPrefix(r.URL.Path, "/api/v1/incidents/") &&
+			strings.HasSuffix(r.URL.Path, "/resolve") {
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/incidents/"), "/resolve")
+			rc.ch <- id
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(rc.srv.Close)
+	return rc
+}
+
+// await blocks until a propagated resolve ID arrives or the deadline passes.
+func (rc *resolveCapture) await(t *testing.T) string {
+	t.Helper()
+	select {
+	case id := <-rc.ch:
+		return id
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resolve propagation to mctl-api")
+		return ""
+	}
+}
+
+func TestPollerPropagatesStaleResolveToMctlAPI(t *testing.T) {
+	rc := newResolveCapture(t)
+	store := newTestStore(t)
+	p := NewPoller(mctlclient.NewClient(rc.srv.URL, ""), store, nil)
+	p.StaleAfter = 24 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypePodCrashloop,
+		Tenant:   "labs",
+		Service:  "ghost-pod",
+		Summary:  "stale",
+		Severity: ticket.SeverityCritical,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-30*time.Hour))
+
+	p.resolveStale(refreshState{})
+
+	if got := rc.await(t); got != tk.ID {
+		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
+	}
+}
+
+func TestAMReconcilePropagatesResolveToMctlAPI(t *testing.T) {
+	amSrv := makeAMServer(t, "other-fingerprint")
+	defer amSrv.Close()
+	rc := newResolveCapture(t)
+	store := newTestStore(t)
+	p := NewPoller(mctlclient.NewClient(rc.srv.URL, ""), store, nil)
+	p.AMReconcileEnabled = true
+	p.AMReconcileMinAge = 15 * time.Minute
+	p.AMClient = &AlertManagerClient{
+		BaseURL: amSrv.URL,
+		Timeout: 5 * time.Second,
+		HTTP:    amSrv.Client(),
+	}
+
+	tk := createAMTicket(t, store, "fp-gone", ticket.StatusOpen)
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
+
+	p.reconcileWithAlertManager(context.Background())
+
+	if got := rc.await(t); got != tk.ID {
+		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
+	}
+}
+
+func TestOrphanPrunePropagatesResolveToMctlAPI(t *testing.T) {
+	rc := newResolveCapture(t)
+	store := newTestStore(t)
+	p := NewPoller(mctlclient.NewClient(rc.srv.URL, ""), store, nil)
+	p.OrphanAfter = time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeResourceLimit,
+		Tenant:   "labs",
+		Service:  "deleted-svc",
+		Summary:  "orphan",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	// Inventory is known and non-empty but does not contain labs/deleted-svc.
+	state := refreshState{knownServices: map[string]bool{"labs/other": true}}
+	p.pruneOrphans(state)
+
+	if got := rc.await(t); got != tk.ID {
+		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
+	}
+}

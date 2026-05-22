@@ -61,6 +61,19 @@ func NewPoller(client *mctlclient.Client, store *ticket.Store, onTicket func(*ti
 	return &Poller{client: client, store: store, onTicket: onTicket}
 }
 
+// propagateResolve fans a local ticket resolution out to mctl-api, mirroring
+// AlertHandler.OnResolve. Without it, tickets the poller closes itself (stale
+// TTL GC, max-age force-resolve, AM reconcile, orphan prune) resolve only in
+// local SQLite while the mctl-api incident record drifts to a permanent
+// `analyzing`. Fire-and-forget: ResolveAlert logs and swallows errors and the
+// poll loop must not block on a remote write.
+func (p *Poller) propagateResolve(id string) {
+	if p.client == nil {
+		return
+	}
+	go p.client.ResolveAlert(id)
+}
+
 // Run starts the polling loop. Blocks until ctx is cancelled.
 func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 	slog.Info("poller starting", "interval", interval)
@@ -308,6 +321,7 @@ func (p *Poller) resolveStale(state refreshState) {
 				}
 				if resolved {
 					metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
+					p.propagateResolve(t.ID)
 					slog.Info("poller: force-resolved stuck analyzing ticket",
 						"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
 						"type", t.Type, "created_at", t.CreatedAt, "age", age)
@@ -355,6 +369,7 @@ func (p *Poller) resolveStale(state refreshState) {
 				continue
 			}
 			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
+			p.propagateResolve(t.ID)
 			slog.Info("poller: auto-resolved stale ticket",
 				"id", t.ID, "tenant", t.Tenant, "service", t.Service,
 				"type", t.Type, "last_updated", t.UpdatedAt, "stale_after", p.StaleAfter)
@@ -374,6 +389,7 @@ func (p *Poller) resolveStale(state refreshState) {
 				continue
 			}
 			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
+			p.propagateResolve(t.ID)
 			slog.Info("poller: stale TTL resolved",
 				"ticket", t.ID, "status", t.Status, "age", age, "threshold", cutoff)
 		}
@@ -457,6 +473,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 			continue
 		}
 		metrics.AMReconcileResolved.Inc()
+		p.propagateResolve(t.ID)
 		slog.Info("poller: AM reconcile resolved",
 			"ticket", t.ID, "fingerprint", t.AlertFingerprint,
 			"status", t.Status, "tenant", t.Tenant, "service", t.Service)
@@ -522,6 +539,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 			continue
 		}
 		metrics.OrphanPruned.Inc()
+		p.propagateResolve(t.ID)
 		slog.Info("poller: orphan-pruned",
 			"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
 			"status", t.Status, "age", time.Since(t.UpdatedAt).Round(time.Hour))
