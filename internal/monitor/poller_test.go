@@ -1234,3 +1234,43 @@ func TestOrphanPrunePropagatesResolveToMctlAPI(t *testing.T) {
 		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
 	}
 }
+
+// TestMaxAnalyzingAgePropagatesResolveToMctlAPI covers the exact production
+// failure mode: a ticket stuck in analyzing past MaxAnalyzingAge is
+// force-resolved by the CreatedAt-based cap and must propagate to mctl-api.
+func TestMaxAnalyzingAgePropagatesResolveToMctlAPI(t *testing.T) {
+	rc := newResolveCapture(t)
+	store := newTestStore(t)
+	p := NewPoller(mctlclient.NewClient(rc.srv.URL, ""), store, nil)
+	p.MaxAnalyzingAge = 2 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeGeneric,
+		Tenant:   "labs",
+		Service:  "stuck-analyzing",
+		Summary:  "stuck",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(tk); err != nil {
+		t.Fatal(err)
+	}
+	// MaxAnalyzingAge is measured from CreatedAt; store.Update does not
+	// persist created_at, so backdate it directly past the cap.
+	if _, err := store.DB().Exec(
+		`UPDATE tickets SET created_at=? WHERE id=?`,
+		time.Now().UTC().Add(-3*time.Hour), tk.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	p.resolveStale(refreshState{})
+
+	if got := rc.await(t); got != tk.ID {
+		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
+	}
+}
