@@ -100,7 +100,7 @@ func main() {
 	alertHandler.FlapCooldown = cfg.AlertFlapCooldown
 	alertHandler.OnResolve = func(ids []string) {
 		for _, id := range ids {
-			go mctlClient.ResolveAlert(id)
+			go mctlClient.ResolveAlert(id, "alert resolved by AlertManager")
 		}
 	}
 	if cfg.AlertIgnoreServiceRegex != "" {

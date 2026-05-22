@@ -90,18 +90,24 @@ func TestResolveAlertHitsCorrectEndpoint(t *testing.T) {
 		gotMethod string
 		gotPath   string
 		gotAuth   string
+		gotReason string
 	)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotMethod = r.Method
 		gotPath = r.URL.Path
 		gotAuth = r.Header.Get("Authorization")
+		var body struct {
+			Reason string `json:"reason"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		gotReason = body.Reason
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	c.ResolveAlert("ticket-abc-123")
+	c.ResolveAlert("ticket-abc-123", "auto-resolved: stale TTL GC")
 
 	if gotMethod != http.MethodPost {
 		t.Errorf("method: want POST, got %q", gotMethod)
@@ -111,6 +117,9 @@ func TestResolveAlertHitsCorrectEndpoint(t *testing.T) {
 	}
 	if want := "Bearer test-token"; gotAuth != want {
 		t.Errorf("auth: want %q, got %q", want, gotAuth)
+	}
+	if want := "auto-resolved: stale TTL GC"; gotReason != want {
+		t.Errorf("reason: want %q, got %q", want, gotReason)
 	}
 }
 
@@ -125,5 +134,5 @@ func TestResolveAlertSwallowsServerError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	c.ResolveAlert("ticket-abc-123") // must not panic, must not block.
+	c.ResolveAlert("ticket-abc-123", "reason") // must not panic, must not block.
 }
