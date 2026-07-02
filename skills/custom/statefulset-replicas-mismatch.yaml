@@ -6,6 +6,7 @@ trigger:
   alert_types:
     - generic
   log_patterns:
+    - "StatefulSet.*not matched the expected number of replicas"
     - "StatefulSet.*not been rolled out"
     - "StatefulSet.*update.*not.*rolled"
     - "replicas.*mismatch"
@@ -14,8 +15,14 @@ diagnosis:
   template: |
     StatefulSet in {{.Tenant}} has not fully rolled out.
     Typical causes: pod stuck in Pending/Terminating, PVC not bound, init container failing.
-    Manual resolution: kubectl delete pod <statefulset-pod-0> -n {{.Tenant}}
-    This forces the StatefulSet controller to recreate the pod on the updated spec.
+    Manual resolution: StatefulSet rollouts proceed from the highest ordinal down to 0, so
+    the stuck pod is the highest-numbered one not yet on the new revision, not necessarily
+    pod-0. Find it with:
+      kubectl rollout status statefulset/<name> -n {{.Tenant}}
+      kubectl get pods -n {{.Tenant}} -l app=<name> -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.controller-revision-hash}{"\n"}{end}'
+    then delete the pod whose revision hash doesn't match the StatefulSet's
+    updateRevision to force the controller to recreate it on the updated spec:
+      kubectl delete pod <stuck-pod> -n {{.Tenant}}
   confidence: MEDIUM
   fixable: false
 

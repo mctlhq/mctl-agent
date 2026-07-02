@@ -122,15 +122,18 @@ func (s *YAMLSkill) Match(_ context.Context, t *ticket.Ticket, ev skill.Evidence
 		}
 	}
 
-	// Check log pattern match.
+	// Check log pattern match. Alertmanager-sourced ticket types (e.g.
+	// TypeGeneric) never populate container logs with the alert's condition
+	// text, so match against the ticket summary and raw alert evidence too —
+	// the same haystack builtin skills use (see cpu_throttle.go).
 	if len(s.logPatterns) > 0 {
-		logs := ev.Get("logs")
-		if logs == "" {
+		haystack := t.Summary + "\n" + ev.Get("logs") + "\n" + ev.Get("alert")
+		if strings.TrimSpace(haystack) == "" {
 			return skill.MatchResult{}
 		}
 		matchedAny := false
 		for _, re := range s.logPatterns {
-			if re.MatchString(logs) {
+			if re.MatchString(haystack) {
 				matchedAny = true
 				break
 			}
