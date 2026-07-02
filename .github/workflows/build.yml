@@ -117,7 +117,7 @@ jobs:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           message: |
-            ❌ *mctl-agent build failed*
+            *mctl-agent build failed*
             Branch/Tag: `${{ github.ref_name }}`
             Commit: `${{ github.sha }}`
             Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
