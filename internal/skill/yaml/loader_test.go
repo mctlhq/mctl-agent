@@ -113,6 +113,59 @@ func TestYAMLSkillMatchAndDiagnose(t *testing.T) {
 	}
 }
 
+func TestYAMLSkillMatchAgainstSummaryAndAlertEvidence(t *testing.T) {
+	// No AlertTypes restriction, so the negative case below is rejected by
+	// the log-pattern haystack scoping, not by the alert-type filter.
+	def := SkillDef{
+		Name:    "test-generic-alert",
+		Version: "1.0",
+		Trigger: Trigger{
+			LogPatterns: []string{"StatefulSet.*not matched the expected number of replicas"},
+		},
+		Diagnosis: Diag{
+			Template:   "StatefulSet issue in {{.Tenant}}.",
+			Confidence: "MEDIUM",
+		},
+	}
+	ys, err := NewFromDef(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+
+	// Match via ticket.Summary with no logs — the real-world case for
+	// Alertmanager metric alerts, which never produce container logs.
+	tk := &ticket.Ticket{
+		Type:    ticket.TypeGeneric,
+		Tenant:  "billing",
+		Summary: "StatefulSet has not matched the expected number of replicas.",
+	}
+	if res := ys.Match(ctx, tk, skill.NewEvidenceSet(nil)); !res.Matched {
+		t.Error("expected match via ticket.Summary alone")
+	}
+
+	// Match via the raw "alert" evidence JSON with no logs and no summary.
+	tkNoSummary := &ticket.Ticket{Type: ticket.TypeGeneric, Tenant: "billing"}
+	evAlert := skill.NewEvidenceSet([]ticket.Evidence{
+		{Type: "alert", Content: `{"annotations":{"summary":"StatefulSet has not matched the expected number of replicas."}}`},
+	})
+	if res := ys.Match(ctx, tkNoSummary, evAlert); !res.Matched {
+		t.Error("expected match via alert evidence alone")
+	}
+
+	// Non-generic ticket types must NOT gain the summary/alert haystack —
+	// only ev.Get("logs") is considered, so a matching summary on a
+	// pod_crashloop ticket should not cause a match.
+	tkCrashloop := &ticket.Ticket{
+		Type:    ticket.TypePodCrashloop,
+		Tenant:  "billing",
+		Summary: "StatefulSet has not matched the expected number of replicas.",
+	}
+	if res := ys.Match(ctx, tkCrashloop, skill.NewEvidenceSet(nil)); res.Matched {
+		t.Error("pod_crashloop ticket should not match via summary text")
+	}
+}
+
 func TestYAMLSkillHighConfidence(t *testing.T) {
 	def := SkillDef{
 		Name:    "high-conf",
