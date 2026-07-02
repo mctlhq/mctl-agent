@@ -68,7 +68,9 @@ jobs:
 
       - name: Scan image with Trivy
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@master
+        # v0.36.0 — pinned by commit SHA (floating @master on the security
+        # scanner itself was the last unpinned action in the org)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           image-ref: ghcr.io/mctlhq/mctl-agent:${{ steps.meta.outputs.version }}
           format: sarif
@@ -112,7 +114,8 @@ jobs:
 
       - name: Notify Telegram on failure
         if: failure()
-        uses: appleboy/telegram-action@master
+        # v1.0.1 — pinned by commit SHA
+        uses: appleboy/telegram-action@221e6b684967abe813051ee4a37dd61770a83ad3
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
           token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
