@@ -39,6 +39,14 @@ The agent uses a modular **skills architecture**:
 - Context propagation for all I/O
 - Table-driven tests for skill match/diagnose
 
+## Releases
+- Semantic version tags, NO `v` prefix (e.g. `1.9.0`). Pushing a matching tag
+  triggers `.github/workflows/build.yml`, which builds/pushes the image and bumps
+  the gitops manifest.
+- Cut a release via a branch + PR (never directly on `main`): land a
+  `chore: release x.y.z` commit that bumps the version, merge the PR, then tag
+  the resulting merge commit with `x.y.z` and push the tag.
+
 ## Alert Types Handled
 - PodCrashLooping, KubePodNotReady
 - TenantCPUQuotaHigh, TenantMemoryQuotaHigh
