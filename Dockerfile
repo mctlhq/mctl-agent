@@ -15,7 +15,13 @@ RUN apk add --no-cache ca-certificates
 
 RUN addgroup -g 1000 app && adduser -D -u 1000 -G app app
 
+WORKDIR /app
+
 COPY --from=builder /mctl-agent /usr/local/bin/mctl-agent
+
+# cmd/agent/main.go loads YAML skills from the relative path "skills/custom",
+# resolved against the process cwd (this WORKDIR) at runtime.
+COPY --from=builder --chown=app:app /app/skills/custom ./skills/custom
 
 RUN mkdir -p /data && chown app:app /data
 

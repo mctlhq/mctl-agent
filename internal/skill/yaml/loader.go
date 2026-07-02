@@ -122,12 +122,19 @@ func (s *YAMLSkill) Match(_ context.Context, t *ticket.Ticket, ev skill.Evidence
 		}
 	}
 
-	// Check log pattern match. Alertmanager-sourced ticket types (e.g.
-	// TypeGeneric) never populate container logs with the alert's condition
-	// text, so match against the ticket summary and raw alert evidence too —
-	// the same haystack builtin skills use (see cpu_throttle.go).
+	// Check log pattern match. TypeGeneric tickets (e.g. from Alertmanager
+	// metric alerts like KubeStatefulSetReplicasMismatch) never populate
+	// container logs with the alert's condition text, so for that type only,
+	// also match against the ticket summary and raw alert evidence — the
+	// same haystack builtin skills use (see cpu_throttle.go). Other ticket
+	// types keep matching against logs only, since existing skills like
+	// redis-connection-timeout.yaml and high-restart-count.yaml were
+	// authored assuming log-only matching.
 	if len(s.logPatterns) > 0 {
-		haystack := t.Summary + "\n" + ev.Get("logs") + "\n" + ev.Get("alert")
+		haystack := ev.Get("logs")
+		if t.Type == ticket.TypeGeneric {
+			haystack = t.Summary + "\n" + haystack + "\n" + ev.Get("alert")
+		}
 		if strings.TrimSpace(haystack) == "" {
 			return skill.MatchResult{}
 		}

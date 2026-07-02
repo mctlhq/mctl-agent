@@ -6,18 +6,24 @@ trigger:
   alert_types:
     - generic
   log_patterns:
+    - "KubeStatefulSetReplicasMismatch"
     - "StatefulSet.*not matched the expected number of replicas"
     - "StatefulSet.*not been rolled out"
     - "StatefulSet.*update.*not.*rolled"
-    - "replicas.*mismatch"
 
 diagnosis:
   template: |
-    StatefulSet in {{.Tenant}} has not fully rolled out.
-    Typical causes: pod stuck in Pending/Terminating, PVC not bound, init container failing.
-    Manual resolution: StatefulSet rollouts proceed from the highest ordinal down to 0, so
-    the stuck pod is the highest-numbered one not yet on the new revision, not necessarily
-    pod-0. Find it with:
+    StatefulSet in {{.Tenant}} does not have the expected number of ready replicas.
+    This alert fires whenever ready replicas != desired, so check pod health first —
+    a revision mismatch is only one of several causes:
+      kubectl get pods -n {{.Tenant}} -l app=<name>
+      kubectl describe pod <non-ready-pod> -n {{.Tenant}}
+    Look for a pod that is not Ready: CrashLoopBackOff, Pending, failing readiness
+    probe, or an unbound PVC.
+
+    If every pod looks healthy but a rollout is stuck, StatefulSet updates proceed
+    from the highest ordinal down to 0, so the stuck pod is the highest-numbered one
+    not yet on the new revision, not necessarily pod-0. Find it with:
       kubectl rollout status statefulset/<name> -n {{.Tenant}}
       kubectl get pods -n {{.Tenant}} -l app=<name> -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.metadata.labels.controller-revision-hash}{"\n"}{end}'
     then delete the pod whose revision hash doesn't match the StatefulSet's
@@ -27,5 +33,4 @@ diagnosis:
   fixable: false
 
 capabilities:
-  - read_logs
   - send_notification
