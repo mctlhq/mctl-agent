@@ -485,6 +485,35 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 // present in the current service inventory, after OrphanAfter has elapsed.
 // It is skipped when OrphanAfter <= 0 (disabled) or when the inventory is
 // stale (allUnknown=true).
+//
+// Restricted to SourcePolling: pollDegraded (the only creator of
+// SourcePolling tickets) sets Tenant/Service directly from the same
+// ListServices() response that knownServices is built from, so the
+// membership check is comparing like with like and can correctly detect
+// a service that existed at ticket-creation time but was since removed.
+//
+// SourceAlertManager tickets do NOT satisfy that precondition and must
+// never reach this check. Their Service field comes from AlertManager
+// labels via two paths, neither of which matches mctl-api's bare
+// registered app name:
+//   - TypeArgoCDDegraded: the ArgoCD Application name, "{tenant}-{app}"
+//     (e.g. "admins-mctl-agent" vs. the registry's "mctl-agent").
+//   - everything else: extractService(pod), which for any base-service
+//     chart deployment returns "{release}-base-service" (the chart's
+//     fullname, e.g. "labs-mctl-telegram-base-service" vs. the registry's
+//     "mctl-telegram") — or "" when the alert carries no pod label at all
+//     (cluster-level alerts like a vmagent scrape_pool warning).
+//
+// Because of this, the membership check can never be true for an
+// AlertManager-sourced ticket about a service that legitimately exists —
+// every one of them ages past OrphanAfter and gets force-closed with the
+// misleading "service does not exist" reason regardless of whether the
+// underlying alert is still firing (observed live: admins-mctl-agent
+// genuinely OutOfSync, closed as "orphaned" roughly once a day). The
+// correct closure path for these is reconcileWithAlertManager, which
+// checks the real AlertManager active-alert fingerprint set instead of
+// a name-inventory heuristic, backstopped by the MaxAnalyzingAge /
+// AnalyzingAfter / FixProposedAfter TTLs for tickets no skill resolves.
 func (p *Poller) pruneOrphans(state refreshState) {
 	if p.OrphanAfter <= 0 {
 		return
@@ -515,11 +544,13 @@ func (p *Poller) pruneOrphans(state refreshState) {
 		default:
 			continue
 		}
-		// Orphan pruning is an inventory-membership check; only sources
-		// whose (Tenant, Service) maps to mctl service inventory are
-		// safe. GitHub webhook tickets (and manual tickets) carry repo
-		// metadata or operator-supplied names — never auto-resolve those.
-		if t.Source != ticket.SourceAlertManager && t.Source != ticket.SourcePolling {
+		// Orphan pruning is an inventory-membership check; only
+		// SourcePolling tickets have a Service field guaranteed to use
+		// the same naming as the inventory it's being checked against
+		// (see the pruneOrphans doc comment). GitHub webhook tickets,
+		// manual tickets, and AlertManager tickets all carry names in
+		// a different namespace and must never be auto-resolved here.
+		if t.Source != ticket.SourcePolling {
 			continue
 		}
 		if state.knownServices[t.Tenant+"/"+t.Service] {

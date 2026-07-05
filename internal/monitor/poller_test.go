@@ -493,7 +493,9 @@ func TestPollerKeepsRecentAnalyzingTicket(t *testing.T) {
 
 func TestPrunesOrphanTicketAfterGracePeriod(t *testing.T) {
 	// A ticket on a service NOT in the inventory, past the grace period,
-	// must be resolved with the orphan reason.
+	// must be resolved with the orphan reason. SourcePolling only — see
+	// TestSkipsOrphanPruneForAlertManagerSource for why SourceAlertManager
+	// tickets must never reach this path.
 	store := newTestStore(t)
 	p := NewPoller(nil, store, nil)
 	p.OrphanAfter = 1 * time.Hour
@@ -506,8 +508,8 @@ func TestPrunesOrphanTicketAfterGracePeriod(t *testing.T) {
 	for _, status := range statuses {
 		t.Run(status, func(t *testing.T) {
 			tk := &ticket.Ticket{
-				Source:   ticket.SourceAlertManager,
-				Type:     ticket.TypePodCrashloop,
+				Source:   ticket.SourcePolling,
+				Type:     ticket.TypeArgoCDDegraded,
 				Tenant:   "ovk",
 				Service:  "smoke",
 				Summary:  "synthetic alert",
@@ -556,8 +558,8 @@ func TestKeepsTicketWhoseServiceExists(t *testing.T) {
 	p.OrphanAfter = 1 * time.Hour
 
 	tk := &ticket.Ticket{
-		Source:   ticket.SourceAlertManager,
-		Type:     ticket.TypePodCrashloop,
+		Source:   ticket.SourcePolling,
+		Type:     ticket.TypeArgoCDDegraded,
 		Tenant:   "ovk",
 		Service:  "real-service",
 		Summary:  "real alert",
@@ -579,6 +581,51 @@ func TestKeepsTicketWhoseServiceExists(t *testing.T) {
 	}
 	if got.Status == ticket.StatusResolved {
 		t.Errorf("ticket for known service must not be orphan-pruned; got status=%q", got.Status)
+	}
+}
+
+// TestSkipsOrphanPruneForAlertManagerSource guards the fix for the
+// production bug where AlertManager-sourced tickets (ArgoCD-degraded,
+// pod-crashloop, generic, ...) were force-resolved as "orphaned" once an
+// hour old, even when the underlying alert was genuinely still firing.
+// Their Service field is populated from AlertManager labels (ArgoCD
+// Application name, or extractService(pod)) which never matches
+// mctl-api's bare registered app name — see the doc comment on
+// pruneOrphans. A SourceAlertManager ticket must therefore never be
+// resolved by this pass, no matter how old or how empty the inventory
+// lookup comes back; reconcileWithAlertManager is the correct closure
+// path for these.
+func TestSkipsOrphanPruneForAlertManagerSource(t *testing.T) {
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.OrphanAfter = 1 * time.Hour
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeArgoCDDegraded,
+		Tenant:   "admins",
+		Service:  "admins-mctl-agent",
+		Summary:  "ArgoCD application admins-mctl-agent OutOfSync for 1h",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
+
+	// Inventory has entries, just none matching "admins/admins-mctl-agent"
+	// (the registry's bare app name would be "mctl-agent").
+	state := refreshState{
+		knownServices: map[string]bool{"admins/mctl-web": true},
+	}
+	p.pruneOrphans(state)
+
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Errorf("SourceAlertManager ticket must never be orphan-pruned; got status=%q", got.Status)
 	}
 }
 
@@ -665,8 +712,8 @@ func TestSkipsOrphanPruneOnEmptyInventory(t *testing.T) {
 	p.OrphanAfter = 1 * time.Hour
 
 	tk := &ticket.Ticket{
-		Source:   ticket.SourceAlertManager,
-		Type:     ticket.TypePodCrashloop,
+		Source:   ticket.SourcePolling,
+		Type:     ticket.TypeArgoCDDegraded,
 		Tenant:   "ovk",
 		Service:  "real-service",
 		Summary:  "real alert",
@@ -1214,8 +1261,8 @@ func TestOrphanPrunePropagatesResolveToMctlAPI(t *testing.T) {
 	p.OrphanAfter = time.Hour
 
 	tk := &ticket.Ticket{
-		Source:   ticket.SourceAlertManager,
-		Type:     ticket.TypeResourceLimit,
+		Source:   ticket.SourcePolling,
+		Type:     ticket.TypeArgoCDDegraded,
 		Tenant:   "labs",
 		Service:  "deleted-svc",
 		Summary:  "orphan",
