@@ -433,6 +433,32 @@ func TestQuotaAdjustSkillIgnoresNonResourceLimitTickets(t *testing.T) {
 	}
 }
 
+// TestQuotaAdjustSkillMatchesServiceLessTenantQuotaAlert guards a regression
+// caught by Codex review on the first version of this fix: the shared Type
+// gate must not also require Service != "", because tenant-wide quota
+// alerts (TenantCPUQuotaHigh / TenantMemoryQuotaHigh use `sum by (namespace)`
+// with no pod label) are legitimately service-less and rely on the
+// evidence-based fallback to be diagnosed at all.
+func TestQuotaAdjustSkillMatchesServiceLessTenantQuotaAlert(t *testing.T) {
+	s := NewQuotaAdjustSkill()
+	ctx := context.Background()
+
+	tk := &ticket.Ticket{
+		Type:    ticket.TypeResourceLimit,
+		Tenant:  "labs",
+		Service: "",
+		Summary: "TenantCPUQuotaHigh: labs is at 92% of CPU quota",
+	}
+	highUtilEvidence := skill.NewEvidenceSet([]ticket.Evidence{
+		{Type: "resources", Content: `{"used":{"cpu":"1900m"},"allocated":{"cpu":"2"}}`},
+	})
+
+	result := s.Match(ctx, tk, highUtilEvidence)
+	if !result.Matched {
+		t.Error("must match a service-less TypeResourceLimit ticket via the evidence-based fallback")
+	}
+}
+
 func TestQuotaAdjustSkillFallbackRequiresRealThreshold(t *testing.T) {
 	s := NewQuotaAdjustSkill()
 	ctx := context.Background()

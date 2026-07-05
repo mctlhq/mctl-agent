@@ -50,22 +50,33 @@ func (s *QuotaAdjustSkill) Match(_ context.Context, t *ticket.Ticket, ev skill.E
 	// incident with a misleading "approaching resource quota limits"
 	// diagnosis that beat the real skill for that ticket in the ranked
 	// match (higher confidence than llm_diagnosis's fixed 0.50).
-	if t.Type != ticket.TypeResourceLimit || t.Service == "" {
+	if t.Type != ticket.TypeResourceLimit {
 		return skill.MatchResult{}
 	}
 
-	summary := strings.ToLower(t.Summary)
-	if containsAny(summary, "quota", "memory", "cpu") {
-		return skill.MatchResult{
-			Matched:    true,
-			Confidence: 0.75,
-			Priority:   70,
-			Reason:     "Resource quota alert for tenant service",
+	// The per-service summary-keyword match needs a specific Service to
+	// name in the diagnosis. Tenant-wide quota alerts (TenantCPUQuotaHigh /
+	// TenantMemoryQuotaHigh use `sum by (namespace)`, no pod label) arrive
+	// with Service == "" and must fall through to the evidence-based
+	// check below instead of being rejected outright — they're exactly
+	// the alerts this skill exists to diagnose (Codex P1 on the first
+	// version of this fix, which added Service == "" to this same early
+	// return and made those quota alerts unmatchable everywhere).
+	if t.Service != "" {
+		summary := strings.ToLower(t.Summary)
+		if containsAny(summary, "quota", "memory", "cpu") {
+			return skill.MatchResult{
+				Matched:    true,
+				Confidence: 0.75,
+				Priority:   70,
+				Reason:     "Resource quota alert for tenant service",
+			}
 		}
 	}
 
 	// Fall back to evidence-based detection for resource-limit alerts
-	// whose summary text doesn't include the usual keywords.
+	// whose summary text doesn't include the usual keywords, or that
+	// have no specific Service at all (tenant-wide quota alerts).
 	resources := ev.Get("resources")
 	if resources != "" && isHighUtilization(resources) {
 		return skill.MatchResult{
@@ -136,7 +147,8 @@ func isHighUtilization(resourceJSON string) bool {
 // parseQuantity parses a Kubernetes-style resource quantity ("500m", "2",
 // "256Mi", "3Gi") into a float64 base unit (cores or bytes). Supports the
 // decimal SI suffixes (m, k, M, G, T) and binary suffixes (Ki, Mi, Gi, Ti)
-// used by mctl-api's resource usage responses.
+// used by mctl-api's resource usage responses. Pi and Ei are not handled —
+// no tenant quota in this platform reaches petabyte scale.
 func parseQuantity(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
