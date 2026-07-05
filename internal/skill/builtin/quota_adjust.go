@@ -17,6 +17,8 @@ package builtin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/mctlhq/mctl-agent/internal/skill"
@@ -40,19 +42,30 @@ func (s *QuotaAdjustSkill) RequiredCapabilities() []skill.CapabilityID {
 }
 
 func (s *QuotaAdjustSkill) Match(_ context.Context, t *ticket.Ticket, ev skill.EvidenceSet) skill.MatchResult {
-	if t.Type == ticket.TypeResourceLimit && t.Service != "" {
-		summary := strings.ToLower(t.Summary)
-		if containsAny(summary, "quota", "memory", "cpu") {
-			return skill.MatchResult{
-				Matched:    true,
-				Confidence: 0.75,
-				Priority:   70,
-				Reason:     "Resource quota alert for tenant service",
-			}
+	// Both branches below are quota-specific and must never fire for a
+	// ticket type unrelated to resource pressure. collectEvidence attaches
+	// "resources" evidence to every ticket regardless of type, so without
+	// this gate the fallback branch used to match ArgoCD/generic tickets
+	// too (isHighUtilization was also a no-op — see below), stamping every
+	// incident with a misleading "approaching resource quota limits"
+	// diagnosis that beat the real skill for that ticket in the ranked
+	// match (higher confidence than llm_diagnosis's fixed 0.50).
+	if t.Type != ticket.TypeResourceLimit || t.Service == "" {
+		return skill.MatchResult{}
+	}
+
+	summary := strings.ToLower(t.Summary)
+	if containsAny(summary, "quota", "memory", "cpu") {
+		return skill.MatchResult{
+			Matched:    true,
+			Confidence: 0.75,
+			Priority:   70,
+			Reason:     "Resource quota alert for tenant service",
 		}
 	}
 
-	// Check resource evidence for high utilization.
+	// Fall back to evidence-based detection for resource-limit alerts
+	// whose summary text doesn't include the usual keywords.
 	resources := ev.Get("resources")
 	if resources != "" && isHighUtilization(resources) {
 		return skill.MatchResult{
@@ -86,7 +99,12 @@ func (s *QuotaAdjustSkill) Fix(_ context.Context, _ *ticket.Ticket, _ *skill.Dia
 	return nil, nil // Quota adjustments require manual approval.
 }
 
-// isHighUtilization checks if any resource usage is above 80%.
+// isHighUtilization reports whether any resource key present in both maps
+// has used/allocated >= 0.8. Previously this only checked that both maps
+// were non-empty ("if the JSON contains usage data, it was flagged for a
+// reason") regardless of the actual numbers — since collectEvidence
+// attaches resource evidence to every ticket, that made this true for
+// virtually any tenant and defeated the documented 80% threshold entirely.
 func isHighUtilization(resourceJSON string) bool {
 	var data struct {
 		Used      map[string]string `json:"used"`
@@ -95,6 +113,57 @@ func isHighUtilization(resourceJSON string) bool {
 	if err := json.Unmarshal([]byte(resourceJSON), &data); err != nil {
 		return false
 	}
-	// Simple heuristic — if the JSON contains usage data, it was flagged for a reason.
-	return len(data.Used) > 0 && len(data.Allocated) > 0
+	for key, usedStr := range data.Used {
+		allocStr, ok := data.Allocated[key]
+		if !ok {
+			continue
+		}
+		used, err := parseQuantity(usedStr)
+		if err != nil {
+			continue
+		}
+		allocated, err := parseQuantity(allocStr)
+		if err != nil || allocated <= 0 {
+			continue
+		}
+		if used/allocated >= 0.8 {
+			return true
+		}
+	}
+	return false
+}
+
+// parseQuantity parses a Kubernetes-style resource quantity ("500m", "2",
+// "256Mi", "3Gi") into a float64 base unit (cores or bytes). Supports the
+// decimal SI suffixes (m, k, M, G, T) and binary suffixes (Ki, Mi, Gi, Ti)
+// used by mctl-api's resource usage responses.
+func parseQuantity(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, fmt.Errorf("empty quantity")
+	}
+	suffixes := []struct {
+		suffix string
+		mult   float64
+	}{
+		{"Ki", 1024},
+		{"Mi", 1024 * 1024},
+		{"Gi", 1024 * 1024 * 1024},
+		{"Ti", 1024 * 1024 * 1024 * 1024},
+		{"m", 0.001},
+		{"k", 1000},
+		{"M", 1_000_000},
+		{"G", 1_000_000_000},
+		{"T", 1_000_000_000_000},
+	}
+	for _, sfx := range suffixes {
+		if strings.HasSuffix(s, sfx.suffix) {
+			num, err := strconv.ParseFloat(strings.TrimSuffix(s, sfx.suffix), 64)
+			if err != nil {
+				return 0, err
+			}
+			return num * sfx.mult, nil
+		}
+	}
+	return strconv.ParseFloat(s, 64)
 }

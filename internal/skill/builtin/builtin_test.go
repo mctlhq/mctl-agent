@@ -404,6 +404,77 @@ func TestQuotaAdjustSkillMatch(t *testing.T) {
 	}
 }
 
+// TestQuotaAdjustSkillIgnoresNonResourceLimitTickets guards the production
+// bug where quota_adjust matched ANY ticket type (ArgoCD-degraded, generic,
+// ...) whenever "resources" evidence was present, because (a) the fallback
+// branch had no Type gate and (b) isHighUtilization only checked that the
+// used/allocated maps were non-empty rather than computing a real ratio.
+// collectEvidence attaches "resources" evidence to every ticket regardless
+// of type, so this made quota_adjust win the ranked-skill sort (confidence
+// 0.70) over the real diagnosis for unrelated incidents, stamping them with
+// a misleading "approaching resource quota limits" analysis.
+func TestQuotaAdjustSkillIgnoresNonResourceLimitTickets(t *testing.T) {
+	s := NewQuotaAdjustSkill()
+	ctx := context.Background()
+
+	highUtilEvidence := skill.NewEvidenceSet([]ticket.Evidence{
+		{Type: "resources", Content: `{"used":{"cpu":"1800m"},"allocated":{"cpu":"2"}}`},
+	})
+
+	for _, tk := range []*ticket.Ticket{
+		{Type: ticket.TypeArgoCDDegraded, Tenant: "admins", Service: "admins-mctl-agent", Summary: "ArgoCD OutOfSync"},
+		{Type: ticket.TypeGeneric, Tenant: "monitoring", Service: "", Summary: "Vmagent has scrape_pool with 0 targets"},
+		{Type: ticket.TypeGeneric, Tenant: "labs", Service: "labs-mctl-telegram-base-service", Summary: "no tool invocations for 15 minutes"},
+	} {
+		result := s.Match(ctx, tk, highUtilEvidence)
+		if result.Matched {
+			t.Errorf("type=%s: quota_adjust must not match a non-resource-limit ticket even with high-utilization evidence, got %+v", tk.Type, result)
+		}
+	}
+}
+
+func TestQuotaAdjustSkillFallbackRequiresRealThreshold(t *testing.T) {
+	s := NewQuotaAdjustSkill()
+	ctx := context.Background()
+	tk := &ticket.Ticket{Type: ticket.TypeResourceLimit, Service: "app-1", Summary: "resource pressure detected"}
+
+	low := skill.NewEvidenceSet([]ticket.Evidence{
+		{Type: "resources", Content: `{"used":{"cpu":"200m","memory":"128Mi"},"allocated":{"cpu":"2","memory":"1Gi"}}`},
+	})
+	if result := s.Match(ctx, tk, low); result.Matched {
+		t.Errorf("must not match at 10%% cpu / 12%% memory utilization, got %+v", result)
+	}
+
+	high := skill.NewEvidenceSet([]ticket.Evidence{
+		{Type: "resources", Content: `{"used":{"cpu":"200m","memory":"900Mi"},"allocated":{"cpu":"2","memory":"1Gi"}}`},
+	})
+	if result := s.Match(ctx, tk, high); !result.Matched {
+		t.Error("must match when memory utilization is 90% (>= 80% threshold)")
+	}
+}
+
+func TestIsHighUtilization(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want bool
+	}{
+		{"below threshold", `{"used":{"cpu":"500m"},"allocated":{"cpu":"2"}}`, false},
+		{"at threshold", `{"used":{"cpu":"1600m"},"allocated":{"cpu":"2"}}`, true},
+		{"binary suffix above threshold", `{"used":{"memory":"3800Mi"},"allocated":{"memory":"4Gi"}}`, true},
+		{"malformed json", `not-json`, false},
+		{"empty maps", `{"used":{},"allocated":{}}`, false},
+		{"key missing from allocated", `{"used":{"cpu":"1900m"},"allocated":{"memory":"1Gi"}}`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isHighUtilization(tt.json); got != tt.want {
+				t.Errorf("isHighUtilization(%s) = %v, want %v", tt.json, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestAutoMergeSafe(t *testing.T) {
 	tests := []struct {
 		name  string
