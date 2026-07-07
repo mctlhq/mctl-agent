@@ -1,0 +1,62 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v5
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      - name: Generate Platform App token
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        id: app
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-gitops
+
+      - name: Dispatch centralized release-deploy
+        if: ${{ steps.release.outputs.release_created == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          gh workflow run release-deploy.yaml \
+            --repo mctlhq/mctl-gitops \
+            --ref main \
+            -f repo=mctlhq/mctl-agent \
+            -f git_ref="$TAG" \
+            -f image_name=ghcr.io/mctlhq/mctl-agent \
+            -f image_tag="$TAG" \
+            -f team_name=admins \
+            -f component_name=mctl-agent \
+            -f values_path=platform-gitops/bootstrap/templates/mctl-platform/mctl-agent.yaml
+
+      - name: Notify Telegram on release/deploy failure
+        if: ${{ failure() && steps.release.outputs.release_created == 'true' }}
+        uses: appleboy/telegram-action@221e6b684967abe813051ee4a37dd61770a83ad3 # v1.0.1
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          message: |
+            ❌ *mctl-agent release-deploy dispatch failed*
+            Tag `${{ steps.release.outputs.tag_name }}` was created but the centralized deploy did not dispatch.
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
