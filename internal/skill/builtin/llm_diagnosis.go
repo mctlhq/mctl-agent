@@ -113,12 +113,7 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		}, nil
 	}
 
-	// Route to model based on ticket type.
-	// Fast + cheap for well-understood types; Sonnet for generic/complex.
-	model := "claude-sonnet-4-6"
-	if t.Type == ticket.TypePodCrashloop || t.Type == ticket.TypeResourceLimit {
-		model = "claude-haiku-4-5-20251001"
-	}
+	model := "claude-sonnet-5"
 
 	userMsg := buildUserMessage(t, ev)
 
