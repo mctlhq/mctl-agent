@@ -113,18 +113,16 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		}, nil
 	}
 
-	// Route to model based on ticket type.
-	// Fast + cheap for well-understood types; Sonnet for generic/complex.
-	model := "claude-sonnet-4-6"
-	if t.Type == ticket.TypePodCrashloop || t.Type == ticket.TypeResourceLimit {
-		model = "claude-haiku-4-5-20251001"
-	}
+	model := "claude-sonnet-5"
 
 	userMsg := buildUserMessage(t, ev)
 
 	reqBody := map[string]interface{}{
-		"model":      model,
-		"max_tokens": 1024,
+		"model": model,
+		// Sonnet 5's thinking budget is drawn from the same max_tokens cap
+		// as the final text, so 1024 risks leaving no room for the JSON
+		// diagnosis on nontrivial tickets. Give it headroom.
+		"max_tokens": 4096,
 		"system":     systemPrompt,
 		"messages": []map[string]string{
 			{"role": "user", "content": userMsg},
@@ -162,6 +160,7 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 
 	var apiResp struct {
 		Content []struct {
+			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	}
@@ -169,11 +168,19 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		return nil, fmt.Errorf("parsing claude response: %w", err)
 	}
 
-	if len(apiResp.Content) == 0 {
-		return nil, fmt.Errorf("empty claude response")
+	// Extended-thinking models can return a thinking block before the text
+	// block, so pick the first block whose type is actually "text" instead
+	// of blindly indexing element 0.
+	var text string
+	for _, block := range apiResp.Content {
+		if block.Type == "text" {
+			text = block.Text
+			break
+		}
 	}
-
-	text := apiResp.Content[0].Text
+	if text == "" {
+		return nil, fmt.Errorf("no text block in claude response")
+	}
 
 	var result skill.DiagnosisResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
