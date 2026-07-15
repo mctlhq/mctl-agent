@@ -118,8 +118,11 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 	userMsg := buildUserMessage(t, ev)
 
 	reqBody := map[string]interface{}{
-		"model":      model,
-		"max_tokens": 1024,
+		"model": model,
+		// Sonnet 5's thinking budget is drawn from the same max_tokens cap
+		// as the final text, so 1024 risks leaving no room for the JSON
+		// diagnosis on nontrivial tickets. Give it headroom.
+		"max_tokens": 4096,
 		"system":     systemPrompt,
 		"messages": []map[string]string{
 			{"role": "user", "content": userMsg},
