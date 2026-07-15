@@ -157,6 +157,7 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 
 	var apiResp struct {
 		Content []struct {
+			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
 	}
@@ -164,11 +165,19 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		return nil, fmt.Errorf("parsing claude response: %w", err)
 	}
 
-	if len(apiResp.Content) == 0 {
-		return nil, fmt.Errorf("empty claude response")
+	// Extended-thinking models can return a thinking block before the text
+	// block, so pick the first block whose type is actually "text" instead
+	// of blindly indexing element 0.
+	var text string
+	for _, block := range apiResp.Content {
+		if block.Type == "text" {
+			text = block.Text
+			break
+		}
 	}
-
-	text := apiResp.Content[0].Text
+	if text == "" {
+		return nil, fmt.Errorf("no text block in claude response")
+	}
 
 	var result skill.DiagnosisResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
