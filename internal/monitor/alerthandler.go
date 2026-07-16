@@ -119,11 +119,70 @@ func (h *AlertHandler) processAlert(a alert) {
 		}
 	}
 
+	// Some VMRules (absent() checks with no label matcher, e.g.
+	// MctlAgentMetricsAbsent, OpenclawLlmMetricsAbsent) produce alerts with
+	// no `namespace` label at all — PromQL's absent() has nothing to
+	// inherit labels from when the series doesn't exist. mctl-api's
+	// POST /api/v1/incidents rejects an empty tenant as a missing required
+	// field (400), so PublishAlert silently drops these tickets (error is
+	// logged and swallowed, fire-and-forget) even though they're created
+	// fine locally and notified via Telegram. We don't know the real owning
+	// tenant here (it varies per alert: mctl-agent's own metrics belong to
+	// admins, openclaw's to labs, etc. — see mctl-gitops
+	// vm-rules/mctl-agent-cleanup-alerts.yaml and openclaw-llm-alerts.yaml),
+	// so fall back to a generic non-empty placeholder rather than guessing
+	// wrong. Applied before the resolved-alert branch too, so a later
+	// "resolved" webhook for the same alert still matches on the same
+	// (tenant, service, type) dedup key.
+	if tenant == "" {
+		tenant = "platform"
+	}
+
+	// Alerts with neither a namespace nor a pod label (the same absent()
+	// alerts the tenant fallback above handles) also have service="" here.
+	// classifyAlert's default case maps most alertnames to TypeGeneric, so
+	// without this, MctlAgentMetricsAbsent and OpenclawLlmMetricsAbsent
+	// would both collapse onto the identical dedup/resolve key
+	// (tenant="platform", service="", type=generic) — FindDuplicate/
+	// ResolveByTenantService key on (tenant, service, type) only, not
+	// alertName, so whichever fires first would "win" the ticket and a
+	// resolved webhook for either would incorrectly resolve the other's.
+	// Falling back service to alertName keeps distinct label-less alerts on
+	// distinct keys without touching alerts that already have a real
+	// service (e.g. ScrapePoolHasNoTargets, which has namespace set but no
+	// pod — untouched since namespace != "" here).
+	//
+	// Excluded: TypeResourceLimit. NodeHighCPU/NodeHighMemory/
+	// NodeDiskPressure/VaultSealed are node- or cluster-level alerts with
+	// no namespace/pod either, but isInfraAlert() (pipeline.go) treats
+	// "TypeResourceLimit + empty Service" as its signal to route the
+	// ticket manual-only instead of auto-fixing it. Giving them a
+	// non-empty service here would silently opt them into cpu_throttle's
+	// Match() (any TypeResourceLimit ticket whose summary contains "cpu"),
+	// which is meant for pod-level CPU limits, not node hardware — found
+	// by Codex review on this PR.
+	if service == "" && namespace == "" && pod == "" && tType != ticket.TypeResourceLimit {
+		service = alertName
+	}
+
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
 		ids, err := h.store.ResolveByTenantService(tenant, service, tType)
 		if err != nil {
 			slog.Error("failed to resolve tickets", "error", err, "tenant", tenant, "service", service)
+		}
+		// Migration fallback: a ticket created before the tenant/service
+		// fallbacks above existed may still sit on the old fully-empty
+		// ("", "") key. Only tried when this resolve is for a labelless
+		// alert (namespace and pod both empty — the case the fallbacks
+		// rewrite) and the rewritten key found nothing; becomes a no-op
+		// once pre-rollout tickets have aged out or resolved.
+		if len(ids) == 0 && namespace == "" && pod == "" {
+			legacyIDs, legacyErr := h.store.ResolveByTenantService("", "", tType)
+			if legacyErr != nil {
+				slog.Error("failed to resolve legacy empty-tenant tickets", "error", legacyErr)
+			}
+			ids = append(ids, legacyIDs...)
 		}
 		slog.Info("resolved tickets for alert",
 			"alertname", alertName, "tenant", tenant, "service", service, "count", len(ids))

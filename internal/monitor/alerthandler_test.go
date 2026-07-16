@@ -138,6 +138,189 @@ func TestAlertHandlerServeHTTP(t *testing.T) {
 	}
 }
 
+func TestAlertHandlerEmptyNamespaceTenantFallback(t *testing.T) {
+	// absent()-style VMRules (MctlAgentMetricsAbsent, OpenclawLlmMetricsAbsent)
+	// fire with no `namespace` label at all — there's no series to inherit
+	// one from. mctl-api rejects an empty tenant as a missing required
+	// field, so these tickets must get a non-empty placeholder tenant to
+	// survive PublishAlert.
+	store := newTestStore(t)
+
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname": "MctlAgentMetricsAbsent",
+				},
+				Annotations: map[string]string{
+					"summary": "mctl_agent_open_tickets gauge series missing for 30m",
+				},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket callback, got %d", len(received))
+	}
+	if received[0].Tenant != "platform" {
+		t.Errorf("expected tenant fallback to %q, got %q", "platform", received[0].Tenant)
+	}
+	if received[0].Service != "MctlAgentMetricsAbsent" {
+		t.Errorf("expected service fallback to alertName %q, got %q", "MctlAgentMetricsAbsent", received[0].Service)
+	}
+}
+
+func TestAlertHandlerResolvesLegacyEmptyTenantTicket(t *testing.T) {
+	// A ticket created before the tenant/service fallbacks existed sits on
+	// the old fully-empty ("", "") key. A resolved webhook for the same
+	// labelless alert now resolves under ("platform", alertName) and finds
+	// nothing there — it must fall back to the legacy key so pre-rollout
+	// tickets don't get stuck open forever.
+	store := newTestStore(t)
+	legacy := &ticket.Ticket{
+		Source:    ticket.SourceAlertManager,
+		AlertName: "MctlAgentMetricsAbsent",
+		Type:      ticket.TypeGeneric,
+		Tenant:    "",
+		Service:   "",
+		Summary:   "mctl_agent_open_tickets gauge series missing for 30m",
+		Severity:  ticket.SeverityWarning,
+	}
+	if err := store.Create(legacy); err != nil {
+		t.Fatalf("failed to seed legacy ticket: %v", err)
+	}
+
+	var resolvedIDs []string
+	handler := NewAlertHandler(store, nil)
+	handler.OnResolve = func(ids []string) { resolvedIDs = append(resolvedIDs, ids...) }
+
+	payload := alertManagerPayload{
+		Status: "resolved",
+		Alerts: []alert{
+			{
+				Status:      "resolved",
+				Labels:      map[string]string{"alertname": "MctlAgentMetricsAbsent"},
+				Annotations: map[string]string{"summary": "mctl_agent_open_tickets gauge series missing for 30m"},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if len(resolvedIDs) != 1 || resolvedIDs[0] != legacy.ID {
+		t.Fatalf("expected legacy ticket %q to be resolved, got %v", legacy.ID, resolvedIDs)
+	}
+	got, err := store.Get(legacy.ID)
+	if err != nil {
+		t.Fatalf("failed to reload ticket: %v", err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("expected legacy ticket status resolved, got %q", got.Status)
+	}
+}
+
+func TestAlertHandlerLabellessAlertsDoNotCollide(t *testing.T) {
+	// Two distinct absent()-style alerts with no namespace/pod label both
+	// fall through classifyAlert's default (TypeGeneric). Without the
+	// service=alertName fallback they'd share the same
+	// (tenant="platform", service="", type=generic) dedup key and the
+	// second would be silently treated as a duplicate of the first.
+	store := newTestStore(t)
+
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status:      "firing",
+				Labels:      map[string]string{"alertname": "MctlAgentMetricsAbsent"},
+				Annotations: map[string]string{"summary": "mctl_agent_open_tickets gauge series missing for 30m"},
+			},
+			{
+				Status:      "firing",
+				Labels:      map[string]string{"alertname": "OpenclawLlmMetricsAbsent"},
+				Annotations: map[string]string{"summary": "openclaw_llm_* metric series missing for 30m"},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if len(received) != 2 {
+		t.Fatalf("expected 2 distinct tickets, got %d", len(received))
+	}
+	if received[0].Service == received[1].Service {
+		t.Errorf("expected distinct services to avoid dedup collision, both got %q", received[0].Service)
+	}
+}
+
+func TestAlertHandlerNodeInfraAlertsStayServiceLess(t *testing.T) {
+	// NodeHighCPU (and its siblings NodeHighMemory/NodeDiskPressure/
+	// VaultSealed) have no namespace/pod label either, but they classify
+	// as TypeResourceLimit, where isInfraAlert() (pipeline.go) treats an
+	// empty Service as the signal to route the ticket manual-only instead
+	// of matching it to cpu_throttle's auto-fix path. The alertName
+	// fallback must not override that.
+	store := newTestStore(t)
+
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status:      "firing",
+				Labels:      map[string]string{"alertname": "NodeHighCPU"},
+				Annotations: map[string]string{"summary": "node cpu high"},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(received))
+	}
+	if received[0].Service != "" {
+		t.Errorf("expected NodeHighCPU to stay service-less (isInfraAlert gate), got %q", received[0].Service)
+	}
+	if received[0].Type != ticket.TypeResourceLimit {
+		t.Fatalf("test setup: expected TypeResourceLimit, got %q", received[0].Type)
+	}
+}
+
 func TestAlertHandlerArgoCDLabels(t *testing.T) {
 	// ArgoCD app health alerts must extract the application name from
 	// `name` (and namespace from `dest_namespace`) instead of the
