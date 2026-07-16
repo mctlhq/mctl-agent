@@ -161,6 +161,19 @@ func (h *AlertHandler) processAlert(a alert) {
 		if err != nil {
 			slog.Error("failed to resolve tickets", "error", err, "tenant", tenant, "service", service)
 		}
+		// Migration fallback: a ticket created before the tenant/service
+		// fallbacks above existed may still sit on the old fully-empty
+		// ("", "") key. Only tried when this resolve is for a labelless
+		// alert (namespace and pod both empty — the case the fallbacks
+		// rewrite) and the rewritten key found nothing; becomes a no-op
+		// once pre-rollout tickets have aged out or resolved.
+		if len(ids) == 0 && namespace == "" && pod == "" {
+			legacyIDs, legacyErr := h.store.ResolveByTenantService("", "", tType)
+			if legacyErr != nil {
+				slog.Error("failed to resolve legacy empty-tenant tickets", "error", legacyErr)
+			}
+			ids = append(ids, legacyIDs...)
+		}
 		slog.Info("resolved tickets for alert",
 			"alertname", alertName, "tenant", tenant, "service", service, "count", len(ids))
 		if len(ids) > 0 && h.OnResolve != nil {
