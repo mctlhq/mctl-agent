@@ -138,6 +138,23 @@ func (h *AlertHandler) processAlert(a alert) {
 		tenant = "platform"
 	}
 
+	// Alerts with neither a namespace nor a pod label (the same absent()
+	// alerts the tenant fallback above handles) also have service="" here.
+	// classifyAlert's default case maps most alertnames to TypeGeneric, so
+	// without this, MctlAgentMetricsAbsent and OpenclawLlmMetricsAbsent
+	// would both collapse onto the identical dedup/resolve key
+	// (tenant="platform", service="", type=generic) — FindDuplicate/
+	// ResolveByTenantService key on (tenant, service, type) only, not
+	// alertName, so whichever fires first would "win" the ticket and a
+	// resolved webhook for either would incorrectly resolve the other's.
+	// Falling back service to alertName keeps distinct label-less alerts on
+	// distinct keys without touching alerts that already have a real
+	// service (e.g. ScrapePoolHasNoTargets, which has namespace set but no
+	// pod — untouched since namespace != "" here).
+	if service == "" && namespace == "" && pod == "" {
+		service = alertName
+	}
+
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
 		ids, err := h.store.ResolveByTenantService(tenant, service, tType)

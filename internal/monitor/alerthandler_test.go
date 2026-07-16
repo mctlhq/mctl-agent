@@ -178,8 +178,51 @@ func TestAlertHandlerEmptyNamespaceTenantFallback(t *testing.T) {
 	if received[0].Tenant != "platform" {
 		t.Errorf("expected tenant fallback to %q, got %q", "platform", received[0].Tenant)
 	}
-	if received[0].Service != "" {
-		t.Errorf("expected empty service, got %q", received[0].Service)
+	if received[0].Service != "MctlAgentMetricsAbsent" {
+		t.Errorf("expected service fallback to alertName %q, got %q", "MctlAgentMetricsAbsent", received[0].Service)
+	}
+}
+
+func TestAlertHandlerLabellessAlertsDoNotCollide(t *testing.T) {
+	// Two distinct absent()-style alerts with no namespace/pod label both
+	// fall through classifyAlert's default (TypeGeneric). Without the
+	// service=alertName fallback they'd share the same
+	// (tenant="platform", service="", type=generic) dedup key and the
+	// second would be silently treated as a duplicate of the first.
+	store := newTestStore(t)
+
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status:      "firing",
+				Labels:      map[string]string{"alertname": "MctlAgentMetricsAbsent"},
+				Annotations: map[string]string{"summary": "mctl_agent_open_tickets gauge series missing for 30m"},
+			},
+			{
+				Status:      "firing",
+				Labels:      map[string]string{"alertname": "OpenclawLlmMetricsAbsent"},
+				Annotations: map[string]string{"summary": "openclaw_llm_* metric series missing for 30m"},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if len(received) != 2 {
+		t.Fatalf("expected 2 distinct tickets, got %d", len(received))
+	}
+	if received[0].Service == received[1].Service {
+		t.Errorf("expected distinct services to avoid dedup collision, both got %q", received[0].Service)
 	}
 }
 
