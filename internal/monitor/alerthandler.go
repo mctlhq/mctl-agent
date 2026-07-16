@@ -119,6 +119,25 @@ func (h *AlertHandler) processAlert(a alert) {
 		}
 	}
 
+	// Some VMRules (absent() checks with no label matcher, e.g.
+	// MctlAgentMetricsAbsent, OpenclawLlmMetricsAbsent) produce alerts with
+	// no `namespace` label at all — PromQL's absent() has nothing to
+	// inherit labels from when the series doesn't exist. mctl-api's
+	// POST /api/v1/incidents rejects an empty tenant as a missing required
+	// field (400), so PublishAlert silently drops these tickets (error is
+	// logged and swallowed, fire-and-forget) even though they're created
+	// fine locally and notified via Telegram. We don't know the real owning
+	// tenant here (it varies per alert: mctl-agent's own metrics belong to
+	// admins, openclaw's to labs, etc. — see mctl-gitops
+	// vm-rules/mctl-agent-cleanup-alerts.yaml and openclaw-llm-alerts.yaml),
+	// so fall back to a generic non-empty placeholder rather than guessing
+	// wrong. Applied before the resolved-alert branch too, so a later
+	// "resolved" webhook for the same alert still matches on the same
+	// (tenant, service, type) dedup key.
+	if tenant == "" {
+		tenant = "platform"
+	}
+
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
 		ids, err := h.store.ResolveByTenantService(tenant, service, tType)

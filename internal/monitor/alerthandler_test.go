@@ -138,6 +138,51 @@ func TestAlertHandlerServeHTTP(t *testing.T) {
 	}
 }
 
+func TestAlertHandlerEmptyNamespaceTenantFallback(t *testing.T) {
+	// absent()-style VMRules (MctlAgentMetricsAbsent, OpenclawLlmMetricsAbsent)
+	// fire with no `namespace` label at all — there's no series to inherit
+	// one from. mctl-api rejects an empty tenant as a missing required
+	// field, so these tickets must get a non-empty placeholder tenant to
+	// survive PublishAlert.
+	store := newTestStore(t)
+
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname": "MctlAgentMetricsAbsent",
+				},
+				Annotations: map[string]string{
+					"summary": "mctl_agent_open_tickets gauge series missing for 30m",
+				},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket callback, got %d", len(received))
+	}
+	if received[0].Tenant != "platform" {
+		t.Errorf("expected tenant fallback to %q, got %q", "platform", received[0].Tenant)
+	}
+	if received[0].Service != "" {
+		t.Errorf("expected empty service, got %q", received[0].Service)
+	}
+}
+
 func TestAlertHandlerArgoCDLabels(t *testing.T) {
 	// ArgoCD app health alerts must extract the application name from
 	// `name` (and namespace from `dest_namespace`) instead of the
