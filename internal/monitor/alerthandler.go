@@ -151,7 +151,17 @@ func (h *AlertHandler) processAlert(a alert) {
 	// distinct keys without touching alerts that already have a real
 	// service (e.g. ScrapePoolHasNoTargets, which has namespace set but no
 	// pod — untouched since namespace != "" here).
-	if service == "" && namespace == "" && pod == "" {
+	//
+	// Excluded: TypeResourceLimit. NodeHighCPU/NodeHighMemory/
+	// NodeDiskPressure/VaultSealed are node- or cluster-level alerts with
+	// no namespace/pod either, but isInfraAlert() (pipeline.go) treats
+	// "TypeResourceLimit + empty Service" as its signal to route the
+	// ticket manual-only instead of auto-fixing it. Giving them a
+	// non-empty service here would silently opt them into cpu_throttle's
+	// Match() (any TypeResourceLimit ticket whose summary contains "cpu"),
+	// which is meant for pod-level CPU limits, not node hardware — found
+	// by Codex review on this PR.
+	if service == "" && namespace == "" && pod == "" && tType != ticket.TypeResourceLimit {
 		service = alertName
 	}
 

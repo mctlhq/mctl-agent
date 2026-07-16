@@ -279,6 +279,48 @@ func TestAlertHandlerLabellessAlertsDoNotCollide(t *testing.T) {
 	}
 }
 
+func TestAlertHandlerNodeInfraAlertsStayServiceLess(t *testing.T) {
+	// NodeHighCPU (and its siblings NodeHighMemory/NodeDiskPressure/
+	// VaultSealed) have no namespace/pod label either, but they classify
+	// as TypeResourceLimit, where isInfraAlert() (pipeline.go) treats an
+	// empty Service as the signal to route the ticket manual-only instead
+	// of matching it to cpu_throttle's auto-fix path. The alertName
+	// fallback must not override that.
+	store := newTestStore(t)
+
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status:      "firing",
+				Labels:      map[string]string{"alertname": "NodeHighCPU"},
+				Annotations: map[string]string{"summary": "node cpu high"},
+			},
+		},
+	}
+
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(received))
+	}
+	if received[0].Service != "" {
+		t.Errorf("expected NodeHighCPU to stay service-less (isInfraAlert gate), got %q", received[0].Service)
+	}
+	if received[0].Type != ticket.TypeResourceLimit {
+		t.Fatalf("test setup: expected TypeResourceLimit, got %q", received[0].Type)
+	}
+}
+
 func TestAlertHandlerArgoCDLabels(t *testing.T) {
 	// ArgoCD app health alerts must extract the application name from
 	// `name` (and namespace from `dest_namespace`) instead of the
