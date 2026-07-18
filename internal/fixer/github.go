@@ -184,6 +184,22 @@ func (f *GitHubFixer) ClosePR(ctx context.Context, prNumber int, reason string) 
 	return err
 }
 
+// ListDir returns the names of entries in a repo directory at the given ref.
+func (f *GitHubFixer) ListDir(ctx context.Context, path, ref string) ([]string, error) {
+	_, dirContent, _, err := f.client.Repositories.GetContents(ctx, f.owner, f.repo, path,
+		&github.RepositoryContentGetOptions{Ref: ref})
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(dirContent))
+	for _, entry := range dirContent {
+		if entry.GetType() == "dir" {
+			names = append(names, entry.GetName())
+		}
+	}
+	return names, nil
+}
+
 // GetFileContent fetches a file from the repo.
 func (f *GitHubFixer) GetFileContent(ctx context.Context, path, ref string) (string, error) {
 	fileContent, _, _, err := f.client.Repositories.GetContents(ctx, f.owner, f.repo, path,
