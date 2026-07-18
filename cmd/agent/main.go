@@ -31,12 +31,14 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/monitor"
 	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/optimizer"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/skill/builtin"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	yamlskill "github.com/mctlhq/mctl-agent/internal/skill/yaml"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
+	"github.com/mctlhq/mctl-agent/internal/vmetrics"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
@@ -139,6 +141,21 @@ func main() {
 	// Remote skill manager.
 	remoteMgr := remote.NewManager(registry)
 
+	// Resource optimizer (opt-in via OPTIMIZER_ENABLED).
+	var opt *optimizer.Optimizer
+	if cfg.Optimizer.Enabled {
+		optStore, err := optimizer.NewStore(store.DB(), store.Dialect())
+		if err != nil {
+			slog.Error("failed to initialize optimizer store", "error", err)
+			os.Exit(1)
+		}
+		vmClient := &vmetrics.Client{
+			BaseURL: cfg.VictoriaMetricsURL,
+			Timeout: 30 * time.Second,
+		}
+		opt = optimizer.New(optStore, store, vmClient, githubFixer, telegram, cfg.Optimizer)
+	}
+
 	// Router.
 	routerOpts := agentapi.Options{
 		Store:         store,
@@ -148,6 +165,7 @@ func main() {
 		RemoteManager: remoteMgr,
 		WebhookStore:  webhookStore,
 		WebhookTTL:    cfg.WebhookDefaultTTL,
+		Optimizer:     opt,
 		OnAlert:       alertHandler.ServeHTTP,
 	}
 	if ghWebhookHandler != nil {
@@ -173,6 +191,11 @@ func main() {
 
 	// Daily digest at 09:00 UTC.
 	go runDailyDigest(ctx, store, telegram)
+
+	// Optimizer loops (collector, recommender, evaluator).
+	if opt != nil {
+		go opt.Run(ctx)
+	}
 
 	// Start server.
 	go func() {

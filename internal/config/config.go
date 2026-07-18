@@ -22,38 +22,38 @@ import (
 )
 
 type Config struct {
-	Port                    string
-	MctlAPIURL              string
-	MctlAPIToken            string
-	AnthropicAPIKey         string
-	GitHubToken             string
-	GitHubOwner             string
-	GitHubRepo              string
-	GitHubWebhookSecret     string
-	TelegramBotToken        string
-	TelegramChatID          string            // global default fallback
-	TelegramTenantChatIDs   map[string]string // per-tenant routing (admins/labs/ovk → chat_id)
-	OpenClawBotUsername     string
-	PollInterval            time.Duration
-	DryRun                  bool
-	DatabaseURL             string
-	MaxPRPerHour            int
-	MaxPRPerDay             int
-	AutoMergeEnabled        bool
-	EscalationTag           string
-	WebhookEnabled          bool
-	WebhookCallbackURL      string
-	WebhookDefaultTTL       time.Duration
-	AlertFlapCooldown       time.Duration
+	Port                        string
+	MctlAPIURL                  string
+	MctlAPIToken                string
+	AnthropicAPIKey             string
+	GitHubToken                 string
+	GitHubOwner                 string
+	GitHubRepo                  string
+	GitHubWebhookSecret         string
+	TelegramBotToken            string
+	TelegramChatID              string            // global default fallback
+	TelegramTenantChatIDs       map[string]string // per-tenant routing (admins/labs/ovk → chat_id)
+	OpenClawBotUsername         string
+	PollInterval                time.Duration
+	DryRun                      bool
+	DatabaseURL                 string
+	MaxPRPerHour                int
+	MaxPRPerDay                 int
+	AutoMergeEnabled            bool
+	EscalationTag               string
+	WebhookEnabled              bool
+	WebhookCallbackURL          string
+	WebhookDefaultTTL           time.Duration
+	AlertFlapCooldown           time.Duration
 	AutoResolveStaleAfter       time.Duration
 	AutoResolveAnalyzingAfter   time.Duration
 	AutoResolveFixProposedAfter time.Duration
 	AutoResolveOrphanAfter      time.Duration
 	AlertIgnoreServiceRegex     string
-	AlertManagerURL    string
-	AMReconcileEnabled bool
-	AMReconcileTimeout time.Duration
-	AMReconcileMinAge  time.Duration
+	AlertManagerURL             string
+	AMReconcileEnabled          bool
+	AMReconcileTimeout          time.Duration
+	AMReconcileMinAge           time.Duration
 	// MaxAnalyzingAge is an absolute TTL for tickets stuck in StatusAnalyzing,
 	// measured from CreatedAt (not reset by flapping alert heartbeats).
 	// Zero disables the cap. Env: MAX_ANALYZING_AGE (e.g. "120h").
@@ -218,41 +218,41 @@ func Load() Config {
 	}
 
 	return Config{
-		Port:                    envOr("PORT", "8081"),
-		MctlAPIURL:              envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
-		MctlAPIToken:            mctlAPIToken,
-		AnthropicAPIKey:         os.Getenv("ANTHROPIC_API_KEY"),
-		GitHubToken:             githubToken,
-		GitHubOwner:             envOr("GITHUB_OWNER", "mctlhq"),
-		GitHubRepo:              envOr("GITHUB_REPO", "mctl-gitops"),
-		GitHubWebhookSecret:     os.Getenv("GITHUB_WEBHOOK_SECRET"),
-		TelegramBotToken:        os.Getenv("TELEGRAM_BOT_TOKEN"),
-		TelegramChatID:          os.Getenv("TELEGRAM_CHAT_ID"),
-		TelegramTenantChatIDs:   parseTenantChatIDs(),
-		OpenClawBotUsername:     envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
-		PollInterval:            pollInterval,
-		DryRun:                  dryRun,
-		DatabaseURL:             dbURL,
-		MaxPRPerHour:            maxPRPerHour,
-		MaxPRPerDay:             maxPRPerDay,
-		AutoMergeEnabled:        autoMergeEnabled,
-		EscalationTag:           envOr("ESCALATION_TAG", "@mashkovd"),
-		WebhookEnabled:          webhookEnabled,
-		WebhookCallbackURL:      envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
-		WebhookDefaultTTL:       webhookDefaultTTL,
-		AlertFlapCooldown:       alertFlapCooldown,
+		Port:                        envOr("PORT", "8081"),
+		MctlAPIURL:                  envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
+		MctlAPIToken:                mctlAPIToken,
+		AnthropicAPIKey:             os.Getenv("ANTHROPIC_API_KEY"),
+		GitHubToken:                 githubToken,
+		GitHubOwner:                 envOr("GITHUB_OWNER", "mctlhq"),
+		GitHubRepo:                  envOr("GITHUB_REPO", "mctl-gitops"),
+		GitHubWebhookSecret:         os.Getenv("GITHUB_WEBHOOK_SECRET"),
+		TelegramBotToken:            os.Getenv("TELEGRAM_BOT_TOKEN"),
+		TelegramChatID:              os.Getenv("TELEGRAM_CHAT_ID"),
+		TelegramTenantChatIDs:       parseTenantChatIDs(),
+		OpenClawBotUsername:         envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
+		PollInterval:                pollInterval,
+		DryRun:                      dryRun,
+		DatabaseURL:                 dbURL,
+		MaxPRPerHour:                maxPRPerHour,
+		MaxPRPerDay:                 maxPRPerDay,
+		AutoMergeEnabled:            autoMergeEnabled,
+		EscalationTag:               envOr("ESCALATION_TAG", "@mashkovd"),
+		WebhookEnabled:              webhookEnabled,
+		WebhookCallbackURL:          envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
+		WebhookDefaultTTL:           webhookDefaultTTL,
+		AlertFlapCooldown:           alertFlapCooldown,
 		AutoResolveStaleAfter:       autoResolveStaleAfter,
 		AutoResolveAnalyzingAfter:   autoResolveAnalyzingAfter,
 		AutoResolveFixProposedAfter: autoResolveFixProposedAfter,
 		AutoResolveOrphanAfter:      autoResolveOrphanAfter,
 		AlertIgnoreServiceRegex:     alertIgnoreServiceRegex,
-		AlertManagerURL:    alertManagerURL,
-		AMReconcileEnabled: amReconcileEnabled,
-		AMReconcileTimeout: amReconcileTimeout,
-		AMReconcileMinAge:  amReconcileMinAge,
-		MaxAnalyzingAge:    maxAnalyzingAge,
-		VictoriaMetricsURL: envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc.cluster.local:8428"),
-		Optimizer:          optimizer,
+		AlertManagerURL:             alertManagerURL,
+		AMReconcileEnabled:          amReconcileEnabled,
+		AMReconcileTimeout:          amReconcileTimeout,
+		AMReconcileMinAge:           amReconcileMinAge,
+		MaxAnalyzingAge:             maxAnalyzingAge,
+		VictoriaMetricsURL:          envOr("VICTORIA_METRICS_URL", "http://vmsingle-monitoring-victoria-metrics-k8s-stack.monitoring.svc.cluster.local:8428"),
+		Optimizer:                   optimizer,
 	}
 }
 

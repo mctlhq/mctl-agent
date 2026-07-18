@@ -39,8 +39,8 @@ type Registration struct {
 	Name         string   `json:"name"`
 	Version      string   `json:"version"`
 	Description  string   `json:"description"`
-	Endpoint     string   `json:"endpoint"`      // Base URL, e.g. https://my-skill.example.com
-	AlertTypes   []string `json:"alert_types"`    // Skill is only considered for these alert types
+	Endpoint     string   `json:"endpoint"`    // Base URL, e.g. https://my-skill.example.com
+	AlertTypes   []string `json:"alert_types"` // Skill is only considered for these alert types
 	Capabilities []string `json:"capabilities"`
 }
 
@@ -79,7 +79,7 @@ type diagnoseResponse struct {
 
 // fixRequest is sent to the remote skill's /fix endpoint.
 type fixRequest struct {
-	Ticket    ticketPayload `json:"ticket"`
+	Ticket    ticketPayload    `json:"ticket"`
 	Diagnosis diagnoseResponse `json:"diagnosis"`
 }
 
@@ -131,8 +131,8 @@ func New(reg Registration) *Skill {
 }
 
 func (s *Skill) Name() string        { return s.reg.Name }
-func (s *Skill) Version() string      { return s.reg.Version }
-func (s *Skill) Description() string  { return s.reg.Description }
+func (s *Skill) Version() string     { return s.reg.Version }
+func (s *Skill) Description() string { return s.reg.Description }
 
 func (s *Skill) RequiredCapabilities() []skill.CapabilityID {
 	caps := make([]skill.CapabilityID, len(s.reg.Capabilities))

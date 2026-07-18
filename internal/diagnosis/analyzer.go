@@ -30,8 +30,8 @@ import (
 
 // Analyzer collects evidence and diagnoses tickets.
 type Analyzer struct {
-	apiClient   *mctlclient.Client
-	store       *ticket.Store
+	apiClient    *mctlclient.Client
+	store        *ticket.Store
 	anthropicKey string
 }
 

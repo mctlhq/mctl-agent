@@ -14,4 +14,3 @@ func TestSignVerify(t *testing.T) {
 		t.Fatal("signature should not verify with wrong secret")
 	}
 }
-

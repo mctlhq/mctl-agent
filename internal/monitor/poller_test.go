@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "modernc.org/sqlite"

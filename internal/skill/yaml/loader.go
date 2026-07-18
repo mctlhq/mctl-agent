@@ -37,12 +37,12 @@ import (
 
 // SkillDef is the YAML schema for a config-driven skill.
 type SkillDef struct {
-	Name        string   `yaml:"name"`
-	Version     string   `yaml:"version"`
-	Description string   `yaml:"description"`
-	Trigger     Trigger  `yaml:"trigger"`
-	Diagnosis   Diag     `yaml:"diagnosis"`
-	Notification *Notify `yaml:"notification,omitempty"`
+	Name         string   `yaml:"name"`
+	Version      string   `yaml:"version"`
+	Description  string   `yaml:"description"`
+	Trigger      Trigger  `yaml:"trigger"`
+	Diagnosis    Diag     `yaml:"diagnosis"`
+	Notification *Notify  `yaml:"notification,omitempty"`
 	Capabilities []string `yaml:"capabilities,omitempty"`
 }
 
@@ -96,8 +96,8 @@ func NewFromDef(def SkillDef) (*YAMLSkill, error) {
 }
 
 func (s *YAMLSkill) Name() string        { return s.def.Name }
-func (s *YAMLSkill) Version() string      { return s.def.Version }
-func (s *YAMLSkill) Description() string  { return s.def.Description }
+func (s *YAMLSkill) Version() string     { return s.def.Version }
+func (s *YAMLSkill) Description() string { return s.def.Description }
 
 func (s *YAMLSkill) RequiredCapabilities() []skill.CapabilityID {
 	caps := make([]skill.CapabilityID, len(s.def.Capabilities))

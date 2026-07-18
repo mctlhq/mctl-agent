@@ -62,23 +62,23 @@ const (
 
 // Ticket is the central workflow object.
 type Ticket struct {
-	ID          string     `json:"id"`
-	Source      string     `json:"source"`
-	AlertName   string     `json:"alert_name,omitempty"`
-	Type        string     `json:"type"`
-	Tenant      string     `json:"tenant"`
-	Service     string     `json:"service"`
-	Summary     string     `json:"summary"`
-	Severity    string     `json:"severity"`
-	Status      string     `json:"status"`
-	Evidence    []Evidence `json:"evidence"`
-	Analysis    string     `json:"analysis,omitempty"`
-	ProposedFix string     `json:"proposed_fix,omitempty"`
-	PRURL       string     `json:"pr_url,omitempty"`
-	PRNumber    int        `json:"pr_number,omitempty"`
-	PRRepo      string     `json:"pr_repo,omitempty"`
-	PRBranch    string     `json:"pr_branch,omitempty"`
-	PRCommitSHA string     `json:"pr_commit_sha,omitempty"`
+	ID               string     `json:"id"`
+	Source           string     `json:"source"`
+	AlertName        string     `json:"alert_name,omitempty"`
+	Type             string     `json:"type"`
+	Tenant           string     `json:"tenant"`
+	Service          string     `json:"service"`
+	Summary          string     `json:"summary"`
+	Severity         string     `json:"severity"`
+	Status           string     `json:"status"`
+	Evidence         []Evidence `json:"evidence"`
+	Analysis         string     `json:"analysis,omitempty"`
+	ProposedFix      string     `json:"proposed_fix,omitempty"`
+	PRURL            string     `json:"pr_url,omitempty"`
+	PRNumber         int        `json:"pr_number,omitempty"`
+	PRRepo           string     `json:"pr_repo,omitempty"`
+	PRBranch         string     `json:"pr_branch,omitempty"`
+	PRCommitSHA      string     `json:"pr_commit_sha,omitempty"`
 	Confidence       string     `json:"confidence,omitempty"`
 	AlertFingerprint string     `json:"alert_fingerprint,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`

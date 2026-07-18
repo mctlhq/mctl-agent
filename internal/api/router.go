@@ -27,9 +27,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
-	_ "github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mcp"
+	_ "github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/optimizer"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
@@ -46,6 +47,9 @@ type Options struct {
 	RemoteManager *remote.Manager
 	WebhookStore  *webhook.Store
 	WebhookTTL    time.Duration
+	// Optimizer is optional; when set the /api/v1/optimizer endpoints and
+	// the MCP optimizer tool are exposed.
+	Optimizer *optimizer.Optimizer
 	// OnAlert is called when AlertManager sends an alert.
 	OnAlert func(w http.ResponseWriter, r *http.Request)
 	// OnGitHubWebhook handles GitHub webhook events (optional).
@@ -96,8 +100,19 @@ func NewRouter(opts Options) http.Handler {
 		r.Get("/api/v1/skills/remote", remoteSkillListHandler(opts.RemoteManager))
 	}
 
+	// Optimizer observability endpoints.
+	if opts.Optimizer != nil {
+		r.Get("/api/v1/optimizer/candidates", optimizerCandidatesHandler(opts.Optimizer))
+		r.Get("/api/v1/optimizer/recommendations", optimizerRecommendationsHandler(opts.Optimizer))
+		r.Get("/api/v1/optimizer/runs", optimizerRunsHandler(opts.Optimizer))
+		r.Post("/api/v1/optimizer/scan", optimizerScanHandler(opts.Optimizer))
+	}
+
 	// MCP endpoint — JSON-RPC over HTTP POST.
 	mcpServer := mcp.NewServer(opts.Pipeline, opts.WebhookStore)
+	if opts.Optimizer != nil {
+		mcpServer.AttachOptimizer(opts.Optimizer)
+	}
 	r.Post("/mcp", mcpServer.ServeHTTP)
 
 	if opts.WebhookStore != nil {
