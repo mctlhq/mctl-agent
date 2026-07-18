@@ -3,7 +3,8 @@
 Self-healing GitOps agent. Watches cluster for issues, diagnoses with Claude API, opens PRs.
 
 ## Stack
-- Go 1.24, Claude API (Anthropic SDK), SQLite (modernc.org/sqlite)
+- Go 1.24, Claude API (Anthropic SDK)
+- Storage: Postgres via `DATABASE_URL` (in-cluster deploy uses shared-pg); SQLite (modernc.org/sqlite) as local-dev fallback via `DB_PATH`
 - Receives AlertManager webhooks + periodic polling
 - Opens PRs to mctl-gitops with fixes
 - Notifies via Telegram
@@ -15,12 +16,12 @@ The agent uses a modular **skills architecture**:
 ### Core
 - `internal/skill/skill.go` — Skill interface, MatchResult, DiagnosisResult, FixResult, EvidenceSet
 - `internal/skill/registry.go` — SkillRegistry: register, match (ranked by confidence), disable/enable
-- `internal/skill/metrics.go` — SQLite-backed metrics + circuit breaker (auto-disables failing skills)
+- `internal/skill/metrics.go` — DB-backed metrics + circuit breaker (auto-disables failing skills)
 - `internal/capability/capability.go` — Provider + Context sandbox with per-skill access control
 - `internal/pipeline/pipeline.go` — Orchestrates: ticket → evidence → skill match → diagnose → fix → PR → notify
 
 ### Skill Types
-- `internal/skill/builtin/` — 9 compiled Go skills (OOMKilled, ImagePull, Rollback, ArgoCDDrift, ProbeFix, CPUThrottle, QuotaAdjust, ScaleUp, LLMDiagnosis)
+- `internal/skill/builtin/` — 12 compiled Go skills (OOMKilled, ImagePullBackOff, PostDeployRollback, ArgoCDDrift, ArgoCDSyncFailed, ProbeFix, CPUThrottle, QuotaAdjust, ScaleUp, GitHubActions, WorkflowFixer, LLMDiagnosis)
 - `internal/skill/yaml/` — YAML-defined skills loaded from `skills/custom/` (hot-reload, no code)
 - `internal/skill/remote/` — HTTP-delegating skills registered at runtime via REST API
 
