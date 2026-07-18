@@ -55,13 +55,29 @@ type PRRequest struct {
 	Confidence string
 }
 
-// CreatePR creates a branch, commits the change, and opens a PR.
-func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int, error) {
+// RawPRRequest describes a fully rendered PR: the caller controls branch
+// name, title, body, and commit message. Used by callers (like the
+// optimizer) that are not ticket-shaped.
+type RawPRRequest struct {
+	Branch        string
+	Title         string
+	Body          string
+	CommitMessage string
+	FilePath      string
+	NewContent    string
+}
+
+// CreatePRRaw creates a branch, commits the change, and opens a PR from a
+// fully rendered request. Honors dry-run and the shared ticket-PR rate
+// limits (those limits count ticket-backed PRs only, so combined traffic
+// can slightly exceed them; callers with their own budgets enforce them
+// before calling).
+func (f *GitHubFixer) CreatePRRaw(ctx context.Context, req RawPRRequest) (string, int, error) {
 	if f.dryRun {
 		slog.Info("dry-run: would create PR",
-			"ticket", req.Ticket.ID,
+			"branch", req.Branch,
 			"file", req.FilePath,
-			"summary", req.Summary)
+			"title", req.Title)
 		return "", 0, nil
 	}
 
@@ -81,10 +97,6 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 		return "", 0, fmt.Errorf("daily PR limit reached (%d/20)", dayCount)
 	}
 
-	branchName := fmt.Sprintf("agent/fix/%s/%s-%s-%d",
-		req.Ticket.Service, req.Ticket.Type,
-		req.Ticket.ID[:8], time.Now().Unix())
-
 	// 1. Get main branch SHA.
 	mainRef, _, err := f.client.Git.GetRef(ctx, f.owner, f.repo, "refs/heads/main")
 	if err != nil {
@@ -94,7 +106,7 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 
 	// 2. Create branch.
 	newRef := &github.Reference{
-		Ref:    github.Ptr("refs/heads/" + branchName),
+		Ref:    github.Ptr("refs/heads/" + req.Branch),
 		Object: &github.GitObject{SHA: github.Ptr(mainSHA)},
 	}
 	if _, _, err := f.client.Git.CreateRef(ctx, f.owner, f.repo, newRef); err != nil {
@@ -109,14 +121,11 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 	}
 
 	// 4. Update file on branch.
-	commitMsg := fmt.Sprintf("fix(%s): %s\n\nTicket: %s\nConfidence: %s\n\nAutomated fix by mctl-agent",
-		req.Ticket.Service, req.Summary, req.Ticket.ID, req.Confidence)
-
 	updateOpts := &github.RepositoryContentFileOptions{
-		Message: github.Ptr(commitMsg),
+		Message: github.Ptr(req.CommitMessage),
 		Content: []byte(req.NewContent),
 		SHA:     github.Ptr(fileContent.GetSHA()),
-		Branch:  github.Ptr(branchName),
+		Branch:  github.Ptr(req.Branch),
 		Author: &github.CommitAuthor{
 			Name:  github.Ptr("mctl-agent"),
 			Email: github.Ptr("agent@mctl.ai"),
@@ -127,6 +136,34 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 	}
 
 	// 5. Create PR.
+	pr, _, err := f.client.PullRequests.Create(ctx, f.owner, f.repo, &github.NewPullRequest{
+		Title: github.Ptr(req.Title),
+		Body:  github.Ptr(req.Body),
+		Head:  github.Ptr(req.Branch),
+		Base:  github.Ptr("main"),
+	})
+	if err != nil {
+		return "", 0, fmt.Errorf("creating PR: %w", err)
+	}
+
+	slog.Info("PR created",
+		"branch", req.Branch,
+		"pr", pr.GetHTMLURL(),
+		"number", pr.GetNumber())
+
+	return pr.GetHTMLURL(), pr.GetNumber(), nil
+}
+
+// CreatePR creates a branch, commits the change, and opens a PR for a
+// ticket-backed fix. Rendering stays here; mechanics live in CreatePRRaw.
+func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int, error) {
+	branchName := fmt.Sprintf("agent/fix/%s/%s-%s-%d",
+		req.Ticket.Service, req.Ticket.Type,
+		req.Ticket.ID[:8], time.Now().Unix())
+
+	commitMsg := fmt.Sprintf("fix(%s): %s\n\nTicket: %s\nConfidence: %s\n\nAutomated fix by mctl-agent",
+		req.Ticket.Service, req.Summary, req.Ticket.ID, req.Confidence)
+
 	prBody := fmt.Sprintf("## Automated Fix by mctl-agent\n\n"+
 		"**Ticket:** %s\n"+
 		"**Type:** %s\n"+
@@ -148,22 +185,27 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 		prTitle = prTitle[:67] + "..."
 	}
 
-	pr, _, err := f.client.PullRequests.Create(ctx, f.owner, f.repo, &github.NewPullRequest{
-		Title: github.Ptr(prTitle),
-		Body:  github.Ptr(prBody),
-		Head:  github.Ptr(branchName),
-		Base:  github.Ptr("main"),
+	return f.CreatePRRaw(ctx, RawPRRequest{
+		Branch:        branchName,
+		Title:         prTitle,
+		Body:          prBody,
+		CommitMessage: commitMsg,
+		FilePath:      req.FilePath,
+		NewContent:    req.NewContent,
 	})
-	if err != nil {
-		return "", 0, fmt.Errorf("creating PR: %w", err)
-	}
+}
 
-	slog.Info("PR created",
-		"ticket", req.Ticket.ID,
-		"pr", pr.GetHTMLURL(),
-		"number", pr.GetNumber())
+// GetPR fetches a PR by number.
+func (f *GitHubFixer) GetPR(ctx context.Context, prNumber int) (*github.PullRequest, error) {
+	pr, _, err := f.client.PullRequests.Get(ctx, f.owner, f.repo, prNumber)
+	return pr, err
+}
 
-	return pr.GetHTMLURL(), pr.GetNumber(), nil
+// CreatePRComment posts an issue comment on a PR.
+func (f *GitHubFixer) CreatePRComment(ctx context.Context, prNumber int, body string) error {
+	_, _, err := f.client.Issues.CreateComment(ctx, f.owner, f.repo, prNumber,
+		&github.IssueComment{Body: github.Ptr(body)})
+	return err
 }
 
 // MergePR merges a PR by number.
