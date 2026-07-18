@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/mctlhq/mctl-agent/internal/optimizer"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
@@ -33,6 +34,32 @@ func (s *Server) registerTools() {
 	s.registerListWebhooks()
 	s.registerRegisterWebhook()
 	s.registerDeleteWebhook()
+}
+
+// AttachOptimizer registers the read-only optimizer status tool. Called
+// after NewServer when the optimizer is enabled.
+func (s *Server) AttachOptimizer(opt *optimizer.Optimizer) {
+	s.register(ToolDef{
+		Name:        "mctl_agent_optimizer_status",
+		Description: "Show the resource optimizer's state: latest per-workload candidate assessment (with skip reasons), recent right-sizing recommendations, and post-merge evaluation runs.",
+		InputSchema: InputSchema{Type: "object"},
+	}, func(params map[string]interface{}) (*ToolResult, error) {
+		recs, err := opt.Store().ListRecommendations("", 20)
+		if err != nil {
+			return nil, fmt.Errorf("listing recommendations: %w", err)
+		}
+		runs, err := opt.Store().RunsByStatus(
+			optimizer.RunStatusWaitingMerge, optimizer.RunStatusWarmup,
+			optimizer.RunStatusEvaluating)
+		if err != nil {
+			return nil, fmt.Errorf("listing runs: %w", err)
+		}
+		return jsonResult(map[string]interface{}{
+			"candidates":      opt.Candidates(),
+			"recommendations": recs,
+			"active_runs":     runs,
+		})
+	})
 }
 
 func (s *Server) registerListSkills() {

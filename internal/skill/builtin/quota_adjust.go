@@ -97,6 +97,7 @@ func (s *QuotaAdjustSkill) Diagnose(_ context.Context, t *ticket.Ticket, ev skil
 	if resources != "" {
 		diag += " Review current allocation and consider increasing quotas or optimizing service resource requests."
 	}
+	diag += " The mctl optimizer right-sizes over-provisioned requests in this tenant on its daily pass; see GET /api/v1/optimizer/candidates for per-workload status."
 
 	return &skill.DiagnosisResult{
 		Diagnosis:  diag,

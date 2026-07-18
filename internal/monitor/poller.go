@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 

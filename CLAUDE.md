@@ -24,9 +24,22 @@ The agent uses a modular **skills architecture**:
 - `internal/skill/yaml/` — YAML-defined skills loaded from `skills/custom/` (hot-reload, no code)
 - `internal/skill/remote/` — HTTP-delegating skills registered at runtime via REST API
 
+### Resource Optimizer (mctl Optimize)
+- `internal/optimizer/` — GitOps right-sizing: hourly usage rollups from
+  VictoriaMetrics (`internal/vmetrics/`), a deterministic recommendation
+  engine (cpu = p95 + 30%, memory = p99 peak + 20%, guardrails for OOM,
+  quota, LimitRange, deploy cooldown, active incidents), PRs on
+  `agent/optimize/*` branches (never `claude/*` — that would auto-merge),
+  and a post-merge evaluator (24h warmup + 7d observation →
+  SUCCESS/REGRESSION PR comment, rollback PR on regression).
+- Opt-in via `OPTIMIZER_ENABLED=true`; `OPTIMIZER_DRY_RUN=true` (default)
+  sends would-be PRs to Telegram instead of opening them. Scope is limited
+  by `OPTIMIZER_TENANT_ALLOWLIST`. No LLM in the math — recommendations
+  are reproducible from stored rollups.
+
 ### MCP & API
-- `internal/mcp/` — MCP server (JSON-RPC 2.0) with 6 tools: list_skills, skill_status, disable/enable, trigger, all_metrics
-- `internal/api/` — REST API: alerts webhook, telegram webhook, tickets, skills, skill metrics, remote skill registration
+- `internal/mcp/` — MCP server (JSON-RPC 2.0) with 6 tools: list_skills, skill_status, disable/enable, trigger, all_metrics (+ optimizer_status when the optimizer is enabled)
+- `internal/api/` — REST API: alerts webhook, telegram webhook, tickets, skills, skill metrics, remote skill registration, optimizer
 
 ### Developer Workflow
 - `.claude/skills/` — Instructions for AI coding agents: add-new-skill, debug-agent, test-skill
@@ -60,5 +73,9 @@ The agent uses a modular **skills architecture**:
 - `GET /api/v1/skills/{name}/metrics` — Skill metrics
 - `POST /api/v1/skills/register` — Register remote skill
 - `GET /api/v1/skills/remote` — List remote skills
+- `GET /api/v1/optimizer/candidates` — Per-workload right-sizing assessment (skip reasons)
+- `GET /api/v1/optimizer/recommendations` — Right-sizing recommendations
+- `GET /api/v1/optimizer/runs` — Post-merge evaluation runs
+- `POST /api/v1/optimizer/scan` — Trigger a recommendation pass
 - `POST /mcp` — MCP JSON-RPC endpoint
 - `GET /healthz` / `GET /readyz` — Health checks
