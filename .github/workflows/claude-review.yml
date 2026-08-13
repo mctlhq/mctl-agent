@@ -16,6 +16,13 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
+    with:
+      # dependabot is listed so its PRs get reviewed automatically.
+      # Without it claude-code-action hard-fails with "Workflow initiated
+      # by non-human actor", and since branch protection requires an
+      # approving review, dependabot PRs then sit unmergeable until a
+      # maintainer triggers a review by hand.
+      allowed-bots: "mctl-claude-remote,github-actions,dependabot"
     secrets:
       CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       CLAUDE_CODE_OAUTH_TOKEN_2: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN_2 }}
