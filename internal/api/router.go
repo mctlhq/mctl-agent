@@ -27,8 +27,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
-	_ "github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mcp"
+	_ "github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
@@ -46,6 +46,14 @@ type Options struct {
 	RemoteManager *remote.Manager
 	WebhookStore  *webhook.Store
 	WebhookTTL    time.Duration
+	// APIToken, when set, is required as Authorization: Bearer on operator
+	// control-plane routes (tickets, skills, MCP, webhook CRUD).
+	APIToken string
+	// TelegramWebhookSecret, when set, must match X-Telegram-Bot-Api-Secret-Token.
+	TelegramWebhookSecret string
+	// AlertWebhookToken, when set, is required as Authorization: Bearer on
+	// POST /api/v1/alerts.
+	AlertWebhookToken string
 	// OnAlert is called when AlertManager sends an alert.
 	OnAlert func(w http.ResponseWriter, r *http.Request)
 	// OnGitHubWebhook handles GitHub webhook events (optional).
@@ -71,42 +79,49 @@ func NewRouter(opts Options) http.Handler {
 	})
 	r.Handle("/metrics", promhttp.Handler())
 
-	// AlertManager webhook.
-	r.Post("/api/v1/alerts", opts.OnAlert)
+	// AlertManager webhook (in-cluster). Token-gated when configured so the
+	// public ingress cannot spoof firing alerts.
+	if opts.OnAlert != nil {
+		r.Post("/api/v1/alerts", requireBearerFunc(opts.AlertWebhookToken, opts.OnAlert))
+	}
 
-	// GitHub Actions webhook.
+	// GitHub Actions webhook (HMAC inside the handler).
 	if opts.OnGitHubWebhook != nil {
 		r.Post("/api/v1/github-webhook", opts.OnGitHubWebhook)
 	}
 
-	// Telegram webhook.
+	// Telegram webhook (secret_token + allowlisted chat).
 	r.Post("/api/v1/telegram", telegramWebhookHandler(opts))
 
-	// Ticket list.
-	r.Get("/api/v1/tickets", ticketListHandler(opts.Store))
-
-	// Skill endpoints.
-	r.Get("/api/v1/skills", skillListHandler(opts.Pipeline))
-	r.Get("/api/v1/skills/{name}/metrics", skillMetricsHandler(opts.Pipeline))
-
-	// Remote skill registration.
-	if opts.RemoteManager != nil {
-		r.Post("/api/v1/skills/register", remoteSkillRegisterHandler(opts.RemoteManager))
-		r.Delete("/api/v1/skills/{name}", remoteSkillUnregisterHandler(opts.RemoteManager))
-		r.Get("/api/v1/skills/remote", remoteSkillListHandler(opts.RemoteManager))
-	}
-
-	// MCP endpoint — JSON-RPC over HTTP POST.
-	mcpServer := mcp.NewServer(opts.Pipeline, opts.WebhookStore)
-	r.Post("/mcp", mcpServer.ServeHTTP)
-
+	// External-agent callbacks keep their per-delivery HMAC/bearer; they
+	// must stay reachable on the public callback URL.
 	if opts.WebhookStore != nil {
-		r.Get("/api/v1/webhooks", webhookListHandler(opts.WebhookStore))
-		r.Post("/api/v1/webhooks", webhookCreateHandler(opts.WebhookStore))
-		r.Delete("/api/v1/webhooks/{id}", webhookDeleteHandler(opts.WebhookStore))
 		r.Post("/api/v1/tickets/{id}/external-claims", externalClaimHandler(opts.Store, opts.WebhookStore, int(opts.WebhookTTL.Seconds())))
 		r.Patch("/api/v1/tickets/{id}/external-results", externalResultHandler(opts.Store, opts.WebhookStore, opts.Telegram))
 	}
+
+	r.Group(func(r chi.Router) {
+		r.Use(requireBearer(opts.APIToken))
+
+		r.Get("/api/v1/tickets", ticketListHandler(opts.Store))
+		r.Get("/api/v1/skills", skillListHandler(opts.Pipeline))
+		r.Get("/api/v1/skills/{name}/metrics", skillMetricsHandler(opts.Pipeline))
+
+		if opts.RemoteManager != nil {
+			r.Post("/api/v1/skills/register", remoteSkillRegisterHandler(opts.RemoteManager))
+			r.Delete("/api/v1/skills/{name}", remoteSkillUnregisterHandler(opts.RemoteManager))
+			r.Get("/api/v1/skills/remote", remoteSkillListHandler(opts.RemoteManager))
+		}
+
+		mcpServer := mcp.NewServer(opts.Pipeline, opts.WebhookStore)
+		r.Post("/mcp", mcpServer.ServeHTTP)
+
+		if opts.WebhookStore != nil {
+			r.Get("/api/v1/webhooks", webhookListHandler(opts.WebhookStore))
+			r.Post("/api/v1/webhooks", webhookCreateHandler(opts.WebhookStore))
+			r.Delete("/api/v1/webhooks/{id}", webhookDeleteHandler(opts.WebhookStore))
+		}
+	})
 
 	return r
 }
@@ -136,6 +151,11 @@ func ticketListHandler(store *ticket.Store) http.HandlerFunc {
 
 func telegramWebhookHandler(opts Options) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !telegramSecretOK(r, opts.TelegramWebhookSecret) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -149,6 +169,13 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 		}
 
 		if update.Message == nil || update.Message.Text == "" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if opts.Telegram != nil && !opts.Telegram.CommandChatAllowed(update.Message.Chat.ID) {
+			slog.Warn("telegram command from non-allowlisted chat",
+				"chat_id", update.Message.Chat.ID)
 			w.WriteHeader(http.StatusOK)
 			return
 		}

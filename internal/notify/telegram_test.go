@@ -166,6 +166,24 @@ func TestEscapeHTML(t *testing.T) {
 	}
 }
 
+func TestCommandChatAllowed(t *testing.T) {
+	tg := NewTelegram("token", "210408407", "", map[string]string{"labs": "999"})
+	if !tg.CommandChatAllowed(210408407) {
+		t.Fatal("default chat should be allowed")
+	}
+	if !tg.CommandChatAllowed(999) {
+		t.Fatal("tenant chat should be allowed")
+	}
+	if tg.CommandChatAllowed(1) {
+		t.Fatal("unknown chat must be rejected")
+	}
+
+	open := NewTelegram("token", "", "", nil)
+	if !open.CommandChatAllowed(1) {
+		t.Fatal("unconfigured notifier allows all chats for tests")
+	}
+}
+
 func TestChatIDForRouting(t *testing.T) {
 	tg := NewTelegram("token", "default-chat", "", map[string]string{
 		"admins": "admins-chat",

@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -304,6 +305,57 @@ type TelegramUpdate struct {
 			ID int64 `json:"id"`
 		} `json:"chat"`
 	} `json:"message"`
+}
+
+// CommandChatAllowed reports whether inbound bot commands from this chat
+// should be executed. An unconfigured notifier (no chat IDs) allows all
+// chats so unit tests keep working; production always sets TELEGRAM_CHAT_ID.
+func (tg *Telegram) CommandChatAllowed(chatID int64) bool {
+	if tg == nil {
+		return false
+	}
+	if tg.chatID == "" && len(tg.tenantChatIDs) == 0 {
+		return true
+	}
+	got := strconv.FormatInt(chatID, 10)
+	if tg.chatID != "" && got == tg.chatID {
+		return true
+	}
+	for _, id := range tg.tenantChatIDs {
+		if id == got {
+			return true
+		}
+	}
+	return false
+}
+
+// SetWebhook registers the public Telegram webhook. secret_token is the
+// value Telegram will send back as X-Telegram-Bot-Api-Secret-Token.
+func (tg *Telegram) SetWebhook(publicBaseURL, secretToken string) error {
+	if tg == nil || tg.botToken == "" || strings.TrimSpace(publicBaseURL) == "" {
+		return nil
+	}
+	payload := map[string]string{
+		"url": strings.TrimRight(publicBaseURL, "/") + "/api/v1/telegram",
+	}
+	if secretToken != "" {
+		payload["secret_token"] = secretToken
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("telegram setWebhook: encode: %w", err)
+	}
+	url := fmt.Sprintf("https://api.telegram.org/bot%s/setWebhook", tg.botToken)
+	resp, err := tg.httpClient.Post(url, "application/json", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram setWebhook: %w", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("telegram setWebhook returned %d: %s", resp.StatusCode, string(respBody))
+	}
+	return nil
 }
 
 func (tg *Telegram) sendMessage(text string) error {

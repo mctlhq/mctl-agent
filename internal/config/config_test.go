@@ -81,6 +81,22 @@ func TestLoadOverrides(t *testing.T) {
 	}
 }
 
+func TestLoadInboundAuthEnv(t *testing.T) {
+	t.Setenv("AGENT_API_TOKEN", " api-tok ")
+	t.Setenv("TELEGRAM_WEBHOOK_SECRET", " tg-sec ")
+	t.Setenv("ALERTMANAGER_WEBHOOK_TOKEN", " am-tok ")
+	cfg := Load()
+	if cfg.AgentAPIToken != "api-tok" {
+		t.Errorf("AgentAPIToken = %q", cfg.AgentAPIToken)
+	}
+	if cfg.TelegramWebhookSecret != "tg-sec" {
+		t.Errorf("TelegramWebhookSecret = %q", cfg.TelegramWebhookSecret)
+	}
+	if cfg.AlertWebhookToken != "am-tok" {
+		t.Errorf("AlertWebhookToken = %q", cfg.AlertWebhookToken)
+	}
+}
+
 func TestLoadInvalidPollInterval(t *testing.T) {
 	t.Setenv("POLL_INTERVAL", "not-a-duration")
 	cfg := Load()
