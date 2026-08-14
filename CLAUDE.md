@@ -53,12 +53,12 @@ The agent uses a modular **skills architecture**:
 - ArgoWorkflowFailed, ArgoWorkflowHighFailureRate
 
 ## API Endpoints
-- `POST /api/v1/alerts` — AlertManager webhook
-- `POST /api/v1/telegram` — Telegram bot webhook
-- `GET /api/v1/tickets` — List tickets
-- `GET /api/v1/skills` — List all skills
-- `GET /api/v1/skills/{name}/metrics` — Skill metrics
-- `POST /api/v1/skills/register` — Register remote skill
-- `GET /api/v1/skills/remote` — List remote skills
-- `POST /mcp` — MCP JSON-RPC endpoint
-- `GET /healthz` / `GET /readyz` — Health checks
+- `POST /api/v1/alerts` — AlertManager webhook (`ALERTMANAGER_WEBHOOK_TOKEN` bearer when set)
+- `POST /api/v1/telegram` — Telegram bot webhook (`TELEGRAM_WEBHOOK_SECRET` header when set)
+- `GET /api/v1/tickets` — List tickets (`AGENT_API_TOKEN` bearer when set)
+- `GET /api/v1/skills` — List all skills (bearer when set)
+- `GET /api/v1/skills/{name}/metrics` — Skill metrics (bearer when set)
+- `POST /api/v1/skills/register` — Register remote skill (bearer when set)
+- `GET /api/v1/skills/remote` — List remote skills (bearer when set)
+- `POST /mcp` — MCP JSON-RPC endpoint (bearer when set)
+- `GET /healthz` / `GET /readyz` — Health checks (public)

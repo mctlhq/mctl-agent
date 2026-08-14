@@ -77,12 +77,20 @@ If the Telegram webhook is configured (`POST /api/v1/telegram`), the bot respond
 | `/reject <ticket-id> <reason>` | Close the PR with a comment |
 | `/status` | List all open tickets |
 
-To enable commands, set up a Telegram webhook pointing to your agent:
+To enable commands, set `TELEGRAM_WEBHOOK_SECRET` (1-256 chars, `A-Za-z0-9_-`)
+and point the webhook at the agent. The process registers the webhook on
+startup when both `TELEGRAM_WEBHOOK_SECRET` and `WEBHOOK_CALLBACK_URL` are set.
+
+Commands are accepted only from `TELEGRAM_CHAT_ID` (and optional
+`TELEGRAM_TENANT_CHAT_IDS`). A request without a matching
+`X-Telegram-Bot-Api-Secret-Token` is rejected.
 
 ```bash
+export TELEGRAM_WEBHOOK_SECRET='replace-with-a-long-random-token'
+# agent calls setWebhook itself; equivalent manual call:
 curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://agent.your-domain.com/api/v1/telegram"}'
+  -d '{"url":"https://agent.mctl.ai/api/v1/telegram","secret_token":"<TELEGRAM_WEBHOOK_SECRET>"}'
 ```
 
 ## 6. Verify

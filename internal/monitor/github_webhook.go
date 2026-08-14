@@ -65,13 +65,14 @@ func (h *GitHubWebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Validate signature.
-	if h.secret != "" {
-		sig := r.Header.Get("X-Hub-Signature-256")
-		if !h.verifySignature(body, sig) {
-			http.Error(w, "invalid signature", http.StatusUnauthorized)
-			return
-		}
+	if h.secret == "" {
+		http.Error(w, "webhook secret not configured", http.StatusUnauthorized)
+		return
+	}
+	sig := r.Header.Get("X-Hub-Signature-256")
+	if !h.verifySignature(body, sig) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
 	}
 
 	eventType := r.Header.Get("X-GitHub-Event")

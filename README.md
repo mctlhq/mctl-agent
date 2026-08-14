@@ -122,6 +122,10 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 | `GITHUB_REPO` | GitOps repository name | `mctl-gitops` | No |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token | — | No |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID | — | No |
+| `TELEGRAM_WEBHOOK_SECRET` | Telegram `secret_token` for inbound webhook | — | Prod |
+| `AGENT_API_TOKEN` | Bearer token for tickets/skills/MCP/webhook CRUD | — | Prod |
+| `ALERTMANAGER_WEBHOOK_TOKEN` | Bearer token for `POST /api/v1/alerts` | — | Prod |
+| `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub workflow webhooks | — | If used |
 | `POLL_INTERVAL` | Polling frequency | `5m` | No |
 | `DB_PATH` | SQLite database path | `/data/mctl-agent.db` | No |
 | `MAX_PR_PER_HOUR` | Rate limit — PRs per hour | `5` | No |
@@ -131,10 +135,12 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 
 The agent exposes an HTTP API (chi router) for:
 
-- **POST /api/v1/webhook** — AlertManager webhook receiver
-- **GET /api/v1/tickets** — list tracked incidents
-- **POST /api/v1/skills** — register a remote skill at runtime
-- **GET /api/v1/health** — liveness probe
+- **POST /api/v1/alerts** — AlertManager webhook (bearer when `ALERTMANAGER_WEBHOOK_TOKEN` is set)
+- **POST /api/v1/telegram** — Telegram commands (secret_token + allowlisted chat)
+- **GET /api/v1/tickets** — list tracked incidents (bearer when `AGENT_API_TOKEN` is set)
+- **POST /api/v1/skills/register** — register a remote skill (bearer when set)
+- **POST /mcp** — MCP JSON-RPC (bearer when set)
+- **GET /healthz**, **GET /readyz** — probes (public)
 
 An MCP (Model Context Protocol) server is also available for tool-based AI integrations.
 

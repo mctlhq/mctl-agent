@@ -141,14 +141,17 @@ func main() {
 
 	// Router.
 	routerOpts := agentapi.Options{
-		Store:         store,
-		Pipeline:      pipe,
-		Telegram:      telegram,
-		GitHub:        githubFixer,
-		RemoteManager: remoteMgr,
-		WebhookStore:  webhookStore,
-		WebhookTTL:    cfg.WebhookDefaultTTL,
-		OnAlert:       alertHandler.ServeHTTP,
+		Store:                 store,
+		Pipeline:              pipe,
+		Telegram:              telegram,
+		GitHub:                githubFixer,
+		RemoteManager:         remoteMgr,
+		WebhookStore:          webhookStore,
+		WebhookTTL:            cfg.WebhookDefaultTTL,
+		APIToken:              cfg.AgentAPIToken,
+		TelegramWebhookSecret: cfg.TelegramWebhookSecret,
+		AlertWebhookToken:     cfg.AlertWebhookToken,
+		OnAlert:               alertHandler.ServeHTTP,
 	}
 	if ghWebhookHandler != nil {
 		routerOpts.OnGitHubWebhook = ghWebhookHandler.ServeHTTP
@@ -181,12 +184,25 @@ func main() {
 			"dry_run", cfg.DryRun,
 			"poll_interval", cfg.PollInterval,
 			"mctl_api", cfg.MctlAPIURL,
+			"api_auth", cfg.AgentAPIToken != "",
+			"telegram_webhook_auth", cfg.TelegramWebhookSecret != "",
+			"alert_webhook_auth", cfg.AlertWebhookToken != "",
 		)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("server error", "error", err)
 			os.Exit(1)
 		}
 	}()
+
+	if cfg.TelegramWebhookSecret != "" && cfg.WebhookCallbackURL != "" {
+		go func() {
+			if err := telegram.SetWebhook(cfg.WebhookCallbackURL, cfg.TelegramWebhookSecret); err != nil {
+				slog.Error("telegram setWebhook failed", "error", err)
+				return
+			}
+			slog.Info("telegram webhook registered", "url", cfg.WebhookCallbackURL+"/api/v1/telegram")
+		}()
+	}
 
 	// Graceful shutdown.
 	quit := make(chan os.Signal, 1)
