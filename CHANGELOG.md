@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.15.2](https://github.com/mctlhq/mctl-agent/compare/1.15.1...1.15.2) (2026-08-14)
+
+
+### Bug Fixes
+
+* **config:** stop discarding the mctl-api service token ([8f488c5](https://github.com/mctlhq/mctl-agent/commit/8f488c59939d72f9c69079a6a2a86330e533b639))
+* **config:** stop discarding the mctl-api service token ([fda922a](https://github.com/mctlhq/mctl-agent/commit/fda922a28cd355fccd1e8ba4d87aa1551e84ad3a))
+
 ## [1.15.1](https://github.com/mctlhq/mctl-agent/compare/1.15.0...1.15.1) (2026-08-14)
 
 
