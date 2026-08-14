@@ -185,10 +185,17 @@ func Load() Config {
 
 	githubToken := strings.TrimSpace(os.Getenv("GITHUB_TOKEN"))
 	mctlAPIToken := strings.TrimSpace(os.Getenv("MCTL_API_TOKEN"))
-	// mctl-api currently authenticates bearer tokens through the GitHub/Dex path.
-	// Older service tokens like "mctl-prod-token-..." no longer validate there.
-	// Prefer a GitHub token when the dedicated API token is absent or clearly legacy.
-	if githubToken != "" && (mctlAPIToken == "" || strings.HasPrefix(mctlAPIToken, "mctl-")) {
+	// Fall back to the GitHub token only when no dedicated API token is set.
+	//
+	// This used to also discard any token starting with "mctl-", on the premise
+	// that mctl-api authenticated solely through the GitHub/Dex path and such
+	// tokens "no longer validate there". That stopped being true the same day it
+	// was written: mctl-api 6d1e66d added staticServiceUser, which matches the
+	// service token against MCTL_AGENT_SERVICE_TOKEN before GitHub or Dex is
+	// consulted at all. Both sides were fixed on 2026-03-25 in different ways and
+	// only one was undone, so the prefix rule quietly threw away a working
+	// credential and sent a GitHub token that mctl-api rejects.
+	if githubToken != "" && mctlAPIToken == "" {
 		mctlAPIToken = githubToken
 	}
 
