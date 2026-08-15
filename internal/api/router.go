@@ -37,6 +37,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// maxWebhookBodyBytes bounds inbound webhook payloads. Telegram and
+// AlertManager payloads are a few KB at most; 1MB leaves generous headroom
+// while stopping an oversized body from being read fully into memory.
+const maxWebhookBodyBytes = 1 << 20 // 1MB
+
 // Options holds all dependencies for the API router.
 type Options struct {
 	Store         *ticket.Store
@@ -62,6 +67,16 @@ type Options struct {
 
 // NewRouter creates the HTTP router.
 func NewRouter(opts Options) http.Handler {
+	// The webhook secret and the chat allowlist must be configured together
+	// (see telegramWebhookHandler); surface the mismatch once at startup so
+	// operators see it in boot logs instead of only in a per-request WARN
+	// the first time someone messages the bot.
+	if (opts.TelegramWebhookSecret != "") != opts.Telegram.HasChatAllowlist() {
+		slog.Warn("telegram command auth misconfigured at startup: set both TELEGRAM_WEBHOOK_SECRET and TELEGRAM_CHAT_ID (or neither, for local dev) — commands will be rejected until fixed",
+			"webhook_secret_set", opts.TelegramWebhookSecret != "",
+			"chat_allowlist_set", opts.Telegram.HasChatAllowlist())
+	}
+
 	r := chi.NewRouter()
 
 	r.Use(middleware.RequestID)
@@ -136,9 +151,10 @@ func ticketListHandler(store *ticket.Store) http.HandlerFunc {
 		// Filters applied in SQL before the limit: narrow queries
 		// (e.g. `?tenant=platform-db&service=shared`) return every
 		// match even when the table is much larger than 100 rows.
-		tickets, err := store.ListByFilters(status, tenant, service, 100)
+		tickets, err := store.ListByFilters(r.Context(), status, tenant, service, 100)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			slog.Error("ticket list query failed", "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal server error"})
 			return
 		}
 
@@ -156,6 +172,7 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
+		r.Body = http.MaxBytesReader(w, r.Body, maxWebhookBodyBytes)
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "failed to read body", http.StatusBadRequest)
@@ -200,12 +217,17 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
-		handleTelegramCommand(cmd, opts)
+		handleTelegramCommand(r.Context(), cmd, opts)
 		w.WriteHeader(http.StatusOK)
 	}
 }
 
-func handleTelegramCommand(cmd *notify.TelegramCommand, opts Options) {
+// handleTelegramCommand runs synchronously on the request goroutine — the
+// handler doesn't write its response until this returns — so threading
+// r.Context() through changes nothing about when replies happen. It only
+// adds cancellation if the webhook caller disconnects before the command
+// (a GitHub merge/close) finishes, instead of letting it run unbounded.
+func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opts Options) {
 	switch cmd.Command {
 	case "status":
 		tickets, err := opts.Store.ListOpen()
@@ -233,7 +255,7 @@ func handleTelegramCommand(cmd *notify.TelegramCommand, opts Options) {
 			_ = opts.Telegram.SendText("No PR associated with ticket " + cmd.TicketID)
 			return
 		}
-		if err := opts.GitHub.MergePR(context.Background(), t.PRNumber); err != nil {
+		if err := opts.GitHub.MergePR(ctx, t.PRNumber); err != nil {
 			_ = opts.Telegram.SendText("Failed to merge PR: " + err.Error())
 			return
 		}
@@ -248,7 +270,7 @@ func handleTelegramCommand(cmd *notify.TelegramCommand, opts Options) {
 			return
 		}
 		if t.PRNumber > 0 {
-			_ = opts.GitHub.ClosePR(context.Background(), t.PRNumber, cmd.Reason)
+			_ = opts.GitHub.ClosePR(ctx, t.PRNumber, cmd.Reason)
 		}
 		t.Status = ticket.StatusSuppressed
 		_ = opts.Store.Update(t)

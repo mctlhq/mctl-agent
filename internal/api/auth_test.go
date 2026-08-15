@@ -7,7 +7,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/mctlhq/mctl-agent/internal/monitor"
 	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
@@ -175,6 +177,104 @@ func TestTelegramFailClosedWithoutWebhookSecret(t *testing.T) {
 	}
 	if pipe.IsPaused() {
 		t.Fatal("command must not execute when a chat allowlist is set without a webhook secret")
+	}
+}
+
+func TestTelegramOpenModeWhenFullyUnconfigured(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	// Neither TELEGRAM_WEBHOOK_SECRET nor a chat allowlist is set: this is
+	// the local-dev "fully open" mode, distinct from the fail-closed cases
+	// above where exactly one of the two is configured. Commands must run.
+	tg := notify.NewTelegram("token", "", "", nil)
+	router := NewRouter(Options{
+		Store:    store,
+		Pipeline: pipe,
+		Telegram: tg,
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+
+	body := []byte(`{"message":{"text":"/pause","chat":{"id":1}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/telegram", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("open mode command: status=%d, want 200", w.Code)
+	}
+	if !pipe.IsPaused() {
+		t.Fatal("command must execute when neither webhook secret nor chat allowlist is configured")
+	}
+}
+
+func TestTelegramWebhookBodyTooLarge(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	tg := notify.NewTelegram("token", "", "", nil)
+	router := NewRouter(Options{
+		Store:    store,
+		Pipeline: pipe,
+		Telegram: tg,
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+
+	oversized := bytes.Repeat([]byte("a"), maxWebhookBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/telegram", bytes.NewReader(oversized))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code < 400 || w.Code >= 500 {
+		t.Fatalf("oversized telegram body: status=%d, want 4xx", w.Code)
+	}
+}
+
+func TestAlertWebhookBodyTooLarge(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	router := NewRouter(Options{
+		Store:    store,
+		Pipeline: pipe,
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			monitor.NewAlertHandler(store, func(*ticket.Ticket) {}).ServeHTTP(w, r)
+		},
+	})
+
+	oversized := bytes.Repeat([]byte("a"), 2<<20) // 2MB, over the 1MB cap
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(oversized))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code < 400 || w.Code >= 500 {
+		t.Fatalf("oversized alert body: status=%d, want 4xx", w.Code)
+	}
+}
+
+func TestTicketListHandlerSanitizesStoreError(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	store.Close() //nolint:errcheck // force ListByFilters to fail below
+	router := NewRouter(Options{
+		Store:    store,
+		Pipeline: pipe,
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tickets", nil)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500", w.Code)
+	}
+
+	var resp map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp["error"] != "internal server error" {
+		t.Fatalf("error message leaked internal detail: %q", resp["error"])
 	}
 }
 
