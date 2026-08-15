@@ -196,6 +196,14 @@ func Load() Config {
 	// consulted at all. Both sides were fixed on 2026-03-25 in different ways and
 	// only one was undone, so the prefix rule quietly threw away a working
 	// credential and sent a GitHub token that mctl-api rejects.
+	//
+	// Note this fallback copies the token captured from the environment at
+	// process start, and MctlAPIToken is not refreshed anywhere. That is inert
+	// today because MCTL_API_TOKEN is always set from its own Vault key, but if
+	// it ever goes missing, mctl-api calls would silently inherit the frozen
+	// GitHub App token — the same 60-minute expiry bug that internal/fixer's
+	// tokenSource exists to fix. Route this through a token file too before
+	// relying on the fallback in production.
 	if githubToken != "" && mctlAPIToken == "" {
 		mctlAPIToken = githubToken
 	}
