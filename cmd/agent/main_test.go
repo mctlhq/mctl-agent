@@ -59,6 +59,7 @@ func TestIsTransientDialError(t *testing.T) {
 		{"connection refused", errors.New(`migrating: dial tcp 10.43.131.86:5432: connect: connection refused`), true},
 		{"dns not ready", errors.New(`dial tcp: lookup shared-pg-rw: no such host`), true},
 		{"net.OpError", &net.OpError{Op: "dial", Err: errors.New("boom")}, true},
+		{"postgres still recovering", errors.New(`pq: the database system is starting up`), true},
 		{"bad migration", errors.New(`migrating: syntax error at or near "CREAT"`), false},
 		{"bad dsn", errors.New(`opening postgres: missing "=" after "postgres" in connection info string`), false},
 	}
@@ -227,5 +228,21 @@ func TestRedactDSNHandlesKeyValueForm(t *testing.T) {
 				t.Errorf("redaction ate the rest of the DSN: %q", got)
 			}
 		})
+	}
+}
+
+func TestRedactDSNHandlesPasswordQueryParameter(t *testing.T) {
+	// A URI DSN may carry the password as a connection parameter instead of
+	// in the userinfo, where the userinfo branch would never see it.
+	got := redactDSN("postgres://mctl-agent@shared-pg-rw:5432/db?password=s3cr3t&sslmode=require")
+
+	if strings.Contains(got, "s3cr3t") {
+		t.Fatalf("password leaked from the query string: %q", got)
+	}
+	if !strings.Contains(got, "sslmode=require") {
+		t.Errorf("unrelated parameters lost: %q", got)
+	}
+	if !strings.Contains(got, "mctl-agent") {
+		t.Errorf("username lost: %q", got)
 	}
 }

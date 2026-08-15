@@ -313,7 +313,17 @@ func isTransientDialError(err error) bool {
 		return true
 	}
 	msg := err.Error()
-	for _, s := range []string{"connection refused", "no such host", "network is unreachable", "i/o timeout"} {
+	for _, s := range []string{
+		"connection refused",
+		"no such host",
+		"network is unreachable",
+		"i/o timeout",
+		// Postgres accepts the TCP connection while it is still recovering and
+		// rejects queries with SQLSTATE 57P03. A CNPG failover or a restarted
+		// primary hits this, and it clears within seconds — exactly what the
+		// retry budget is for.
+		"the database system is starting up",
+	} {
 		if strings.Contains(msg, s) {
 			return true
 		}
@@ -340,6 +350,13 @@ func redactDSN(dsn string) string {
 	}
 	if _, hasPassword := u.User.Password(); hasPassword {
 		u.User = url.UserPassword(u.User.Username(), "redacted")
+	}
+	// A URI-form DSN may also carry the password as a connection parameter
+	// ("postgres://user@host/db?password=..."), which never appears in the
+	// userinfo the branch above rewrites.
+	if q := u.Query(); q.Has("password") {
+		q.Set("password", "redacted")
+		u.RawQuery = q.Encode()
 	}
 	return u.String()
 }

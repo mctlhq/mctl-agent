@@ -1,6 +1,8 @@
 package ticket
 
 import (
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -624,5 +626,28 @@ func TestStoreOpenTicketBreakdown(t *testing.T) {
 		if k.Status == StatusResolved {
 			t.Errorf("resolved tickets must be excluded from breakdown; found key %+v", k)
 		}
+	}
+}
+
+// NewStore is called in a retry loop, so a failed migration must not leave the
+// *sql.DB (and its background connectionOpener goroutine) behind.
+func TestNewStoreClosesDBWhenMigrationFails(t *testing.T) {
+	// A path under a directory that does not exist: sql.Open succeeds (it is
+	// lazy), the first migrate statement fails.
+	bad := filepath.Join(t.TempDir(), "no-such-dir", "agent.db")
+
+	before := runtime.NumGoroutine()
+	if _, err := NewStore(bad); err == nil {
+		t.Fatal("expected NewStore to fail on an unwritable path")
+	}
+
+	// The opener goroutine exits asynchronously after Close, so allow it a
+	// moment rather than sampling the instant after the call.
+	deadline := time.Now().Add(2 * time.Second)
+	for runtime.NumGoroutine() > before && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+	}
+	if after := runtime.NumGoroutine(); after > before {
+		t.Errorf("goroutine leaked after a failed migration: %d before, %d after", before, after)
 	}
 }
