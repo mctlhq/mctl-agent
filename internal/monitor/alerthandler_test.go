@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,7 @@ import (
 
 func newTestStore(t *testing.T) *ticket.Store {
 	t.Helper()
-	store, err := ticket.NewStore(":memory:")
+	store, err := ticket.NewStore(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}

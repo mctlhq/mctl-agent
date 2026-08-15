@@ -2,6 +2,7 @@ package ticket
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -13,12 +14,34 @@ import (
 
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := NewStore(":memory:")
+	store, err := NewStore(context.Background(), ":memory:")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store
+}
+
+// A context cancelled before migration starts must abort NewStore promptly
+// instead of completing the migration regardless of ctx, the behaviour that
+// let a post-connect hang during migrate() ignore SIGTERM (issue #74).
+func TestNewStoreAbortsOnCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	start := time.Now()
+	_, err := NewStore(ctx, ":memory:")
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("expected NewStore to fail when the context is already cancelled")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("error does not wrap context.Canceled: %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("NewStore took %s to observe cancellation, want near-immediate", elapsed)
+	}
 }
 
 func TestStoreCreateAndGet(t *testing.T) {
@@ -638,7 +661,7 @@ func TestNewStoreClosesDBWhenMigrationFails(t *testing.T) {
 	bad := filepath.Join(t.TempDir(), "no-such-dir", "agent.db")
 
 	before := runtime.NumGoroutine()
-	if _, err := NewStore(bad); err == nil {
+	if _, err := NewStore(context.Background(), bad); err == nil {
 		t.Fatal("expected NewStore to fail on an unwritable path")
 	}
 
