@@ -17,10 +17,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
 func TestRedactDSNHidesPassword(t *testing.T) {
@@ -171,5 +175,57 @@ func TestInitTicketStoreRetriesForTheWholeBudget(t *testing.T) {
 	// connect_timeout bounds each dial, so overshoot stays within one attempt.
 	if max := storeInitBudget + 5*time.Second; elapsed > max {
 		t.Errorf("overran the budget: took %s, expected under %s", elapsed, max)
+	}
+}
+
+// The behaviour the retry loop exists for: unreachable on the first attempt,
+// reachable on the next, and the store is returned rather than the error.
+func TestInitTicketStoreSucceedsAfterATransientFailure(t *testing.T) {
+	original := newTicketStore
+	t.Cleanup(func() { newTicketStore = original })
+
+	attempts := 0
+	newTicketStore = func(connStr string) (*ticket.Store, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, fmt.Errorf("migrating: dial tcp 10.43.131.86:5432: connect: connection refused")
+		}
+		// Attempt 2 lands after the pod network is up. A SQLite store stands
+		// in for the real one — initTicketStore only cares that it opened.
+		return ticket.NewStore(filepath.Join(t.TempDir(), "agent.db"))
+	}
+
+	store, err := initTicketStore(context.Background(), "postgres://u:p@host:5432/db")
+
+	if err != nil {
+		t.Fatalf("initTicketStore returned %v, want success on attempt 2", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if attempts != 2 {
+		t.Errorf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestRedactDSNHandlesKeyValueForm(t *testing.T) {
+	tests := []struct {
+		name string
+		dsn  string
+	}{
+		{"bare value", "host=shared-pg-rw port=5432 user=mctl-agent password=s3cr3t dbname=mctl-agent"},
+		{"quoted value", "host=shared-pg-rw user=mctl-agent password='s3cr3t with spaces' dbname=mctl-agent"},
+		{"spaces around =", "host=shared-pg-rw password = s3cr3t dbname=mctl-agent"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := redactDSN(tt.dsn)
+
+			if strings.Contains(got, "s3cr3t") {
+				t.Errorf("password leaked: %q", got)
+			}
+			if !strings.Contains(got, "host=shared-pg-rw") {
+				t.Errorf("redaction ate the rest of the DSN: %q", got)
+			}
+		})
 	}
 }

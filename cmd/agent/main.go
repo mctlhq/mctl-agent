@@ -266,6 +266,10 @@ func sendDigest(store *ticket.Store, tg *notify.Telegram) {
 // that hangs in "starting" forever.
 const storeInitBudget = 8 * time.Second
 
+// newTicketStore is a seam so tests can drive the retry loop without a live
+// database. Production always uses ticket.NewStore.
+var newTicketStore = ticket.NewStore
+
 // initTicketStore opens the ticket store, retrying while the database refuses
 // connections. Errors that are not transient (a malformed DSN, a failed
 // migration) fail on the first attempt — retrying those only delays the exit.
@@ -275,7 +279,7 @@ func initTicketStore(ctx context.Context, connStr string) (*ticket.Store, error)
 	connStr = withConnectTimeout(connStr)
 
 	for attempt := 1; ; attempt++ {
-		store, err := ticket.NewStore(connStr)
+		store, err := newTicketStore(connStr)
 		if err == nil {
 			if attempt > 1 {
 				slog.Info("ticket store initialised after retry", "attempts", attempt)
@@ -329,13 +333,21 @@ func redactDSN(dsn string) string {
 		return "<unparseable dsn>"
 	}
 	if u.User == nil {
-		return dsn
+		// libpq also accepts key-value DSNs ("host=... password=..."), which
+		// url.Parse happily reads as a bare path — no user info, nothing
+		// redacted, password intact. Catch that form before giving up.
+		return keyValueDSNPassword.ReplaceAllString(dsn, "password=redacted")
 	}
 	if _, hasPassword := u.User.Password(); hasPassword {
 		u.User = url.UserPassword(u.User.Username(), "redacted")
 	}
 	return u.String()
 }
+
+// keyValueDSNPassword matches the password field of a libpq key-value DSN.
+// Values may be single-quoted (with backslash escapes) or bare up to the next
+// space, per the libpq connection-string grammar.
+var keyValueDSNPassword = regexp.MustCompile(`password\s*=\s*('(?:[^'\\]|\\.)*'|\S+)`)
 
 // withConnectTimeout bounds a single dial attempt. Without it the retry loop
 // only controls the gaps between attempts: a network that drops packets
