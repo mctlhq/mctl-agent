@@ -16,11 +16,16 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,10 +51,16 @@ func main() {
 
 	cfg := config.Load()
 
-	// Initialize database store.
-	store, err := ticket.NewStore(cfg.DatabaseURL)
+	// Initialize database store. The pod's network namespace is not always
+	// ready when the process starts: a same-node dial to shared-pg gets
+	// "connection refused" for the first few seconds, and a single attempt
+	// then exits 1 and burns a CrashLoopBackOff restart on every rollout.
+	initCtx, stopInitSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	store, err := initTicketStore(initCtx, cfg.DatabaseURL)
+	stopInitSignals()
 	if err != nil {
-		slog.Error("failed to initialize ticket store", "error", err, "url", cfg.DatabaseURL)
+		// cfg.DatabaseURL carries the DB password — log the redacted form only.
+		slog.Error("failed to initialize ticket store", "error", err, "url", redactDSN(cfg.DatabaseURL))
 		os.Exit(1)
 	}
 	defer store.Close() //nolint:errcheck
@@ -249,4 +260,134 @@ func sendDigest(store *ticket.Store, tg *notify.Telegram) {
 	if err := tg.SendDailyDigest(open, resolved, prs); err != nil {
 		slog.Error("daily digest: failed to send", "error", err)
 	}
+}
+
+// storeInitBudget bounds how long startup waits for the database to accept
+// connections. Kept under the readiness probe's first-failure window so a
+// genuinely dead database still surfaces as a failing pod rather than a pod
+// that hangs in "starting" forever.
+const storeInitBudget = 8 * time.Second
+
+// newTicketStore is a seam so tests can drive the retry loop without a live
+// database. Production always uses ticket.NewStore.
+var newTicketStore = ticket.NewStore
+
+// initTicketStore opens the ticket store, retrying while the database refuses
+// connections. Errors that are not transient (a malformed DSN, a failed
+// migration) fail on the first attempt — retrying those only delays the exit.
+func initTicketStore(ctx context.Context, connStr string) (*ticket.Store, error) {
+	deadline := time.Now().Add(storeInitBudget)
+	delay := 250 * time.Millisecond
+	connStr = withConnectTimeout(connStr)
+
+	for attempt := 1; ; attempt++ {
+		store, err := newTicketStore(connStr)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("ticket store initialised after retry", "attempts", attempt)
+			}
+			return store, nil
+		}
+		if !isTransientDialError(err) || time.Now().After(deadline) {
+			return nil, err
+		}
+		slog.Warn("ticket store not reachable yet, retrying",
+			"attempt", attempt, "retry_in", delay, "error", err)
+
+		select {
+		case <-ctx.Done():
+			// SIGTERM during startup: stop retrying and report why.
+			return nil, fmt.Errorf("interrupted while waiting for database: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+		if delay < time.Second {
+			delay *= 2
+		}
+	}
+}
+
+// isTransientDialError reports whether err is the pod-network-not-ready
+// signature (connection refused / no route / DNS not resolving yet) rather
+// than a permanent configuration or migration failure.
+func isTransientDialError(err error) bool {
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := err.Error()
+	for _, s := range []string{
+		"connection refused",
+		"no such host",
+		"network is unreachable",
+		"i/o timeout",
+		// Postgres accepts the TCP connection while it is still recovering and
+		// rejects queries with SQLSTATE 57P03. A CNPG failover or a restarted
+		// primary hits this, and it clears within seconds — exactly what the
+		// retry budget is for.
+		"the database system is starting up",
+	} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactDSN strips the password from a postgres URL so it never reaches the
+// logs. A non-URL DSN (the SQLite file path) is returned unchanged.
+//
+// Fails closed: a DSN that will not parse is exactly the malformed input most
+// likely to accompany a real startup failure, so it is replaced wholesale
+// rather than echoed back with a password still in it.
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return "<unparseable dsn>"
+	}
+	if u.User == nil {
+		// libpq also accepts key-value DSNs ("host=... password=..."), which
+		// url.Parse happily reads as a bare path — no user info, nothing
+		// redacted, password intact. Catch that form before giving up.
+		return keyValueDSNPassword.ReplaceAllString(dsn, "password=redacted")
+	}
+	if _, hasPassword := u.User.Password(); hasPassword {
+		u.User = url.UserPassword(u.User.Username(), "redacted")
+	}
+	// A URI-form DSN may also carry the password as a connection parameter
+	// ("postgres://user@host/db?password=..."), which never appears in the
+	// userinfo the branch above rewrites.
+	if q := u.Query(); q.Has("password") {
+		q.Set("password", "redacted")
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
+// keyValueDSNPassword matches the password field of a libpq key-value DSN.
+// Values may be single-quoted (with backslash escapes) or bare up to the next
+// space, per the libpq connection-string grammar.
+var keyValueDSNPassword = regexp.MustCompile(`password\s*=\s*('(?:[^'\\]|\\.)*'|\S+)`)
+
+// withConnectTimeout bounds a single dial attempt. Without it the retry loop
+// only controls the gaps between attempts: a network that drops packets
+// (rather than refusing the connection) leaves one dial blocked for the OS TCP
+// connect timeout — ~130s on Linux — which overruns both the init budget and
+// the SIGTERM grace period. Non-postgres DSNs (the SQLite path) pass through.
+func withConnectTimeout(dsn string) string {
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		return dsn
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	q := u.Query()
+	if q.Get("connect_timeout") != "" {
+		return dsn // operator-supplied value wins
+	}
+	// Seconds, per libpq. Two dials fit inside the budget, so a hung attempt
+	// still leaves room for one retry.
+	q.Set("connect_timeout", "3")
+	u.RawQuery = q.Encode()
+	return u.String()
 }

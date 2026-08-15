@@ -59,6 +59,10 @@ func NewStore(connStr string) (*Store, error) {
 
 	s := &Store{db: db, dialect: driver}
 	if err := s.migrate(); err != nil {
+		// sql.Open starts a background connectionOpener goroutine that only
+		// exits on Close. Callers retry NewStore, so leaving it open here
+		// leaks one goroutine (and one *sql.DB) per failed attempt.
+		_ = db.Close()
 		return nil, fmt.Errorf("migrating: %w", err)
 	}
 	return s, nil
