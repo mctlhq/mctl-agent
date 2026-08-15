@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.5](https://github.com/mctlhq/mctl-agent/compare/1.15.4...1.15.5) (2026-08-15)
+
+
+### Bug Fixes
+
+* API hardening backlog from [#65](https://github.com/mctlhq/mctl-agent/issues/65) (context, body limits, error sanitization) ([42091ef](https://github.com/mctlhq/mctl-agent/commit/42091eff340a2d9a7a0980245228095181c518ae))
+
 ## [1.15.4](https://github.com/mctlhq/mctl-agent/compare/1.15.3...1.15.4) (2026-08-15)
 
 
