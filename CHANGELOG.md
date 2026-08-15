@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.15.6](https://github.com/mctlhq/mctl-agent/compare/1.15.5...1.15.6) (2026-08-15)
+
+
+### Bug Fixes
+
+* **agent:** retry ticket store init and stop logging the DB password ([2c3485e](https://github.com/mctlhq/mctl-agent/commit/2c3485e2aa8559ccce73db6bb72ab4629a5456ca))
+
 ## [1.15.5](https://github.com/mctlhq/mctl-agent/compare/1.15.4...1.15.5) (2026-08-15)
 
 
