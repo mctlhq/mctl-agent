@@ -90,6 +90,17 @@ func (s *tokenSource) current() string {
 	return s.cached
 }
 
+// defaultGitHubHosts are the only hosts the token is ever sent to.
+//
+// Matched against url.URL.Host, i.e. including a port when one is explicit.
+// go-github targets https://api.github.com/... so the port is implicit and Host
+// is the bare name; anything carrying an unexpected port is not GitHub and does
+// not get the credential.
+var defaultGitHubHosts = map[string]bool{
+	"api.github.com":     true,
+	"uploads.github.com": true,
+}
+
 // authTransport injects the current token into every outgoing request.
 //
 // This replaces github.NewClient(nil).WithAuthToken(token), which binds one
@@ -97,12 +108,35 @@ func (s *tokenSource) current() string {
 type authTransport struct {
 	base http.RoundTripper
 	src  *tokenSource
+
+	// hosts overrides defaultGitHubHosts; only tests set it.
+	hosts map[string]bool
+}
+
+func (t *authTransport) allowed(host string) bool {
+	hosts := t.hosts
+	if hosts == nil {
+		hosts = defaultGitHubHosts
+	}
+	return hosts[host]
 }
 
 func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
+	}
+
+	// Scope the credential to GitHub's own API hosts.
+	//
+	// This RoundTripper wraps the whole transport, so it runs again on the
+	// request http.Client builds when following a redirect. http.Client strips
+	// Authorization when a redirect changes host (Go 1.8+) exactly to stop
+	// credential leaks; re-attaching it unconditionally here would undo that
+	// protection and hand a highly privileged GitHub App token to whatever host
+	// the redirect pointed at.
+	if !t.allowed(req.URL.Host) {
+		return base.RoundTrip(req)
 	}
 
 	token := t.src.token()
@@ -112,6 +146,11 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	// RoundTripper must not modify the request it is given.
 	clone := req.Clone(req.Context())
+	// req.Clone copies a nil Header as nil, and Set on a nil map panics.
+	// go-github always initialises it, but the assumption costs nothing to drop.
+	if clone.Header == nil {
+		clone.Header = make(http.Header)
+	}
 	clone.Header.Set("Authorization", "Bearer "+token)
 	return base.RoundTrip(clone)
 }

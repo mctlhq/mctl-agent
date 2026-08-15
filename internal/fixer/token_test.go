@@ -17,6 +17,7 @@ package fixer
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -117,9 +118,7 @@ func TestAuthTransport(t *testing.T) {
 		defer srv.Close()
 
 		path := writeToken(t, "first")
-		client := &http.Client{
-			Transport: &authTransport{base: http.DefaultTransport, src: newTokenSource("", path)},
-		}
+		client := newTestClient(t, newTokenSource("", path), srv.URL)
 
 		doGet(t, client, srv.URL)
 		if err := os.WriteFile(path, []byte("second"), 0o600); err != nil {
@@ -142,9 +141,7 @@ func TestAuthTransport(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
 		defer srv.Close()
 
-		client := &http.Client{
-			Transport: &authTransport{base: http.DefaultTransport, src: newTokenSource("tok", "")},
-		}
+		client := newTestClient(t, newTokenSource("tok", ""), srv.URL)
 		req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
 		if err != nil {
 			t.Fatalf("new request: %v", err)
@@ -160,6 +157,30 @@ func TestAuthTransport(t *testing.T) {
 		}
 	})
 
+	t.Run("survives a request with a nil Header", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+		defer srv.Close()
+
+		tr := &authTransport{
+			base:  http.DefaultTransport,
+			src:   newTokenSource("tok", ""),
+			hosts: hostsOf(t, srv.URL),
+		}
+		req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+		if err != nil {
+			t.Fatalf("new request: %v", err)
+		}
+		req.Header = nil // http.NewRequest always sets one; a hand-built request need not
+
+		resp, err := tr.RoundTrip(req) // must not panic
+		if err != nil {
+			t.Fatalf("round trip: %v", err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("close body: %v", err)
+		}
+	})
+
 	t.Run("omits the header when no token is available", func(t *testing.T) {
 		var seen string
 		srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
@@ -167,15 +188,82 @@ func TestAuthTransport(t *testing.T) {
 		}))
 		defer srv.Close()
 
-		client := &http.Client{
-			Transport: &authTransport{base: http.DefaultTransport, src: newTokenSource("", "")},
-		}
+		client := newTestClient(t, newTokenSource("", ""), srv.URL)
 		doGet(t, client, srv.URL)
 
 		if seen != "" {
 			t.Errorf("Authorization = %q, want empty", seen)
 		}
 	})
+
+	t.Run("never sends the token to a non-GitHub host", func(t *testing.T) {
+		var seen string
+		other := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			seen = r.Header.Get("Authorization")
+		}))
+		defer other.Close()
+
+		// Only the "GitHub" server is allow-listed; the other host is not.
+		gh := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, _ *http.Request) {}))
+		defer gh.Close()
+
+		client := newTestClient(t, newTokenSource("super-secret", ""), gh.URL)
+		doGet(t, client, other.URL)
+
+		if seen != "" {
+			t.Errorf("token leaked to a non-GitHub host: Authorization = %q", seen)
+		}
+	})
+
+	t.Run("does not re-attach the token across a cross-host redirect", func(t *testing.T) {
+		// Go's http.Client strips Authorization when a redirect changes host.
+		// Because this RoundTripper wraps the whole transport it also runs on
+		// the redirected request, so without host scoping it would put the
+		// header straight back and leak the token to the redirect target.
+		var seen string
+		attacker := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+			seen = r.Header.Get("Authorization")
+		}))
+		defer attacker.Close()
+
+		gh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, attacker.URL, http.StatusFound)
+		}))
+		defer gh.Close()
+
+		client := newTestClient(t, newTokenSource("super-secret", ""), gh.URL)
+		doGet(t, client, gh.URL)
+
+		if seen != "" {
+			t.Errorf("token leaked across redirect: Authorization = %q", seen)
+		}
+	})
+}
+
+// newTestClient builds a client whose transport treats the given URLs' hosts as
+// the GitHub API hosts, since httptest servers live on 127.0.0.1.
+func newTestClient(t *testing.T, src *tokenSource, allowedURLs ...string) *http.Client {
+	t.Helper()
+	return &http.Client{
+		Transport: &authTransport{
+			base:  http.DefaultTransport,
+			src:   src,
+			hosts: hostsOf(t, allowedURLs...),
+		},
+	}
+}
+
+func hostsOf(t *testing.T, rawURLs ...string) map[string]bool {
+	t.Helper()
+	hosts := make(map[string]bool, len(rawURLs))
+	for _, raw := range rawURLs {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatalf("parse %s: %v", raw, err)
+		}
+		hosts[u.Host] = true
+	}
+	return hosts
 }
 
 func writeToken(t *testing.T, contents string) string {
