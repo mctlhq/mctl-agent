@@ -36,7 +36,13 @@ type Store struct {
 
 // NewStore opens (or creates) the database.
 // Supports "sqlite" (path to file) or "postgres" (postgres://... URL).
-func NewStore(connStr string) (*Store, error) {
+//
+// ctx bounds the blocking I/O below (WAL pragma, version probe, migration).
+// connect_timeout on the DSN only bounds the initial dial; a hang after the
+// connection is established (e.g. during migration) is otherwise invisible
+// to callers watching ctx for cancellation, such as initTicketStore's
+// SIGTERM handling in cmd/agent.
+func NewStore(ctx context.Context, connStr string) (*Store, error) {
 	driver := "sqlite"
 	if strings.HasPrefix(connStr, "postgres://") || strings.HasPrefix(connStr, "postgresql://") {
 		driver = "postgres"
@@ -49,16 +55,16 @@ func NewStore(connStr string) (*Store, error) {
 
 	if driver == "sqlite" {
 		// WAL mode for better read concurrency — best-effort, non-fatal.
-		_, _ = db.Exec("PRAGMA journal_mode=WAL")
+		_, _ = db.ExecContext(ctx, "PRAGMA journal_mode=WAL")
 		// Log embedded SQLite version for audit/observability.
 		var sqliteVersion string
-		if err := db.QueryRow("SELECT sqlite_version()").Scan(&sqliteVersion); err == nil {
+		if err := db.QueryRowContext(ctx, "SELECT sqlite_version()").Scan(&sqliteVersion); err == nil {
 			slog.Info("sqlite driver initialised", "sqlite_version", sqliteVersion)
 		}
 	}
 
 	s := &Store{db: db, dialect: driver}
-	if err := s.migrate(); err != nil {
+	if err := s.migrate(ctx); err != nil {
 		// sql.Open starts a background connectionOpener goroutine that only
 		// exits on Close. Callers retry NewStore, so leaving it open here
 		// leaks one goroutine (and one *sql.DB) per failed attempt.
@@ -87,10 +93,10 @@ func (s *Store) rebind(query string) string {
 	return string(out)
 }
 
-func (s *Store) migrate() error {
+func (s *Store) migrate(ctx context.Context) error {
 	var err error
 	if s.dialect == "postgres" {
-		_, err = s.db.Exec(`
+		_, err = s.db.ExecContext(ctx, `
 			CREATE TABLE IF NOT EXISTS tickets (
 				id          TEXT PRIMARY KEY,
 				source      TEXT NOT NULL,
@@ -122,7 +128,7 @@ func (s *Store) migrate() error {
 			);
 		`)
 	} else {
-		_, err = s.db.Exec(`
+		_, err = s.db.ExecContext(ctx, `
 			CREATE TABLE IF NOT EXISTS tickets (
 				id          TEXT PRIMARY KEY,
 				source      TEXT NOT NULL,
@@ -158,26 +164,26 @@ func (s *Store) migrate() error {
 		return err
 	}
 
-	if err := s.ensureColumn("tickets", "alert_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.ensureColumn(ctx, "tickets", "alert_name", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureColumn("tickets", "pr_repo", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.ensureColumn(ctx, "tickets", "pr_repo", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureColumn("tickets", "pr_branch", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.ensureColumn(ctx, "tickets", "pr_branch", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureColumn("tickets", "pr_commit_sha", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.ensureColumn(ctx, "tickets", "pr_commit_sha", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureColumn("tickets", "alert_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
+	if err := s.ensureColumn(ctx, "tickets", "alert_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if err := s.ensureIndex("idx_tickets_alert_fingerprint", "tickets", "alert_fingerprint"); err != nil {
+	if err := s.ensureIndex(ctx, "idx_tickets_alert_fingerprint", "tickets", "alert_fingerprint"); err != nil {
 		return err
 	}
 
-	_, err = s.db.Exec(`
+	_, err = s.db.ExecContext(ctx, `
 		CREATE INDEX IF NOT EXISTS idx_tickets_status ON tickets(status);
 		CREATE INDEX IF NOT EXISTS idx_tickets_tenant_service_type ON tickets(tenant, service, type);
 		CREATE INDEX IF NOT EXISTS idx_evidence_ticket ON evidence(ticket_id);
@@ -185,12 +191,12 @@ func (s *Store) migrate() error {
 	return err
 }
 
-func (s *Store) ensureColumn(table, column, definition string) error {
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
 	query := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition)
 	if s.dialect == "postgres" {
 		query = fmt.Sprintf("ALTER TABLE %s ADD COLUMN IF NOT EXISTS %s %s", table, column, definition)
 	}
-	if _, err := s.db.Exec(query); err != nil {
+	if _, err := s.db.ExecContext(ctx, query); err != nil {
 		if s.dialect != "postgres" && strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 			return nil
 		}
@@ -199,9 +205,9 @@ func (s *Store) ensureColumn(table, column, definition string) error {
 	return nil
 }
 
-func (s *Store) ensureIndex(name, table, column string) error {
+func (s *Store) ensureIndex(ctx context.Context, name, table, column string) error {
 	query := fmt.Sprintf("CREATE INDEX IF NOT EXISTS %s ON %s(%s)", name, table, column)
-	_, err := s.db.Exec(query)
+	_, err := s.db.ExecContext(ctx, query)
 	return err
 }
 

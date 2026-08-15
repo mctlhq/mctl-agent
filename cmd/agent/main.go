@@ -281,7 +281,7 @@ func initTicketStore(ctx context.Context, connStr string) (*ticket.Store, error)
 	connStr = withConnectTimeout(connStr)
 
 	for attempt := 1; ; attempt++ {
-		store, err := newTicketStore(connStr)
+		store, err := newTicketStore(ctx, connStr)
 		if err == nil {
 			if attempt > 1 {
 				slog.Info("ticket store initialised after retry", "attempts", attempt)

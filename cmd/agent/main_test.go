@@ -186,14 +186,14 @@ func TestInitTicketStoreSucceedsAfterATransientFailure(t *testing.T) {
 	t.Cleanup(func() { newTicketStore = original })
 
 	attempts := 0
-	newTicketStore = func(connStr string) (*ticket.Store, error) {
+	newTicketStore = func(ctx context.Context, connStr string) (*ticket.Store, error) {
 		attempts++
 		if attempts == 1 {
 			return nil, fmt.Errorf("migrating: dial tcp 10.43.131.86:5432: connect: connection refused")
 		}
 		// Attempt 2 lands after the pod network is up. A SQLite store stands
 		// in for the real one — initTicketStore only cares that it opened.
-		return ticket.NewStore(filepath.Join(t.TempDir(), "agent.db"))
+		return ticket.NewStore(ctx, filepath.Join(t.TempDir(), "agent.db"))
 	}
 
 	store, err := initTicketStore(context.Background(), "postgres://u:p@host:5432/db")
