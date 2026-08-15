@@ -173,6 +173,20 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
+		// The webhook secret and the chat allowlist authenticate different
+		// things: the secret proves the request came via Telegram's
+		// delivery, the allowlist proves who sent the message. Production
+		// needs both — with only an allowlist, a direct POST with a
+		// spoofed chat.id passes; with only a secret, any Telegram user
+		// who finds the bot can issue commands. Commands run either fully
+		// configured or fully unconfigured (local development).
+		if (opts.TelegramWebhookSecret != "") != opts.Telegram.HasChatAllowlist() {
+			slog.Warn("telegram command rejected: set both TELEGRAM_WEBHOOK_SECRET and TELEGRAM_CHAT_ID (or neither, for local dev)",
+				"chat_id", update.Message.Chat.ID)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		if opts.Telegram != nil && !opts.Telegram.CommandChatAllowed(update.Message.Chat.ID) {
 			slog.Warn("telegram command from non-allowlisted chat",
 				"chat_id", update.Message.Chat.ID)

@@ -122,6 +122,62 @@ func TestTelegramWebhookSecretAndChatAllowlist(t *testing.T) {
 	}
 }
 
+func TestTelegramFailClosedWithoutChatAllowlist(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	// Production auth (webhook secret) enabled, but no chat IDs configured:
+	// commands must be dropped instead of falling back to open mode.
+	tg := notify.NewTelegram("token", "", "", nil)
+	router := NewRouter(Options{
+		Store:                 store,
+		Pipeline:              pipe,
+		Telegram:              tg,
+		TelegramWebhookSecret: "tg-secret",
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+
+	body := []byte(`{"message":{"text":"/pause","chat":{"id":1}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/telegram", bytes.NewReader(body))
+	req.Header.Set("X-Telegram-Bot-Api-Secret-Token", "tg-secret")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rejected command should still return 200: status=%d", w.Code)
+	}
+	if pipe.IsPaused() {
+		t.Fatal("command must not execute when webhook secret is set without a chat allowlist")
+	}
+}
+
+func TestTelegramFailClosedWithoutWebhookSecret(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	// Chat allowlist configured but no webhook secret: a direct POST with
+	// a spoofed allowlisted chat.id must not execute commands.
+	tg := notify.NewTelegram("token", "210408407", "", nil)
+	router := NewRouter(Options{
+		Store:    store,
+		Pipeline: pipe,
+		Telegram: tg,
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+
+	body := []byte(`{"message":{"text":"/pause","chat":{"id":210408407}}}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/telegram", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("rejected command should still return 200: status=%d", w.Code)
+	}
+	if pipe.IsPaused() {
+		t.Fatal("command must not execute when a chat allowlist is set without a webhook secret")
+	}
+}
+
 func TestWebhookCRUDRequiresBearerWhenConfigured(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
