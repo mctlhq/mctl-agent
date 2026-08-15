@@ -272,6 +272,7 @@ const storeInitBudget = 8 * time.Second
 func initTicketStore(ctx context.Context, connStr string) (*ticket.Store, error) {
 	deadline := time.Now().Add(storeInitBudget)
 	delay := 250 * time.Millisecond
+	connStr = withConnectTimeout(connStr)
 
 	for attempt := 1; ; attempt++ {
 		store, err := ticket.NewStore(connStr)
@@ -318,13 +319,44 @@ func isTransientDialError(err error) bool {
 
 // redactDSN strips the password from a postgres URL so it never reaches the
 // logs. A non-URL DSN (the SQLite file path) is returned unchanged.
+//
+// Fails closed: a DSN that will not parse is exactly the malformed input most
+// likely to accompany a real startup failure, so it is replaced wholesale
+// rather than echoed back with a password still in it.
 func redactDSN(dsn string) string {
 	u, err := url.Parse(dsn)
-	if err != nil || u.User == nil {
+	if err != nil {
+		return "<unparseable dsn>"
+	}
+	if u.User == nil {
 		return dsn
 	}
 	if _, hasPassword := u.User.Password(); hasPassword {
 		u.User = url.UserPassword(u.User.Username(), "redacted")
 	}
+	return u.String()
+}
+
+// withConnectTimeout bounds a single dial attempt. Without it the retry loop
+// only controls the gaps between attempts: a network that drops packets
+// (rather than refusing the connection) leaves one dial blocked for the OS TCP
+// connect timeout — ~130s on Linux — which overruns both the init budget and
+// the SIGTERM grace period. Non-postgres DSNs (the SQLite path) pass through.
+func withConnectTimeout(dsn string) string {
+	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
+		return dsn
+	}
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return dsn
+	}
+	q := u.Query()
+	if q.Get("connect_timeout") != "" {
+		return dsn // operator-supplied value wins
+	}
+	// Seconds, per libpq. Two dials fit inside the budget, so a hung attempt
+	// still leaves room for one retry.
+	q.Set("connect_timeout", "3")
+	u.RawQuery = q.Encode()
 	return u.String()
 }
