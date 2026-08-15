@@ -173,6 +173,17 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
+		// A configured webhook secret means production mode: the chat
+		// allowlist must also be configured, otherwise any Telegram user
+		// who finds the bot could issue commands (the secret only proves
+		// the request came via Telegram, not who sent the message).
+		if opts.TelegramWebhookSecret != "" && !opts.Telegram.HasChatAllowlist() {
+			slog.Warn("telegram command rejected: webhook secret set but no chat allowlist (set TELEGRAM_CHAT_ID)",
+				"chat_id", update.Message.Chat.ID)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		if opts.Telegram != nil && !opts.Telegram.CommandChatAllowed(update.Message.Chat.ID) {
 			slog.Warn("telegram command from non-allowlisted chat",
 				"chat_id", update.Message.Chat.ID)

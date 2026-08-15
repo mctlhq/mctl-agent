@@ -307,6 +307,14 @@ type TelegramUpdate struct {
 	} `json:"message"`
 }
 
+// HasChatAllowlist reports whether at least one chat ID is configured.
+// When false, CommandChatAllowed runs in open mode — acceptable for local
+// development only, so callers running with production auth enabled must
+// refuse commands instead of trusting the open mode.
+func (tg *Telegram) HasChatAllowlist() bool {
+	return tg != nil && (tg.chatID != "" || len(tg.tenantChatIDs) > 0)
+}
+
 // CommandChatAllowed reports whether inbound bot commands from this chat
 // should be executed. An unconfigured notifier (no chat IDs) allows all
 // chats so unit tests keep working; production always sets TELEGRAM_CHAT_ID.
