@@ -27,6 +27,7 @@ type Config struct {
 	MctlAPIToken                string
 	AnthropicAPIKey             string
 	GitHubToken                 string
+	GitHubTokenFile             string // mounted Secret file, re-read per API call; see internal/fixer.tokenSource
 	GitHubOwner                 string
 	GitHubRepo                  string
 	GitHubWebhookSecret         string
@@ -205,6 +206,7 @@ func Load() Config {
 		MctlAPIToken:                mctlAPIToken,
 		AnthropicAPIKey:             os.Getenv("ANTHROPIC_API_KEY"),
 		GitHubToken:                 githubToken,
+		GitHubTokenFile:             strings.TrimSpace(os.Getenv("GITHUB_TOKEN_FILE")),
 		GitHubOwner:                 envOr("GITHUB_OWNER", "mctlhq"),
 		GitHubRepo:                  envOr("GITHUB_REPO", "mctl-gitops"),
 		GitHubWebhookSecret:         strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
