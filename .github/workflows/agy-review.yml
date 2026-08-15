@@ -1,0 +1,17 @@
+name: Agy PR review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  agy-review:
+    uses: mctlhq/.github/.github/workflows/agy-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      conventions: |
+        Focus on: Go concurrency safety and goroutine leaks, context propagation through all I/O, error wrapping (`fmt.Errorf`), skill registry invariants in `internal/skill/` (match ranking, disable/enable, SQLite-backed metrics and the circuit breaker), per-skill access control in the `internal/capability/` sandbox, pipeline stage ordering and partial-failure handling in `internal/pipeline/`, prompt construction for the Claude API in the LLMDiagnosis skill, correctness of the PRs opened against mctl-gitops, bearer-token authentication on the webhook and REST endpoints in `internal/api/`, MCP tool schema parity in `internal/mcp/`, and missing table-driven test coverage for changed skill match/diagnose behavior.
