@@ -16,11 +16,16 @@ package main
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -46,10 +51,16 @@ func main() {
 
 	cfg := config.Load()
 
-	// Initialize database store.
-	store, err := ticket.NewStore(cfg.DatabaseURL)
+	// Initialize database store. The pod's network namespace is not always
+	// ready when the process starts: a same-node dial to shared-pg gets
+	// "connection refused" for the first few seconds, and a single attempt
+	// then exits 1 and burns a CrashLoopBackOff restart on every rollout.
+	initCtx, stopInitSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	store, err := initTicketStore(initCtx, cfg.DatabaseURL)
+	stopInitSignals()
 	if err != nil {
-		slog.Error("failed to initialize ticket store", "error", err, "url", cfg.DatabaseURL)
+		// cfg.DatabaseURL carries the DB password — log the redacted form only.
+		slog.Error("failed to initialize ticket store", "error", err, "url", redactDSN(cfg.DatabaseURL))
 		os.Exit(1)
 	}
 	defer store.Close() //nolint:errcheck
@@ -247,4 +258,73 @@ func sendDigest(store *ticket.Store, tg *notify.Telegram) {
 	if err := tg.SendDailyDigest(open, resolved, prs); err != nil {
 		slog.Error("daily digest: failed to send", "error", err)
 	}
+}
+
+// storeInitBudget bounds how long startup waits for the database to accept
+// connections. Kept under the readiness probe's first-failure window so a
+// genuinely dead database still surfaces as a failing pod rather than a pod
+// that hangs in "starting" forever.
+const storeInitBudget = 8 * time.Second
+
+// initTicketStore opens the ticket store, retrying while the database refuses
+// connections. Errors that are not transient (a malformed DSN, a failed
+// migration) fail on the first attempt — retrying those only delays the exit.
+func initTicketStore(ctx context.Context, connStr string) (*ticket.Store, error) {
+	deadline := time.Now().Add(storeInitBudget)
+	delay := 250 * time.Millisecond
+
+	for attempt := 1; ; attempt++ {
+		store, err := ticket.NewStore(connStr)
+		if err == nil {
+			if attempt > 1 {
+				slog.Info("ticket store initialised after retry", "attempts", attempt)
+			}
+			return store, nil
+		}
+		if !isTransientDialError(err) || time.Now().After(deadline) {
+			return nil, err
+		}
+		slog.Warn("ticket store not reachable yet, retrying",
+			"attempt", attempt, "retry_in", delay, "error", err)
+
+		select {
+		case <-ctx.Done():
+			// SIGTERM during startup: stop retrying and report why.
+			return nil, fmt.Errorf("interrupted while waiting for database: %w", ctx.Err())
+		case <-time.After(delay):
+		}
+		if delay < time.Second {
+			delay *= 2
+		}
+	}
+}
+
+// isTransientDialError reports whether err is the pod-network-not-ready
+// signature (connection refused / no route / DNS not resolving yet) rather
+// than a permanent configuration or migration failure.
+func isTransientDialError(err error) bool {
+	var netErr *net.OpError
+	if errors.As(err, &netErr) {
+		return true
+	}
+	msg := err.Error()
+	for _, s := range []string{"connection refused", "no such host", "network is unreachable", "i/o timeout"} {
+		if strings.Contains(msg, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// redactDSN strips the password from a postgres URL so it never reaches the
+// logs. A non-URL DSN (the SQLite file path) is returned unchanged.
+func redactDSN(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil || u.User == nil {
+		return dsn
+	}
+	if _, hasPassword := u.User.Password(); hasPassword {
+		u.User = url.UserPassword(u.User.Username(), "redacted")
+	}
+	return u.String()
 }
