@@ -68,8 +68,14 @@ type alert struct {
 	EndsAt      time.Time         `json:"endsAt"`
 }
 
+// maxAlertBodyBytes bounds inbound AlertManager payloads. Firing-alert
+// batches are a few KB at most; 1MB leaves generous headroom while
+// stopping an oversized body from being read fully into memory.
+const maxAlertBodyBytes = 1 << 20 // 1MB
+
 // ServeHTTP handles POST /api/v1/alerts.
 func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxAlertBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)

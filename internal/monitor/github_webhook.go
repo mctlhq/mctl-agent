@@ -57,8 +57,14 @@ type workflowRunEvent struct {
 	} `json:"repository"`
 }
 
+// maxGitHubWebhookBodyBytes bounds inbound GitHub webhook payloads.
+// workflow_run events are well under 1MB; this stops an oversized body
+// from being read fully into memory before the signature is even checked.
+const maxGitHubWebhookBodyBytes = 1 << 20 // 1MB
+
 // ServeHTTP handles POST /api/v1/github-webhook.
 func (h *GitHubWebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxGitHubWebhookBodyBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)

@@ -16,6 +16,7 @@ package notify
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -339,7 +340,7 @@ func (tg *Telegram) CommandChatAllowed(chatID int64) bool {
 
 // SetWebhook registers the public Telegram webhook. secret_token is the
 // value Telegram will send back as X-Telegram-Bot-Api-Secret-Token.
-func (tg *Telegram) SetWebhook(publicBaseURL, secretToken string) error {
+func (tg *Telegram) SetWebhook(ctx context.Context, publicBaseURL, secretToken string) error {
 	if tg == nil || tg.botToken == "" || strings.TrimSpace(publicBaseURL) == "" {
 		return nil
 	}
@@ -354,7 +355,12 @@ func (tg *Telegram) SetWebhook(publicBaseURL, secretToken string) error {
 		return fmt.Errorf("telegram setWebhook: encode: %w", err)
 	}
 	url := fmt.Sprintf("https://api.telegram.org/bot%s/setWebhook", tg.botToken)
-	resp, err := tg.httpClient.Post(url, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram setWebhook: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tg.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram setWebhook: %w", err)
 	}

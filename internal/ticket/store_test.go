@@ -1,6 +1,7 @@
 package ticket
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
@@ -403,7 +404,7 @@ func TestListByFiltersSurviveTableCap(t *testing.T) {
 		}
 	}
 
-	got, err := store.ListByFilters("analyzing", "platform-db", "shared", 100)
+	got, err := store.ListByFilters(context.Background(), "analyzing", "platform-db", "shared", 100)
 	if err != nil {
 		t.Fatal(err)
 	}
