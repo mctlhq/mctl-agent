@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.15.3](https://github.com/mctlhq/mctl-agent/compare/1.15.2...1.15.3) (2026-08-15)
+
+
+### Bug Fixes
+
+* **api:** also fail closed when a chat allowlist is set without a webhook secret ([a8ec6d9](https://github.com/mctlhq/mctl-agent/commit/a8ec6d9fc73c210453221ad75cd6b5a209f538b8))
+* **api:** fail closed when webhook secret is set without a Telegram chat allowlist ([2afd615](https://github.com/mctlhq/mctl-agent/commit/2afd615524e0979cd7634889e351e60ec2bca93d))
+* **api:** fail closed when webhook secret is set without a Telegram chat allowlist ([960c10d](https://github.com/mctlhq/mctl-agent/commit/960c10daacbc3122566dfd14c36185f4d6273390))
+
 ## [1.15.2](https://github.com/mctlhq/mctl-agent/compare/1.15.1...1.15.2) (2026-08-14)
 
 
