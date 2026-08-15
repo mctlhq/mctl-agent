@@ -322,7 +322,7 @@ func (tg *Telegram) CommandChatAllowed(chatID int64) bool {
 	if tg == nil {
 		return false
 	}
-	if tg.chatID == "" && len(tg.tenantChatIDs) == 0 {
+	if !tg.HasChatAllowlist() {
 		return true
 	}
 	got := strconv.FormatInt(chatID, 10)
