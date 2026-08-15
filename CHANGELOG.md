@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.15.5](https://github.com/mctlhq/mctl-agent/compare/1.15.4...1.15.5) (2026-08-15)
+
+
+### Bug Fixes
+
+* API hardening backlog from [#65](https://github.com/mctlhq/mctl-agent/issues/65) (context, body limits, error sanitization) ([42091ef](https://github.com/mctlhq/mctl-agent/commit/42091eff340a2d9a7a0980245228095181c518ae))
+
+## [1.15.4](https://github.com/mctlhq/mctl-agent/compare/1.15.3...1.15.4) (2026-08-15)
+
+
+### Bug Fixes
+
+* **fixer:** re-read the GitHub token per API call so rotation lands ([b8eafb9](https://github.com/mctlhq/mctl-agent/commit/b8eafb951de69f49c7d0bed872bb78fd6c552c00))
+* **fixer:** re-read the GitHub token per API call so rotation lands ([3bae35e](https://github.com/mctlhq/mctl-agent/commit/3bae35e5be1ea2417ddbe045b2bf077fd5a7631b))
+* **fixer:** scope the GitHub token to GitHub API hosts only ([d7dc2a1](https://github.com/mctlhq/mctl-agent/commit/d7dc2a1ec65df912d19a5293e392c0a381703323))
+
 ## [1.15.3](https://github.com/mctlhq/mctl-agent/compare/1.15.2...1.15.3) (2026-08-15)
 
 

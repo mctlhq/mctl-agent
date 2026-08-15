@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/google/go-github/v68/github"
@@ -34,8 +35,15 @@ type GitHubFixer struct {
 }
 
 // NewGitHubFixer creates a new GitHub PR fixer.
-func NewGitHubFixer(token, owner, repo string, store *ticket.Store, dryRun bool) *GitHubFixer {
-	client := github.NewClient(nil).WithAuthToken(token)
+//
+// tokenFile, when set, is a mounted Secret file re-read before every API call
+// so a rotated GitHub App installation token is picked up without a restart —
+// see tokenSource. When empty, token is used as-is and behaviour is unchanged.
+func NewGitHubFixer(token, tokenFile, owner, repo string, store *ticket.Store, dryRun bool) *GitHubFixer {
+	src := newTokenSource(token, tokenFile)
+	client := github.NewClient(&http.Client{
+		Transport: &authTransport{base: http.DefaultTransport, src: src},
+	})
 	return &GitHubFixer{
 		client: client,
 		owner:  owner,

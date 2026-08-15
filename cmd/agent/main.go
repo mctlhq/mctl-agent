@@ -67,7 +67,7 @@ func main() {
 
 	// Initialize components.
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)
-	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun)
+	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubTokenFile, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun)
 	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.OpenClawBotUsername, cfg.TelegramTenantChatIDs)
 	var webhookStore *webhook.Store
 	var webhookDispatcher *webhook.Dispatcher
@@ -207,7 +207,9 @@ func main() {
 
 	if cfg.TelegramWebhookSecret != "" && cfg.WebhookCallbackURL != "" {
 		go func() {
-			if err := telegram.SetWebhook(cfg.WebhookCallbackURL, cfg.TelegramWebhookSecret); err != nil {
+			setWebhookCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if err := telegram.SetWebhook(setWebhookCtx, cfg.WebhookCallbackURL, cfg.TelegramWebhookSecret); err != nil {
 				slog.Error("telegram setWebhook failed", "error", err)
 				return
 			}
