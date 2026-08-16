@@ -308,3 +308,57 @@ func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
 		})
 	}
 }
+
+// mctl-api must first see the incident as analyzing, not open. The publish used
+// to happen before the status was set and got away with it only because it ran
+// in a goroutine that read the live ticket and usually observed the write on
+// the next line. Once that race was removed the incident sat at `open` in
+// mctl-api for the entire diagnosis, with nothing scheduled to correct it.
+func TestPublishAlertCarriesAnalyzingStatus(t *testing.T) {
+	var mu sync.Mutex
+	var firstStatus string
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		mu.Lock()
+		if firstStatus == "" {
+			firstStatus = payload.Status
+		}
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	p, store := newEscalateTestPipeline(t)
+	p.apiClient = mctlclient.NewClient(srv.URL, "test-token")
+
+	tk := &ticket.Ticket{
+		Source:    ticket.SourceAlertManager,
+		AlertName: "ArgoCDApplicationDegraded",
+		Type:      ticket.TypeArgoCDDegraded,
+		Tenant:    "argocd",
+		Service:   "root-app",
+		Summary:   "Degraded for 30m",
+		Severity:  ticket.SeverityWarning,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// The two statements processTicketSync runs, in the order it runs them.
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(tk); err != nil {
+		t.Fatal(err)
+	}
+	p.publishAlert(tk)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if firstStatus != ticket.StatusAnalyzing {
+		t.Errorf("mctl-api first saw status %q, want %q", firstStatus, ticket.StatusAnalyzing)
+	}
+}
