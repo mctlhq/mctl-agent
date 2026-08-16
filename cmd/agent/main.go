@@ -127,6 +127,7 @@ func main() {
 	poller := monitor.NewPoller(mctlClient, store, pipe.ProcessTicket)
 	poller.StaleAfter = cfg.AutoResolveStaleAfter
 	poller.AnalyzingAfter = cfg.AutoResolveAnalyzingAfter
+	poller.EscalatedAfter = cfg.AutoResolveEscalatedAfter
 	poller.FixProposedAfter = cfg.AutoResolveFixProposedAfter
 	poller.OrphanAfter = cfg.AutoResolveOrphanAfter
 	poller.MaxAnalyzingAge = cfg.MaxAnalyzingAge

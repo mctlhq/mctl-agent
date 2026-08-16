@@ -38,8 +38,18 @@ const (
 
 // Ticket statuses.
 const (
-	StatusOpen        = "open"
-	StatusAnalyzing   = "analyzing"
+	StatusOpen      = "open"
+	StatusAnalyzing = "analyzing"
+	// StatusEscalated is terminal for the pipeline and active for humans: the
+	// agent finished with the ticket and will not attempt a fix, but the
+	// underlying problem is still open. Before this existed, every "diagnosed
+	// but not fixable" path left the ticket in StatusAnalyzing forever, which
+	// claimed an analysis was in progress when nothing was running.
+	//
+	// It is deliberately NOT treated as closed: it stays in ListOpen, in the
+	// watchdog's scope, and in mctl-api's active-incident filters, so a
+	// recurring alert still deduplicates onto it instead of spawning twins.
+	StatusEscalated   = "escalated"
 	StatusFixProposed = "fix_proposed"
 	StatusFixApplied  = "fix_applied"
 	StatusResolved    = "resolved"

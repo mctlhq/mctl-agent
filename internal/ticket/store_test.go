@@ -231,7 +231,7 @@ func TestStoreListOpenAndListAll(t *testing.T) {
 	store := newTestStore(t)
 
 	// Create several tickets with different statuses.
-	for _, s := range []string{StatusOpen, StatusAnalyzing, StatusResolved, StatusSuppressed} {
+	for _, s := range []string{StatusOpen, StatusAnalyzing, StatusEscalated, StatusResolved, StatusSuppressed} {
 		tk := &Ticket{Source: SourcePolling, Type: TypeArgoCDDegraded, Tenant: "t", Service: "s", Status: s}
 		tk.Status = "" // Let Create set default
 		if err := store.Create(tk); err != nil {
@@ -249,17 +249,28 @@ func TestStoreListOpenAndListAll(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Should include open + analyzing but not resolved/suppressed.
-	if len(open) != 2 {
-		t.Errorf("expected 2 open tickets, got %d", len(open))
+	// Should include open + analyzing + escalated but not resolved/suppressed.
+	// Escalated is terminal for the pipeline but the underlying problem is
+	// still live, so the watchdog and reconcile loops must keep seeing it.
+	if len(open) != 3 {
+		t.Errorf("expected 3 open tickets, got %d", len(open))
+	}
+	var sawEscalated bool
+	for _, tk := range open {
+		if tk.Status == StatusEscalated {
+			sawEscalated = true
+		}
+	}
+	if !sawEscalated {
+		t.Error("ListOpen must include escalated tickets, otherwise they are never GC'd")
 	}
 
 	all, err := store.ListAll()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(all) != 4 {
-		t.Errorf("expected 4 total tickets, got %d", len(all))
+	if len(all) != 5 {
+		t.Errorf("expected 5 total tickets, got %d", len(all))
 	}
 }
 

@@ -23,8 +23,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	_ "modernc.org/sqlite"
@@ -1319,5 +1319,83 @@ func TestMaxAnalyzingAgePropagatesResolveToMctlAPI(t *testing.T) {
 
 	if got := rc.await(t); got != tk.ID {
 		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
+	}
+}
+
+// TestResolveStaleEscalatedOnlyConfig covers the guard at the top of
+// resolveStale. Every duration in the thresholds map has to be represented in
+// that early return; leaving EscalatedAfter out means an operator who zeroes
+// the other durations and configures only AUTO_RESOLVE_ESCALATED_AFTER gets no
+// GC at all, silently. The default config sets all of them, so nothing would
+// have caught it in practice.
+func TestResolveStaleEscalatedOnlyConfig(t *testing.T) {
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.StaleAfter = 0
+	p.AnalyzingAfter = 0
+	p.FixProposedAfter = 0
+	p.MaxAnalyzingAge = 0
+	p.EscalatedAfter = 24 * time.Hour
+
+	escalated := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeGeneric,
+		Tenant:   "labs",
+		Service:  "handed-to-a-human",
+		Summary:  "escalated and forgotten",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(escalated); err != nil {
+		t.Fatal(err)
+	}
+	escalated.Status = ticket.StatusEscalated
+	if err := store.Update(escalated); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, escalated.ID, time.Now().UTC().Add(-30*time.Hour))
+
+	p.resolveStale(refreshState{})
+
+	got, err := store.Get(escalated.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("status = %q, want %q — escalated tickets must be GC'd when EscalatedAfter is the only duration set", got.Status, ticket.StatusResolved)
+	}
+}
+
+// TestResolveStaleEscalatedRespectsThreshold pins the other direction: an
+// escalated ticket younger than EscalatedAfter stays put.
+func TestResolveStaleEscalatedRespectsThreshold(t *testing.T) {
+	store := newTestStore(t)
+	p := NewPoller(nil, store, nil)
+	p.EscalatedAfter = 168 * time.Hour
+
+	fresh := &ticket.Ticket{
+		Source:   ticket.SourceAlertManager,
+		Type:     ticket.TypeGeneric,
+		Tenant:   "labs",
+		Service:  "recently-escalated",
+		Summary:  "still worth a look",
+		Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(fresh); err != nil {
+		t.Fatal(err)
+	}
+	fresh.Status = ticket.StatusEscalated
+	if err := store.Update(fresh); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, fresh.ID, time.Now().UTC().Add(-30*time.Hour))
+
+	p.resolveStale(refreshState{})
+
+	got, err := store.Get(fresh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusEscalated {
+		t.Errorf("status = %q, want %q — 30h is well inside the 168h grace period", got.Status, ticket.StatusEscalated)
 	}
 }

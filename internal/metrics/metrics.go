@@ -81,7 +81,9 @@ var OpenTickets = promauto.NewGaugeVec(
 func init() {
 	// Pre-initialize all expected label combinations so the metric appears
 	// in /metrics output at zero even before any ticket has been resolved.
-	for _, s := range []string{"open", "analyzing", "fix_proposed"} {
+	// Keep in sync with the thresholds map in monitor.Poller.resolveStale —
+	// every status the watchdog can TTL-resolve needs a label here.
+	for _, s := range []string{"open", "analyzing", "escalated", "fix_proposed"} {
 		StaleTTLResolved.WithLabelValues(s)
 	}
 

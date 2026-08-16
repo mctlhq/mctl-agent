@@ -280,7 +280,11 @@ func (s *Store) Get(id string) (*Ticket, error) {
 
 // ListOpen returns all non-resolved, non-suppressed tickets.
 func (s *Store) ListOpen() ([]*Ticket, error) {
-	return s.listByStatus(StatusOpen, StatusAnalyzing, StatusFixProposed, StatusFixApplied)
+	// StatusEscalated is included deliberately: it is terminal for the pipeline
+	// but the problem is still open, so the watchdog, the AlertManager reconcile
+	// and orphan pruning must all keep seeing it. Leaving it out would recreate
+	// the stuck-forever bug this status was introduced to fix, minus the watchdog.
+	return s.listByStatus(StatusOpen, StatusAnalyzing, StatusEscalated, StatusFixProposed, StatusFixApplied)
 }
 
 // ListAll returns all tickets (latest first, limit 100).

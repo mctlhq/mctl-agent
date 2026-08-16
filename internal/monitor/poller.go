@@ -37,6 +37,10 @@ type Poller struct {
 	// AnalyzingAfter enables auto-resolution of tickets stuck in StatusAnalyzing
 	// beyond this window. Zero disables this GC pass.
 	AnalyzingAfter time.Duration
+	// EscalatedAfter enables auto-resolution of tickets stuck in StatusEscalated
+	// (diagnosed, handed to a human, never acted on). Same contract as the
+	// others: 0 disables it.
+	EscalatedAfter time.Duration
 	// FixProposedAfter enables auto-resolution of tickets stuck in StatusFixProposed
 	// beyond this window. Zero disables this GC pass.
 	FixProposedAfter time.Duration
@@ -286,7 +290,9 @@ func (p *Poller) eligibleSource(src string) bool {
 // do not depend on mctl-api reachability and are GC'd purely by
 // UpdatedAt, so a partial poller outage does not block noise cleanup.
 func (p *Poller) resolveStale(state refreshState) {
-	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.FixProposedAfter <= 0 && p.MaxAnalyzingAge <= 0 {
+	// Every duration that appears in the thresholds map below must appear here
+	// too, or configuring only that one leaves the whole GC pass short-circuited.
+	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.EscalatedAfter <= 0 && p.FixProposedAfter <= 0 && p.MaxAnalyzingAge <= 0 {
 		return
 	}
 	open, err := p.store.ListOpen()
@@ -298,6 +304,7 @@ func (p *Poller) resolveStale(state refreshState) {
 	thresholds := map[string]time.Duration{
 		ticket.StatusOpen:        p.StaleAfter,
 		ticket.StatusAnalyzing:   p.AnalyzingAfter,
+		ticket.StatusEscalated:   p.EscalatedAfter,
 		ticket.StatusFixProposed: p.FixProposedAfter,
 	}
 
@@ -434,7 +441,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 			continue // pre-Phase-2 ticket; leave to Phase 1 TTL GC
 		}
 		switch t.Status {
-		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusFixProposed:
+		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusEscalated, ticket.StatusFixProposed:
 		default:
 			continue
 		}
@@ -540,7 +547,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 
 	for _, t := range open {
 		switch t.Status {
-		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusFixProposed:
+		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusEscalated, ticket.StatusFixProposed:
 		default:
 			continue
 		}

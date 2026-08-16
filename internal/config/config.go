@@ -51,6 +51,7 @@ type Config struct {
 	AlertFlapCooldown           time.Duration
 	AutoResolveStaleAfter       time.Duration
 	AutoResolveAnalyzingAfter   time.Duration
+	AutoResolveEscalatedAfter   time.Duration
 	AutoResolveFixProposedAfter time.Duration
 	AutoResolveOrphanAfter      time.Duration
 	AlertIgnoreServiceRegex     string
@@ -126,6 +127,15 @@ func Load() Config {
 	if v := os.Getenv("AUTO_RESOLVE_ANALYZING_AFTER"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil {
 			autoResolveAnalyzingAfter = d
+		}
+	}
+
+	// Matches AutoResolveFixProposedAfter: both mean "a human was asked to look
+	// and has not", so they get the same week-long grace period.
+	autoResolveEscalatedAfter := 168 * time.Hour
+	if v := os.Getenv("AUTO_RESOLVE_ESCALATED_AFTER"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			autoResolveEscalatedAfter = d
 		}
 	}
 
@@ -238,6 +248,7 @@ func Load() Config {
 		AlertFlapCooldown:           alertFlapCooldown,
 		AutoResolveStaleAfter:       autoResolveStaleAfter,
 		AutoResolveAnalyzingAfter:   autoResolveAnalyzingAfter,
+		AutoResolveEscalatedAfter:   autoResolveEscalatedAfter,
 		AutoResolveFixProposedAfter: autoResolveFixProposedAfter,
 		AutoResolveOrphanAfter:      autoResolveOrphanAfter,
 		AlertIgnoreServiceRegex:     alertIgnoreServiceRegex,
