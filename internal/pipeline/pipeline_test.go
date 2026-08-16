@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -185,27 +186,24 @@ func TestEscalatedTicketStaysInListOpen(t *testing.T) {
 	t.Error("escalated ticket missing from ListOpen")
 }
 
-// escalate mutates the same ticket updateAlertAsync hands to mctl-api. This
-// needs a REAL client: with a nil one the nil guard returns before spawning a
-// goroutine, so the test would pass with the snapshot fix reverted — which is
-// exactly what the first version of this test did.
-//
-// The server blocks briefly so the request is still being marshalled while
-// escalate rewrites Status, Analysis and Confidence. Reverting either snapshot
-// in publishAlertAsync/updateAlertAsync makes this fail under -race.
-func TestEscalateNoDataRaceWithAlertSync(t *testing.T) {
-	released := make(chan struct{})
-	var served sync.WaitGroup
-	// Two requests, not one: the explicit updateAlertAsync below, and the one
-	// escalate makes internally. Counting a single Done would drive the
-	// WaitGroup negative and panic inside the handler goroutine.
-	served.Add(2)
+// The two sends for one ticket must reach mctl-api in the order they happened.
+// While they were goroutines, the diagnosis sync (analyzing) and the escalation
+// sync (escalated) raced; the older one arriving last reverted the incident to
+// analyzing with the reason stripped — the very state escalated exists to
+// prevent. Synchronous sends make the order a property of the code.
+func TestAlertSyncPreservesOrder(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		defer served.Done()
-		// Read the body here, inside the handler, so the client goroutine is
-		// demonstrably still touching the ticket while escalate runs.
-		_, _ = io.ReadAll(r.Body)
-		<-released
+		body, _ := io.ReadAll(r.Body)
+		var payload struct {
+			Status string `json:"status"`
+		}
+		_ = json.Unmarshal(body, &payload)
+		mu.Lock()
+		seen = append(seen, payload.Status)
+		mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer srv.Close()
@@ -214,24 +212,31 @@ func TestEscalateNoDataRaceWithAlertSync(t *testing.T) {
 	p.apiClient = mctlclient.NewClient(srv.URL, "test-token")
 	tk := newAnalyzingTicket(t, store)
 
-	p.updateAlertAsync(tk)
-	p.escalate(context.Background(), tk, "Escalated: concurrent sync", nil)
-	close(released)
-	served.Wait()
+	// Mirrors processTicketSync: the diagnosis sync, then an early return that
+	// escalates.
+	p.updateAlert(tk)
+	p.escalate(context.Background(), tk, "Escalated: no skill matched", nil)
 
-	if got, _ := store.Get(tk.ID); got.Status != ticket.StatusEscalated {
-		t.Errorf("status = %q, want %q", got.Status, ticket.StatusEscalated)
+	mu.Lock()
+	defer mu.Unlock()
+	want := []string{ticket.StatusAnalyzing, ticket.StatusEscalated}
+	if len(seen) != len(want) {
+		t.Fatalf("mctl-api saw %v, want %v", seen, want)
+	}
+	for i := range want {
+		if seen[i] != want[i] {
+			t.Fatalf("mctl-api saw %v, want %v — the last write wins, so order decides the final state", seen, want)
+		}
 	}
 }
 
-// The nil guard is a separate property: a pipeline built without an mctl-api
-// client must not panic on the alert-sync path.
+// A pipeline built without an mctl-api client must not panic on the sync path.
 func TestAlertSyncHelpersTolerateNilClient(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
 	tk := newAnalyzingTicket(t, store)
 
-	p.publishAlertAsync(tk)
-	p.updateAlertAsync(tk)
+	p.publishAlert(tk)
+	p.updateAlert(tk)
 }
 
 // stubSkill lets handleHighConfidenceFix be driven to its early returns without

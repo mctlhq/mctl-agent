@@ -85,30 +85,41 @@ func NewPipeline(
 	}
 }
 
-// publishAlertAsync and updateAlertAsync hand mctl-api a snapshot rather than
-// the live ticket. Both used to be `go p.apiClient.X(t)` on the same *Ticket
-// the caller keeps mutating — PublishAlert raced the `t.Status = analyzing`
-// two lines below it, and UpdateAlert after a diagnosis raced whatever the
-// loop did next. The copy is shallow: Evidence shares its backing array, which
-// is safe because evidence is only ever appended through the store before
-// these are called, never rewritten in place afterwards.
+// publishAlert and updateAlert mirror a ticket to mctl-api synchronously.
+//
+// They were goroutines. That raced the caller's own writes, which the previous
+// change fixed by sending a snapshot — and the snapshot exposed a second,
+// worse problem: two sends for the same ticket had no ordering. A diagnosis
+// sync carrying `analyzing` and the escalation sync carrying `escalated` are
+// dispatched moments apart, and if the older one arrives last, mctl-api
+// silently reverts to `analyzing` with the escalation reason stripped. That is
+// the exact state the escalated status exists to prevent, reintroduced through
+// the back door.
+//
+// Every call site is already inside processTicketSync, which runs in its own
+// goroutine per ticket bounded by p.sem, so sending inline costs the pipeline
+// nothing it was not already paying and makes ordering a property of the code
+// rather than of the scheduler. A queue would restore the concurrency at the
+// price of machinery that has to be right; there is nothing here that needs it.
+//
+// Making the publish synchronous also removes a 404 window: UpdateAlert could
+// previously overtake the PublishAlert that creates the incident, in which case
+// the PATCH was rejected and the status never left `analyzing` in mctl-api.
 //
 // The nil guard keeps the pipeline usable without an mctl-api client, which is
 // how the unit tests construct it.
-func (p *Pipeline) publishAlertAsync(t *ticket.Ticket) {
+func (p *Pipeline) publishAlert(t *ticket.Ticket) {
 	if p.apiClient == nil {
 		return
 	}
-	snapshot := *t
-	go p.apiClient.PublishAlert(&snapshot)
+	p.apiClient.PublishAlert(t)
 }
 
-func (p *Pipeline) updateAlertAsync(t *ticket.Ticket) {
+func (p *Pipeline) updateAlert(t *ticket.Ticket) {
 	if p.apiClient == nil {
 		return
 	}
-	snapshot := *t
-	go p.apiClient.UpdateAlert(&snapshot)
+	p.apiClient.UpdateAlert(t)
 }
 
 // escalate ends the pipeline's involvement with a ticket: it records why no
@@ -140,7 +151,7 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	}
 	// Mirror to mctl-api. Without this the incident there keeps the status it
 	// was published with (analyzing), which is what MCP and the dashboards read.
-	p.updateAlertAsync(t)
+	p.updateAlert(t)
 	p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 }
 
@@ -219,7 +230,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	}
 
 	// Publish to mctl-api alert store.
-	p.publishAlertAsync(t)
+	p.publishAlert(t)
 
 	// Update status to analyzing.
 	t.Status = ticket.StatusAnalyzing
@@ -287,7 +298,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		t.Confidence = diag.Confidence
 
 		// Sync diagnosis to mctl-api.
-		p.updateAlertAsync(t)
+		p.updateAlert(t)
 
 		log.Info("diagnosis complete",
 			"skill", rs.Skill.Name(),
@@ -340,7 +351,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			}
 			t.Status = ticket.StatusFixProposed
 			_ = p.store.Update(t)
-			p.updateAlertAsync(t)
+			p.updateAlert(t)
 			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 			return
 		}
@@ -420,7 +431,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
-		p.updateAlertAsync(t)
+		p.updateAlert(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
@@ -493,7 +504,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but patch generation failed: "+patchErr.Error())
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
-		p.updateAlertAsync(t)
+		p.updateAlert(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
@@ -529,7 +540,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	_ = p.store.Update(t)
 
 	// Sync PR info to mctl-api.
-	p.updateAlertAsync(t)
+	p.updateAlert(t)
 
 	if prURL != "" {
 		shouldAutoMerge := p.autoMerge && !p.dryRun
@@ -547,7 +558,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			} else {
 				t.Status = ticket.StatusFixApplied
 				_ = p.store.Update(t)
-				p.updateAlertAsync(t)
+				p.updateAlert(t)
 				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
 			}
 		} else {
