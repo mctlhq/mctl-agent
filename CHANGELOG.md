@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.16.0](https://github.com/mctlhq/mctl-agent/compare/1.15.6...1.16.0) (2026-08-16)
+
+
+### Features
+
+* **pipeline:** add an escalated status so diagnosed tickets stop claiming to be analyzing ([1f6ce9f](https://github.com/mctlhq/mctl-agent/commit/1f6ce9faf5e40492c73faaa060deb12d210e0a9d))
+* **pipeline:** add an escalated status so diagnosed tickets stop claiming to be analyzing ([4ab7e7d](https://github.com/mctlhq/mctl-agent/commit/4ab7e7d553196f7e32547dfee62aaed6d435c911))
+
+
+### Bug Fixes
+
+* **pipeline:** close the remaining analyzing leaks in handleHighConfidenceFix ([67c0cc9](https://github.com/mctlhq/mctl-agent/commit/67c0cc9f0aed2885cab12f617862cfbddf784b86))
+* **pipeline:** emit fix_failed before escalating, not after ([8c4bb92](https://github.com/mctlhq/mctl-agent/commit/8c4bb92c11cf3353a993eb53fbdc4dfba8c8ca92))
+* **pipeline:** order the mctl-api syncs instead of racing them ([6102e45](https://github.com/mctlhq/mctl-agent/commit/6102e45d9466115c648bc4f33a394187d3f02410))
+* **pipeline:** order the mctl-api syncs instead of racing them ([937c7c1](https://github.com/mctlhq/mctl-agent/commit/937c7c1a43c7923f20dd3de66a0e90cd5b6648ea))
+* **pipeline:** send mctl-api a ticket snapshot, and test escalate ([e04153e](https://github.com/mctlhq/mctl-agent/commit/e04153e764a7bd3bb7970dde6964f28c7f10f940))
+* **pipeline:** set analyzing before publishing to mctl-api ([a661a9f](https://github.com/mctlhq/mctl-agent/commit/a661a9f71f17397cae64ae20a59b6a998c84861c))
+* **pipeline:** set analyzing before publishing to mctl-api ([60a9089](https://github.com/mctlhq/mctl-agent/commit/60a9089902afc4fd5514b19c3b479724b9eac098))
+* **poller:** include EscalatedAfter in the resolveStale guard ([106ef91](https://github.com/mctlhq/mctl-agent/commit/106ef91b2473e3767573bf2c17c18f2976a39f5d))
+
 ## [1.15.6](https://github.com/mctlhq/mctl-agent/compare/1.15.5...1.15.6) (2026-08-15)
 
 
