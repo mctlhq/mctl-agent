@@ -85,6 +85,32 @@ func NewPipeline(
 	}
 }
 
+// publishAlertAsync and updateAlertAsync hand mctl-api a snapshot rather than
+// the live ticket. Both used to be `go p.apiClient.X(t)` on the same *Ticket
+// the caller keeps mutating — PublishAlert raced the `t.Status = analyzing`
+// two lines below it, and UpdateAlert after a diagnosis raced whatever the
+// loop did next. The copy is shallow: Evidence shares its backing array, which
+// is safe because evidence is only ever appended through the store before
+// these are called, never rewritten in place afterwards.
+//
+// The nil guard keeps the pipeline usable without an mctl-api client, which is
+// how the unit tests construct it.
+func (p *Pipeline) publishAlertAsync(t *ticket.Ticket) {
+	if p.apiClient == nil {
+		return
+	}
+	snapshot := *t
+	go p.apiClient.PublishAlert(&snapshot)
+}
+
+func (p *Pipeline) updateAlertAsync(t *ticket.Ticket) {
+	if p.apiClient == nil {
+		return
+	}
+	snapshot := *t
+	go p.apiClient.UpdateAlert(&snapshot)
+}
+
 // escalate ends the pipeline's involvement with a ticket: it records why no
 // fix will be attempted, moves the ticket to StatusEscalated, and syncs both
 // to mctl-api.
@@ -114,7 +140,7 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	}
 	// Mirror to mctl-api. Without this the incident there keeps the status it
 	// was published with (analyzing), which is what MCP and the dashboards read.
-	go p.apiClient.UpdateAlert(t)
+	p.updateAlertAsync(t)
 	p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 }
 
@@ -193,7 +219,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	}
 
 	// Publish to mctl-api alert store.
-	go p.apiClient.PublishAlert(t)
+	p.publishAlertAsync(t)
 
 	// Update status to analyzing.
 	t.Status = ticket.StatusAnalyzing
@@ -261,7 +287,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		t.Confidence = diag.Confidence
 
 		// Sync diagnosis to mctl-api.
-		go p.apiClient.UpdateAlert(t)
+		p.updateAlertAsync(t)
 
 		log.Info("diagnosis complete",
 			"skill", rs.Skill.Name(),
@@ -490,7 +516,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	_ = p.store.Update(t)
 
 	// Sync PR info to mctl-api.
-	go p.apiClient.UpdateAlert(t)
+	p.updateAlertAsync(t)
 
 	if prURL != "" {
 		shouldAutoMerge := p.autoMerge && !p.dryRun
@@ -508,7 +534,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			} else {
 				t.Status = ticket.StatusFixApplied
 				_ = p.store.Update(t)
-				go p.apiClient.UpdateAlert(t)
+				p.updateAlertAsync(t)
 				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
 			}
 		} else {
