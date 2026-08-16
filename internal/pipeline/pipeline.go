@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -82,6 +83,39 @@ func NewPipeline(
 		escalationTag: escalationTag,
 		sem:           make(chan struct{}, 3), // Max 3 concurrent analyses.
 	}
+}
+
+// escalate ends the pipeline's involvement with a ticket: it records why no
+// fix will be attempted, moves the ticket to StatusEscalated, and syncs both
+// to mctl-api.
+//
+// Every early return that used to leave the ticket in StatusAnalyzing goes
+// through here. Those paths did call store.Update, but never changed the
+// status — so a ticket the agent had finished with still reported "analyzing"
+// indefinitely, and the only thing that ever moved it was the 48h/120h
+// watchdog force-resolving it as stuck. Incident dfec7bee sat that way for
+// hours on 2026-08-16 with an empty analysis field.
+//
+// reason is appended to Analysis rather than replacing it: skills write their
+// diagnosis there first, and ResolveByIDFromStatus later appends its own note
+// the same way.
+func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string, diag *skill.DiagnosisResult) {
+	t.Status = ticket.StatusEscalated
+	if t.Analysis == "" {
+		t.Analysis = reason
+	} else {
+		t.Analysis = t.Analysis + "\n\n" + reason
+	}
+	if t.Confidence == "" {
+		t.Confidence = ticket.ConfidenceLow
+	}
+	if err := p.store.Update(t); err != nil {
+		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
+	}
+	// Mirror to mctl-api. Without this the incident there keeps the status it
+	// was published with (analyzing), which is what MCP and the dashboards read.
+	go p.apiClient.UpdateAlert(t)
+	p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 }
 
 func (p *Pipeline) emitExternalEvent(ctx context.Context, eventType webhook.EventType, t *ticket.Ticket, diag *skill.DiagnosisResult) {
@@ -189,8 +223,10 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		if shouldNotifyDiagnosis(t) {
 			_ = p.telegram.SendDiagnosis(t, "No skill matched this ticket type. Manual review required.", ticket.ConfidenceLow, "No auto-diagnosis available")
 		}
-		_ = p.store.Update(t)
-		p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, nil)
+		p.escalate(ctx, t, fmt.Sprintf(
+			"Escalated: no skill matched this ticket (type=%s, alert=%s). Evidence was "+
+				"collected, but the agent has no diagnostic rule for this signal, so nothing "+
+				"was analysed. Needs a human, or a new skill.", t.Type, t.AlertName), nil)
 		return
 	}
 
@@ -236,8 +272,10 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			if shouldNotifyDiagnosis(t) {
 				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "Alert is routed for diagnosis only; manual review required")
 			}
-			_ = p.store.Update(t)
-			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
+			p.escalate(ctx, t, fmt.Sprintf(
+				"[escalated] Alert %q is on the human-review-only list: the agent diagnoses "+
+					"it but never proposes a fix, by policy. The diagnosis above is advisory.",
+				t.AlertName), diag)
 			return
 		}
 
@@ -246,7 +284,14 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			if shouldNotifyDiagnosis(t) {
 				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, "Infrastructure alert — manual review only")
 			}
-			_ = p.store.Update(t)
+			// This branch previously emitted no escalation event at all, on top
+			// of leaving the status untouched — infra tickets were the quietest
+			// of the five dead ends.
+			p.escalate(ctx, t, fmt.Sprintf(
+				"[escalated] Infrastructure-scope alert (tenant=%s, service=%s): auto-fix is "+
+					"disabled for infrastructure by policy, because a wrong fix here has "+
+					"cluster-wide blast radius. The diagnosis above is advisory.",
+				t.Tenant, t.Service), diag)
 			return
 		}
 
@@ -277,18 +322,35 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		if shouldNotifyDiagnosis(t) {
 			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, fmt.Sprintf("No auto-fix available (skill: %s)", rs.Skill.Name()))
 		}
-		_ = p.store.Update(t)
-		p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
+		p.escalate(ctx, t, fmt.Sprintf(
+			"[escalated] Skill %s produced a %s-confidence diagnosis with fixable=%v. The "+
+				"auto-fix threshold is HIGH, or MEDIUM when the skill declares itself "+
+				"auto-merge safe, so no PR was created.",
+			rs.Skill.Name(), diag.Confidence, diag.Fixable), diag)
 		return
 	}
 
 	// All skills failed.
-	log.Warn("all matched skills failed to diagnose")
+	log.Warn("all matched skills failed to diagnose", "skills", rankedSkillNames(ranked))
 	if shouldNotifyDiagnosis(t) {
 		_ = p.telegram.SendDiagnosis(t, "All matched skills failed to produce a diagnosis. Manual review required.", ticket.ConfidenceLow, "Manual review required")
 	}
-	_ = p.store.Update(t)
-	p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, nil)
+	p.escalate(ctx, t, fmt.Sprintf(
+		"Escalated: %d matched skill(s) [%s] all failed to produce a diagnosis. This is an "+
+			"agent-side failure and does not by itself say the service is unhealthy — check "+
+			"mctl-agent logs for the per-skill errors.",
+		len(ranked), strings.Join(rankedSkillNames(ranked), ", ")), nil)
+}
+
+// rankedSkillNames lists the skills that matched, for the escalation note and
+// the log line. Previously "all matched skills failed" was recorded without
+// naming them, which left no way to tell from the ticket which skill to fix.
+func rankedSkillNames(ranked []skill.RankedSkill) []string {
+	names := make([]string, 0, len(ranked))
+	for _, rs := range ranked {
+		names = append(names, rs.Skill.Name())
+	}
+	return names
 }
 
 func shouldNotifyNewTicket(t *ticket.Ticket) bool {

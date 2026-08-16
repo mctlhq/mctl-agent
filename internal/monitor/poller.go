@@ -37,6 +37,10 @@ type Poller struct {
 	// AnalyzingAfter enables auto-resolution of tickets stuck in StatusAnalyzing
 	// beyond this window. Zero disables this GC pass.
 	AnalyzingAfter time.Duration
+	// EscalatedAfter enables auto-resolution of tickets stuck in StatusEscalated
+	// (diagnosed, handed to a human, never acted on). Same contract as the
+	// others: 0 disables it.
+	EscalatedAfter time.Duration
 	// FixProposedAfter enables auto-resolution of tickets stuck in StatusFixProposed
 	// beyond this window. Zero disables this GC pass.
 	FixProposedAfter time.Duration
@@ -298,6 +302,7 @@ func (p *Poller) resolveStale(state refreshState) {
 	thresholds := map[string]time.Duration{
 		ticket.StatusOpen:        p.StaleAfter,
 		ticket.StatusAnalyzing:   p.AnalyzingAfter,
+		ticket.StatusEscalated:   p.EscalatedAfter,
 		ticket.StatusFixProposed: p.FixProposedAfter,
 	}
 
@@ -434,7 +439,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 			continue // pre-Phase-2 ticket; leave to Phase 1 TTL GC
 		}
 		switch t.Status {
-		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusFixProposed:
+		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusEscalated, ticket.StatusFixProposed:
 		default:
 			continue
 		}
@@ -540,7 +545,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 
 	for _, t := range open {
 		switch t.Status {
-		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusFixProposed:
+		case ticket.StatusOpen, ticket.StatusAnalyzing, ticket.StatusEscalated, ticket.StatusFixProposed:
 		default:
 			continue
 		}
