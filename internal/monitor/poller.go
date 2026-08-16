@@ -290,7 +290,9 @@ func (p *Poller) eligibleSource(src string) bool {
 // do not depend on mctl-api reachability and are GC'd purely by
 // UpdatedAt, so a partial poller outage does not block noise cleanup.
 func (p *Poller) resolveStale(state refreshState) {
-	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.FixProposedAfter <= 0 && p.MaxAnalyzingAge <= 0 {
+	// Every duration that appears in the thresholds map below must appear here
+	// too, or configuring only that one leaves the whole GC pass short-circuited.
+	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.EscalatedAfter <= 0 && p.FixProposedAfter <= 0 && p.MaxAnalyzingAge <= 0 {
 		return
 	}
 	open, err := p.store.ListOpen()
