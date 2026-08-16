@@ -340,6 +340,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			}
 			t.Status = ticket.StatusFixProposed
 			_ = p.store.Update(t)
+			p.updateAlertAsync(t)
 			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 			return
 		}
@@ -419,6 +420,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
+		p.updateAlertAsync(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
@@ -429,7 +431,9 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Info("skill returned fix with Applied=false, skipping PR", "skill", s.Name())
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			fmt.Sprintf("Skill %s declined to apply fix: %s", s.Name(), fixResult.Summary))
-		_ = p.store.Update(t)
+		p.escalate(ctx, t, fmt.Sprintf(
+			"[escalated] Skill %s diagnosed the ticket but declined to apply a fix: %s. "+
+				"No PR was created.", s.Name(), fixResult.Summary), diag)
 		return
 	}
 	if p.metrics != nil {
@@ -447,7 +451,10 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Error("failed to get file content", "path", filePath, "error", err)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			fmt.Sprintf("Could not read %s: %v", filePath, err))
-		_ = p.store.Update(t)
+		p.escalate(ctx, t, fmt.Sprintf(
+			"[escalated] Could not read %s from the GitOps repo (%v), so no patch could be "+
+				"generated. This is an agent-side failure, not necessarily a service failure.",
+			filePath, err), diag)
 		return
 	}
 
@@ -486,6 +493,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but patch generation failed: "+patchErr.Error())
 		t.Status = ticket.StatusFixProposed
 		_ = p.store.Update(t)
+		p.updateAlertAsync(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
@@ -505,7 +513,8 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Error("failed to create PR", "error", err)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"PR creation failed: "+err.Error())
-		_ = p.store.Update(t)
+		p.escalate(ctx, t, "[escalated] A fix was generated but the PR could not be created: "+
+			err.Error()+". Nothing was changed in the GitOps repo.", diag)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}

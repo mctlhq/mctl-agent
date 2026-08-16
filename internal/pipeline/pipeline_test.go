@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
+	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -192,7 +196,10 @@ func TestEscalatedTicketStaysInListOpen(t *testing.T) {
 func TestEscalateNoDataRaceWithAlertSync(t *testing.T) {
 	released := make(chan struct{})
 	var served sync.WaitGroup
-	served.Add(1)
+	// Two requests, not one: the explicit updateAlertAsync below, and the one
+	// escalate makes internally. Counting a single Done would drive the
+	// WaitGroup negative and panic inside the handler goroutine.
+	served.Add(2)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer served.Done()
 		// Read the body here, inside the handler, so the client goroutine is
@@ -225,4 +232,74 @@ func TestAlertSyncHelpersTolerateNilClient(t *testing.T) {
 
 	p.publishAlertAsync(tk)
 	p.updateAlertAsync(tk)
+}
+
+// stubSkill lets handleHighConfidenceFix be driven to its early returns without
+// a GitHub client: the paths under test bail before p.github is touched.
+type stubSkill struct {
+	fix    *skill.FixResult
+	fixErr error
+}
+
+func (s stubSkill) Name() string        { return "stub" }
+func (s stubSkill) Version() string     { return "0.0.0" }
+func (s stubSkill) Description() string { return "test stub" }
+func (s stubSkill) Match(context.Context, *ticket.Ticket, skill.EvidenceSet) skill.MatchResult {
+	return skill.MatchResult{Matched: true, Confidence: 1}
+}
+func (s stubSkill) Diagnose(context.Context, *ticket.Ticket, skill.EvidenceSet) (*skill.DiagnosisResult, error) {
+	return &skill.DiagnosisResult{Diagnosis: "stub", Confidence: ticket.ConfidenceHigh, Fixable: true}, nil
+}
+func (s stubSkill) Fix(context.Context, *ticket.Ticket, *skill.DiagnosisResult) (*skill.FixResult, error) {
+	return s.fix, s.fixErr
+}
+func (s stubSkill) RequiredCapabilities() []skill.CapabilityID { return nil }
+
+// handleHighConfidenceFix had early returns that called store.Update without
+// touching Status, so the ticket stayed `analyzing` for good — the same defect
+// this PR fixes in processTicketSync, one function further down. These two
+// paths are reachable without a GitHub client.
+func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
+	cases := []struct {
+		name       string
+		s          skill.Skill
+		wantStatus string
+	}{
+		{
+			// Skill declined to apply: diagnosed, no fix, no PR → escalated.
+			name:       "skill declined to apply",
+			s:          stubSkill{fix: &skill.FixResult{Applied: false, Summary: "declined"}},
+			wantStatus: ticket.StatusEscalated,
+		},
+		{
+			// Fix generation itself failed: a fix was identified, so the existing
+			// behaviour of recording fix_proposed is kept — but it must now reach
+			// mctl-api too, rather than only the local store.
+			name:       "fix generation failed",
+			s:          stubSkill{fixErr: errors.New("boom")},
+			wantStatus: ticket.StatusFixProposed,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, store := newEscalateTestPipeline(t)
+			p.telegram = notify.NewTelegram("", "", "", nil)
+			tk := newAnalyzingTicket(t, store)
+			diag := &skill.DiagnosisResult{Diagnosis: "stub diagnosis", Confidence: ticket.ConfidenceHigh, Fixable: true}
+
+			p.handleHighConfidenceFix(context.Background(), tk, tc.s, diag, slog.Default())
+
+			got, err := store.Get(tk.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status == ticket.StatusAnalyzing {
+				t.Fatal("ticket left in analyzing with nothing running")
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+		})
+	}
 }
