@@ -513,9 +513,13 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Error("failed to create PR", "error", err)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"PR creation failed: "+err.Error())
+		// FixFailed first, while the ticket still reads as it did when the fix
+		// failed. escalate emits its own EventTicketEscalated afterwards, so a
+		// subscriber sees "the fix failed" and then "it was handed to a human",
+		// in that order, each with a payload that matches its own event.
+		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		p.escalate(ctx, t, "[escalated] A fix was generated but the PR could not be created: "+
 			err.Error()+". Nothing was changed in the GitOps repo.", diag)
-		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
 
