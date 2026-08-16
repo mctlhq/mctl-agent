@@ -2,9 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -176,16 +181,48 @@ func TestEscalatedTicketStaysInListOpen(t *testing.T) {
 	t.Error("escalated ticket missing from ListOpen")
 }
 
-// escalate mutates the ticket that updateAlertAsync hands to mctl-api. Run
-// under -race, this fails if the goroutine is given the live pointer.
+// escalate mutates the same ticket updateAlertAsync hands to mctl-api. This
+// needs a REAL client: with a nil one the nil guard returns before spawning a
+// goroutine, so the test would pass with the snapshot fix reverted — which is
+// exactly what the first version of this test did.
+//
+// The server blocks briefly so the request is still being marshalled while
+// escalate rewrites Status, Analysis and Confidence. Reverting either snapshot
+// in publishAlertAsync/updateAlertAsync makes this fail under -race.
 func TestEscalateNoDataRaceWithAlertSync(t *testing.T) {
+	released := make(chan struct{})
+	var served sync.WaitGroup
+	served.Add(1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer served.Done()
+		// Read the body here, inside the handler, so the client goroutine is
+		// demonstrably still touching the ticket while escalate runs.
+		_, _ = io.ReadAll(r.Body)
+		<-released
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
 	p, store := newEscalateTestPipeline(t)
+	p.apiClient = mctlclient.NewClient(srv.URL, "test-token")
 	tk := newAnalyzingTicket(t, store)
 
 	p.updateAlertAsync(tk)
 	p.escalate(context.Background(), tk, "Escalated: concurrent sync", nil)
+	close(released)
+	served.Wait()
 
 	if got, _ := store.Get(tk.ID); got.Status != ticket.StatusEscalated {
 		t.Errorf("status = %q, want %q", got.Status, ticket.StatusEscalated)
 	}
+}
+
+// The nil guard is a separate property: a pipeline built without an mctl-api
+// client must not panic on the alert-sync path.
+func TestAlertSyncHelpersTolerateNilClient(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	tk := newAnalyzingTicket(t, store)
+
+	p.publishAlertAsync(tk)
+	p.updateAlertAsync(tk)
 }
