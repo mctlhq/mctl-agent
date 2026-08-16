@@ -229,15 +229,21 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		log.Info("suppressing new ticket notification", "alert_name", t.AlertName)
 	}
 
-	// Publish to mctl-api alert store.
-	p.publishAlert(t)
-
-	// Update status to analyzing.
+	// Status first, then publish. The order matters and used to be the other
+	// way round, which worked only by accident: PublishAlert ran in a goroutine
+	// that read the live ticket, so it usually observed the `analyzing` written
+	// on the next line. Removing that race (sending a snapshot, then sending
+	// synchronously) made the accident stop happening, and mctl-api began
+	// receiving `open` with nothing to correct it — leaving every incident
+	// reading `open` for the whole diagnosis, however long that took.
 	t.Status = ticket.StatusAnalyzing
 	if err := p.store.Update(t); err != nil {
 		log.Error("failed to update ticket status", "error", err)
 		return
 	}
+
+	// Publish to mctl-api alert store.
+	p.publishAlert(t)
 	p.emitExternalEvent(ctx, webhook.EventTicketCreated, t, nil)
 
 	// Collect evidence.
