@@ -181,6 +181,10 @@ func main() {
 	// Start poller goroutine.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Tickets arriving through the monitor callbacks carry no context of their
+	// own; give the pipeline the process one so diagnosis stops on shutdown.
+	pipe.SetBaseContext(ctx)
 	go poller.Run(ctx, cfg.PollInterval)
 	if webhookDispatcher != nil {
 		webhookDispatcher.Start(ctx)

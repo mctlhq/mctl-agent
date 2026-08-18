@@ -1,0 +1,150 @@
+package pipeline
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/mctlhq/mctl-agent/internal/mctlclient"
+	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/ticket"
+)
+
+// newAsyncTestPipeline builds a pipeline whose async path actually runs end to
+// end: an empty registry sends every ticket down the "no skill matched" branch,
+// which escalates and returns. The mctl-api client points at a stub server —
+// collectEvidence calls it unguarded, so a nil client panics inside the
+// goroutine rather than failing the assertion. dispatcher stays nil (guarded)
+// and telegram is disabled, so the notify call is real but inert.
+func newAsyncTestPipeline(t *testing.T, slots int) (*Pipeline, *ticket.Store) {
+	t.Helper()
+	store, err := ticket.NewStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	return &Pipeline{
+		store:     store,
+		registry:  skill.NewRegistry(),
+		telegram:  notify.NewTelegram("", "", "", nil),
+		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
+		sem:       make(chan struct{}, slots),
+	}, store
+}
+
+// TriggerAnalysis must not hand the caller the same *ticket.Ticket the pipeline
+// goroutine mutates. The MCP handler reads fields off the returned value while
+// processTicketSync is writing Status and Analysis on the original.
+//
+// Mutation check: return `t` instead of `&snapshot` and `go test -race` reports
+// a write/read data race on this test.
+func TestTriggerAnalysisReturnsSnapshotNotSharedPointer(t *testing.T) {
+	p, _ := newAsyncTestPipeline(t, 1)
+
+	got, err := p.TriggerAnalysis(context.Background(), "argocd", "root-app", "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID == "" {
+		t.Fatal("snapshot must be taken after store.Create, so it carries the ID")
+	}
+
+	// Read the returned value hard while the pipeline goroutine runs.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		_ = got.Status
+		_ = got.Analysis
+		_ = got.ID
+	}
+
+	if got.Status != ticket.StatusOpen {
+		t.Fatalf("snapshot should keep the status it was created with, got %q", got.Status)
+	}
+}
+
+// A full semaphore must not block the caller. One caller is the AlertManager
+// webhook handler; blocking it makes AlertManager time out and retry, piling
+// more load onto a pipeline that is already saturated.
+//
+// Mutation check: move `p.sem <- struct{}{}` back above `go func()` and this
+// test times out.
+func TestProcessTicketDoesNotBlockCallerWhenSaturated(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+
+	// Occupy the only slot and keep it occupied.
+	p.sem <- struct{}{}
+	defer func() { <-p.sem }()
+
+	tk := &ticket.Ticket{
+		Source:   ticket.SourceManual,
+		Type:     ticket.TypeArgoCDDegraded,
+		Tenant:   "argocd",
+		Service:  "root-app",
+		Summary:  "saturated",
+		Severity: ticket.SeverityWarning,
+		Status:   ticket.StatusOpen,
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		p.ProcessTicket(tk)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ProcessTicket blocked the caller while the semaphore was full")
+	}
+}
+
+// The process context reaches the goroutine, so shutdown stops diagnosis
+// instead of letting it run against a closing process.
+func TestProcessTicketUsesBaseContext(t *testing.T) {
+	p, _ := newAsyncTestPipeline(t, 1)
+
+	if p.baseContext() != context.Background() {
+		t.Fatal("unset base context should fall back to context.Background()")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	p.SetBaseContext(ctx)
+	if p.baseContext() != ctx {
+		t.Fatal("SetBaseContext did not take effect")
+	}
+	cancel()
+	if p.baseContext().Err() == nil {
+		t.Fatal("cancelling the installed context must be observable through baseContext")
+	}
+}
+
+// TriggerAnalysis must not create a ticket for a request that is already gone.
+func TestTriggerAnalysisRejectsCancelledContext(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := p.TriggerAnalysis(ctx, "argocd", "root-app", "manual"); err == nil {
+		t.Fatal("expected an error for a cancelled caller context")
+	}
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("no ticket should have been created, got %d", len(open))
+	}
+}

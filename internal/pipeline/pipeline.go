@@ -53,6 +53,10 @@ type Pipeline struct {
 	escalationTag string
 	paused        atomic.Bool
 	sem           chan struct{}
+	// baseCtx is the process lifetime context, installed by SetBaseContext.
+	// Tickets arriving through the func(*ticket.Ticket) monitor callbacks have
+	// no context of their own, and diagnosis must still stop on shutdown.
+	baseCtx context.Context
 }
 
 // NewPipeline creates a new pipeline orchestrator.
@@ -83,6 +87,28 @@ func NewPipeline(
 		escalationTag: escalationTag,
 		sem:           make(chan struct{}, 3), // Max 3 concurrent analyses.
 	}
+}
+
+// diagnosisTimeout bounds a single ticket run. processTicketSync ends in
+// Skill.Diagnose, which calls out to a model and carries no deadline of its
+// own — mctlclient's 15s http.Client timeout covers the alert syncs only. A
+// wedged diagnosis would otherwise hold one of the three semaphore slots for
+// the life of the process.
+const diagnosisTimeout = 15 * time.Minute
+
+// SetBaseContext installs the process lifetime context. Call it once at
+// startup, before any ticket can arrive. Without it ProcessTicket falls back
+// to context.Background(), which is what tests want and what production must
+// not have.
+func (p *Pipeline) SetBaseContext(ctx context.Context) {
+	p.baseCtx = ctx
+}
+
+func (p *Pipeline) baseContext() context.Context {
+	if p.baseCtx != nil {
+		return p.baseCtx
+	}
+	return context.Background()
 }
 
 // publishAlert and updateAlert mirror a ticket to mctl-api synchronously.
@@ -192,14 +218,29 @@ func (p *Pipeline) TriggerAnalysis(ctx context.Context, team, service, reason st
 		Status:   ticket.StatusOpen,
 	}
 
+	// The caller's request may already be gone; do not create a ticket for it.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	if err := p.store.Create(t); err != nil {
 		return nil, fmt.Errorf("creating ticket: %w", err)
 	}
 
+	// Snapshot before handing the pointer to the pipeline goroutine, which
+	// mutates Status and Analysis. The caller holds the returned value and may
+	// marshal it, so sharing the pointer is a data race. Taken here rather
+	// than after ProcessTicket: by then the goroutine already exists and
+	// copying would be the race it is meant to avoid.
+	//
+	// Diagnosis runs on the process context, not the caller's request context:
+	// the request ends as soon as this returns, and the work outlives it.
+	snapshot := *t
+
 	// Process asynchronously.
 	p.ProcessTicket(t)
 
-	return t, nil
+	return &snapshot, nil
 }
 
 // ProcessTicket runs the full pipeline for a single ticket.
@@ -209,11 +250,19 @@ func (p *Pipeline) ProcessTicket(t *ticket.Ticket) {
 		return
 	}
 
-	// Acquire semaphore.
-	p.sem <- struct{}{}
 	go func() {
+		// Acquired inside the goroutine, not before it. Blocking here used to
+		// block the *caller*, and one caller is the AlertManager webhook
+		// handler — a burst past the three concurrent slots held HTTP request
+		// goroutines open, which makes AlertManager time out and retry, adding
+		// load to the thing that is already saturated. Queueing a cheap
+		// goroutine instead lets the webhook answer immediately.
+		p.sem <- struct{}{}
 		defer func() { <-p.sem }()
-		p.processTicketSync(context.Background(), t)
+
+		ctx, cancel := context.WithTimeout(p.baseContext(), diagnosisTimeout)
+		defer cancel()
+		p.processTicketSync(ctx, t)
 	}()
 }
 
