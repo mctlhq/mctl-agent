@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.16.1](https://github.com/mctlhq/mctl-agent/compare/1.16.0...1.16.1) (2026-08-18)
+
+
+### Bug Fixes
+
+* **api:** drop chi middleware.RealIP, which had no consumer ([39e1f2d](https://github.com/mctlhq/mctl-agent/commit/39e1f2d285a8c8b0eee2d3ce58b729eafed94457))
+* **api:** drop chi middleware.RealIP, which had no consumer ([9b76bbd](https://github.com/mctlhq/mctl-agent/commit/9b76bbd247223011d02dd24112ee031aac391c52))
+* **pipeline:** bound diagnosis, stop sharing the ticket pointer, unblock callers ([217bb64](https://github.com/mctlhq/mctl-agent/commit/217bb643bdcff028ad28fe70644515586cad361a))
+* **pipeline:** bound diagnosis, stop sharing the ticket pointer, unblock callers ([2ee06a1](https://github.com/mctlhq/mctl-agent/commit/2ee06a13e784962321a50e3211b08905f439f1c7))
+
 ## [1.16.0](https://github.com/mctlhq/mctl-agent/compare/1.15.6...1.16.0) (2026-08-16)
 
 
