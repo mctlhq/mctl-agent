@@ -21,7 +21,13 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.1.6
+          # Must be built with a Go >= the `go` directive in go.mod, or it
+          # refuses to start ("the Go language version used to build
+          # golangci-lint is lower than the targeted Go version"). v2.1.6
+          # targeted go1.23 and broke as soon as a dependency bump moved
+          # go.mod to 1.25.0. Dependabot does NOT track this input — only the
+          # action version above — so raise it by hand when go.mod moves.
+          version: v2.12.2
           args: --timeout 5m
 
   test:
