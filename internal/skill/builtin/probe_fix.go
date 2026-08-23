@@ -40,7 +40,12 @@ func (s *ProbeFixSkill) RequiredCapabilities() []skill.CapabilityID {
 
 func (s *ProbeFixSkill) Match(_ context.Context, _ *ticket.Ticket, ev skill.EvidenceSet) skill.MatchResult {
 	logs := ev.Get("logs") + "\n" + ev.Get("alert")
-	if containsAny(logs, "Liveness probe failed", "Readiness probe failed", "probe failed") {
+	// Only the kubelet's own phrasing counts. Matching a bare "probe failed"
+	// swept up unrelated application logs: labs/mctl-telegram's canary emits
+	// {"msg":"probe failed","step":"list_dialogs"} for a failed MCP call, which
+	// on 2026-08-23 made this skill claim a Kubernetes probe ticket
+	// (2f3d550f) for what was really a dead Telegram session.
+	if containsAny(logs, "Liveness probe failed", "Readiness probe failed", "Startup probe failed") {
 		return skill.MatchResult{
 			Matched:    true,
 			Confidence: 0.80,
@@ -59,6 +64,8 @@ func (s *ProbeFixSkill) Diagnose(_ context.Context, _ *ticket.Ticket, ev skill.E
 		probeType = "liveness"
 	} else if strings.Contains(logs, "Readiness probe failed") {
 		probeType = "readiness"
+	} else if strings.Contains(logs, "Startup probe failed") {
+		probeType = "startup"
 	}
 
 	return &skill.DiagnosisResult{

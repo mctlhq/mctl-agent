@@ -337,7 +337,13 @@ func TestProbeFixSkillMatch(t *testing.T) {
 	}{
 		{"liveness probe failed", "Liveness probe failed: connection refused", true},
 		{"readiness probe failed", "Readiness probe failed: HTTP 503", true},
-		{"generic probe failed", "probe failed with status 500", true},
+		{"startup probe failed", "Startup probe failed: HTTP 404", true},
+		// A bare "probe failed" is not the kubelet talking. This is the exact
+		// line labs/mctl-telegram's canary logs when an MCP call fails, and
+		// matching it opened a Kubernetes probe ticket (2f3d550f, 2026-08-23)
+		// for a dead Telegram session.
+		{"application canary probe failure", `{"level":"ERROR","msg":"probe failed","step":"list_dialogs","err":"MCP tool returned isError=true"}`, false},
+		{"generic probe failed", "probe failed with status 500", false},
 		{"no probe issue", "normal pod running fine", false},
 	}
 
