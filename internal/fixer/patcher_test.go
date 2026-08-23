@@ -205,6 +205,106 @@ func TestGenerateProbeFixAmbiguousSide(t *testing.T) {
 	}
 }
 
+// TestGenerateProbeFixComments covers the three review findings on PR #91:
+// a comment indented deeper than its sibling keys must not become the block's
+// first child, an inline comment on the initialDelaySeconds line must not
+// defeat the number parse, and the comment must survive the rewrite.
+func TestGenerateProbeFixComments(t *testing.T) {
+	t.Run("deeply indented comment is not the first child", func(t *testing.T) {
+		content := `probes:
+  liveness:
+      # the app needs a while to warm its caches
+    path: /healthz
+    periodSeconds: 15`
+
+		newContent, _, err := GenerateProbeFix(content, "livenessProbe.initialDelaySeconds")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, "\n    initialDelaySeconds: 30\n") {
+			t.Errorf("insert must take its indent from a real key, got:\n%s", newContent)
+		}
+		if strings.Count(newContent, "initialDelaySeconds") != 1 {
+			t.Errorf("expected exactly one initialDelaySeconds, got:\n%s", newContent)
+		}
+	})
+
+	t.Run("comment hides an existing initialDelaySeconds", func(t *testing.T) {
+		// With the comment treated as the first child, childIndent came from
+		// the comment, the real initialDelaySeconds no longer matched it, and
+		// a second one was spliced in — corrupting the YAML.
+		content := `probes:
+  liveness:
+      # bumped once already
+    initialDelaySeconds: 10
+    periodSeconds: 15`
+
+		newContent, _, err := GenerateProbeFix(content, "livenessProbe.initialDelaySeconds")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Count(newContent, "initialDelaySeconds") != 1 {
+			t.Errorf("existing field must be bumped, not duplicated, got:\n%s", newContent)
+		}
+		if !strings.Contains(newContent, "initialDelaySeconds: 30") {
+			t.Errorf("expected the existing field bumped to 30, got:\n%s", newContent)
+		}
+	})
+
+	t.Run("inline comment on the delay line", func(t *testing.T) {
+		content := `probes:
+  liveness:
+    initialDelaySeconds: 10  # matches the chart default`
+
+		newContent, _, err := GenerateProbeFix(content, "livenessProbe.initialDelaySeconds")
+		if err != nil {
+			t.Fatalf("an inline comment must not make the block unpatchable: %v", err)
+		}
+		if !strings.Contains(newContent, "initialDelaySeconds: 30  # matches the chart default") {
+			t.Errorf("expected the bump to preserve the comment, got:\n%s", newContent)
+		}
+	})
+
+	t.Run("comment on the probe key itself", func(t *testing.T) {
+		content := `probes:
+  liveness: # slow starter
+    initialDelaySeconds: 10`
+
+		newContent, _, err := GenerateProbeFix(content, "livenessProbe.initialDelaySeconds")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(newContent, "initialDelaySeconds: 30") {
+			t.Errorf("expected the block to be found, got:\n%s", newContent)
+		}
+	})
+}
+
+// TestGenerateProbeFixSummaryPairsKinds pins the summary to the right probe:
+// patching runs bottom-up, so a summary built in patch order reported the
+// readiness value against liveness and vice versa.
+func TestGenerateProbeFixSummaryPairsKinds(t *testing.T) {
+	content := `probes:
+  liveness:
+    initialDelaySeconds: 40
+  readiness:
+    initialDelaySeconds: 5`
+
+	_, summary, err := GenerateProbeFix(content, "liveness/readinessProbe.initialDelaySeconds")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(summary, "liveness 40 -> 55") {
+		t.Errorf("liveness must be paired with its own value, got: %s", summary)
+	}
+	if !strings.Contains(summary, "readiness 5 -> 30") {
+		t.Errorf("readiness must be paired with its own value, got: %s", summary)
+	}
+	if strings.Index(summary, "liveness") > strings.Index(summary, "readiness") {
+		t.Errorf("summary must keep file order, got: %s", summary)
+	}
+}
+
 func TestGenerateImageRollback(t *testing.T) {
 	t.Run("rewrites only the chart-level tag", func(t *testing.T) {
 		// Mirrors openclaw values.yaml shape: chart-level image at the top,

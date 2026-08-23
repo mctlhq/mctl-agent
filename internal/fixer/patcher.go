@@ -177,8 +177,7 @@ func GenerateCPUBump(content string) (string, string, error) {
 
 // probeKinds maps a diagnosis YAMLField onto the probe kinds it refers to.
 // The probe_fix skill emits "livenessProbe.initialDelaySeconds",
-// "readinessProbe.initialDelaySeconds", or — when the logs only say the
-// generic "probe failed" and the side is unknown —
+// "readinessProbe.initialDelaySeconds", or — when the side is unknown —
 // "liveness/readinessProbe.initialDelaySeconds". That last form is not a YAML
 // key anywhere; it means "both", and used to be looked up verbatim, which
 // could never match and made every ambiguous probe ticket fail to patch.
@@ -194,8 +193,35 @@ func probeKinds(probeField string) []string {
 	return nil
 }
 
+// splitInlineComment separates a YAML scalar from a trailing "# ..." comment,
+// returning the value and the comment with its leading whitespace intact so a
+// rewritten line can carry the comment through untouched.
+func splitInlineComment(s string) (value, comment string) {
+	i := strings.Index(s, "#")
+	if i < 0 {
+		return s, ""
+	}
+	// The gap between the value and the "#" belongs to the comment, so a
+	// rewritten line keeps its original spacing rather than jamming the
+	// comment against the new number.
+	head := s[:i]
+	trimmed := strings.TrimRight(head, " \t")
+	return trimmed, head[len(trimmed):] + s[i:]
+}
+
+// isCommentLine reports whether a trimmed line is a YAML comment. Comments
+// carry arbitrary indentation, so they must never be mistaken for a block's
+// first child — doing so takes the block's child indent from the comment and
+// splices later insertions in at the wrong depth.
+func isCommentLine(trimmed string) bool {
+	return strings.HasPrefix(trimmed, "#")
+}
+
 // probeBlock is one probe definition located inside a YAML document.
 type probeBlock struct {
+	// kind is the probe this block describes ("liveness"/"readiness"/"startup"),
+	// kept per block so the summary can name the right value for each one.
+	kind string
 	// firstChild is the index of the block's first child line, where an
 	// initialDelaySeconds is inserted when the block does not have one.
 	firstChild int
@@ -220,10 +246,10 @@ type probeBlock struct {
 // Only the chart shape appears in tenant values.yaml, so the manifest-only
 // lookup previously left every tenant service unpatchable.
 func findProbeBlocks(lines []string, kinds []string) []probeBlock {
-	wanted := make(map[string]bool, len(kinds)*2)
+	wanted := make(map[string]string, len(kinds)*2)
 	for _, k := range kinds {
-		wanted[k+"Probe:"] = true
-		wanted[k+":"] = true
+		wanted[k+"Probe:"] = k
+		wanted[k+":"] = k
 	}
 
 	var blocks []probeBlock
@@ -232,32 +258,37 @@ func findProbeBlocks(lines []string, kinds []string) []probeBlock {
 
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		if trimmed == "" || isCommentLine(trimmed) {
 			continue
 		}
-		indent := lineIndent(line)
+		indent := indentOf(line)
 
 		// Track the chart-shaped "probes:" mapping so that a bare
 		// "liveness:" key is only treated as a probe inside it.
 		if inProbes && len(indent) <= len(probesIndent) {
 			inProbes = false
 		}
-		if trimmed == "probes:" {
+		// A block key may carry a trailing comment ("liveness: # startup is slow").
+		key, _ := splitInlineComment(trimmed)
+		key = strings.TrimSpace(key)
+		if key == "probes:" {
 			inProbes = true
 			probesIndent = indent
 			continue
 		}
 
-		if !wanted[trimmed] {
+		kind, ok := wanted[key]
+		if !ok {
 			continue
 		}
-		if !strings.HasSuffix(trimmed, "Probe:") && !inProbes {
+		if !strings.HasSuffix(key, "Probe:") && !inProbes {
 			// A bare "liveness:"/"readiness:" outside a probes: mapping is
 			// some unrelated key — do not touch it.
 			continue
 		}
 
 		if b, ok := scanProbeBlock(lines, i, indent); ok {
+			b.kind = kind
 			blocks = append(blocks, b)
 		}
 	}
@@ -272,7 +303,13 @@ func scanProbeBlock(lines []string, start int, blockIndent string) (probeBlock, 
 		if trimmed == "" {
 			continue
 		}
-		indent := lineIndent(lines[i])
+		indent := indentOf(lines[i])
+		if isCommentLine(trimmed) {
+			// A comment may sit at any depth, including deeper than the keys
+			// it documents. It can neither end the block nor define its child
+			// indent, so skip it outright.
+			continue
+		}
 		if len(indent) <= len(blockIndent) {
 			break // block ended
 		}
@@ -286,10 +323,6 @@ func scanProbeBlock(lines []string, start int, blockIndent string) (probeBlock, 
 		}
 	}
 	return b, b.firstChild >= 0
-}
-
-func lineIndent(line string) string {
-	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 }
 
 // bumpedDelay raises a probe delay by 15s, with a 30s floor.
@@ -317,36 +350,44 @@ func GenerateProbeFix(content string, probeField string) (string, string, error)
 		return content, "", fmt.Errorf("could not find a %s probe block to patch", strings.Join(kinds, "/"))
 	}
 
-	var changes []string
+	// One entry per block, filled in place so the summary keeps file order
+	// even though the patching below runs bottom-up.
+	parts := make([]string, len(blocks))
 	// Apply from the bottom up so that inserting lines does not shift the
 	// indices of the blocks still to be patched.
 	for i := len(blocks) - 1; i >= 0; i-- {
 		b := blocks[i]
 		if b.delayLine >= 0 {
-			key, value, ok := strings.Cut(lines[b.delayLine], ":")
+			key, rest, ok := strings.Cut(lines[b.delayLine], ":")
 			if !ok {
 				continue
 			}
+			value, comment := splitInlineComment(rest)
 			current, err := strconv.Atoi(strings.TrimSpace(value))
 			if err != nil {
 				continue
 			}
 			next := bumpedDelay(current)
-			lines[b.delayLine] = fmt.Sprintf("%s: %d", key, next)
-			changes = append(changes, fmt.Sprintf("%d", next))
+			lines[b.delayLine] = fmt.Sprintf("%s: %d%s", key, next, comment)
+			parts[i] = fmt.Sprintf("%s %d -> %d", b.kind, current, next)
 			continue
 		}
 		inserted := fmt.Sprintf("%sinitialDelaySeconds: %d", b.childIndent, defaultProbeDelay)
 		lines = append(lines[:b.firstChild], append([]string{inserted}, lines[b.firstChild:]...)...)
-		changes = append(changes, fmt.Sprintf("%d", defaultProbeDelay))
+		parts[i] = fmt.Sprintf("%s -> %d", b.kind, defaultProbeDelay)
 	}
 
-	if len(changes) == 0 {
+	var changed []string
+	for _, p := range parts {
+		if p != "" {
+			changed = append(changed, p)
+		}
+	}
+	if len(changed) == 0 {
 		return content, "", fmt.Errorf("found a %s probe block but its initialDelaySeconds is not a number", strings.Join(kinds, "/"))
 	}
 
-	summary := fmt.Sprintf("Increase %s initialDelaySeconds to %s",
-		strings.Join(kinds, "/"), strings.Join(changes, "/"))
+	summary := "Increase probe initialDelaySeconds: " + strings.Join(changed, ", ")
 	return strings.Join(lines, "\n"), summary, nil
 }
 
