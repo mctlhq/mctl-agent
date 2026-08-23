@@ -116,6 +116,47 @@ func TestGenerateProbeFix(t *testing.T) {
 			probeField: "livenessProbe.initialDelaySeconds",
 			wantErr:    true,
 		},
+		{
+			// The base-service chart nests probes under "probes:" with bare
+			// liveness/readiness keys. Every tenant values.yaml uses this
+			// shape, so a manifest-only lookup patched none of them.
+			name: "base-service chart shape",
+			content: `probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 10
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 5`,
+			probeField: "livenessProbe.initialDelaySeconds",
+			wantDelay:  "initialDelaySeconds: 30",
+		},
+		{
+			// A probe block that relies on the chart default has no
+			// initialDelaySeconds line to bump; insert one instead of failing.
+			name: "probe block without initialDelaySeconds",
+			content: `probes:
+  liveness:
+    path: /healthz
+    periodSeconds: 15`,
+			probeField: "livenessProbe.initialDelaySeconds",
+			wantDelay:  "    initialDelaySeconds: 30",
+		},
+		{
+			// A bare "liveness:" outside a probes: mapping is an unrelated key.
+			name: "bare liveness key outside probes mapping",
+			content: `featureFlags:
+  liveness:
+    enabled: true`,
+			probeField: "livenessProbe.initialDelaySeconds",
+			wantErr:    true,
+		},
+		{
+			name:       "unrecognised probe field",
+			content:    "livenessProbe:\n  initialDelaySeconds: 10",
+			probeField: "bogusProbe.initialDelaySeconds",
+			wantErr:    true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -134,6 +175,33 @@ func TestGenerateProbeFix(t *testing.T) {
 				t.Errorf("expected %q in output, got:\n%s", tt.wantDelay, newContent)
 			}
 		})
+	}
+}
+
+// TestGenerateProbeFixAmbiguousSide covers the regression seen live on
+// 2026-08-23: when the logs only say the generic "probe failed", probe_fix
+// emits "liveness/readinessProbe.initialDelaySeconds". That is not a YAML key
+// anywhere, so the patcher used to fail with "could not find
+// liveness/readinessProbe.initialDelaySeconds initialDelaySeconds to bump"
+// and the ticket stalled in fix_proposed with an empty patch.
+func TestGenerateProbeFixAmbiguousSide(t *testing.T) {
+	content := `probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 10
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 5`
+
+	newContent, summary, err := GenerateProbeFix(content, "liveness/readinessProbe.initialDelaySeconds")
+	if err != nil {
+		t.Fatalf("ambiguous probe side must still patch: %v", err)
+	}
+	if strings.Count(newContent, "initialDelaySeconds: 30") != 2 {
+		t.Errorf("expected both probes bumped to 30, got:\n%s", newContent)
+	}
+	if summary == "" {
+		t.Error("expected a non-empty summary")
 	}
 }
 

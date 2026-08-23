@@ -33,6 +33,10 @@ type DiagnosisCompat struct {
 	Reasoning      string `json:"reasoning"`
 }
 
+// defaultProbeDelay is the initialDelaySeconds written into a probe block
+// that relies on the chart default and therefore has no explicit value.
+const defaultProbeDelay = 30
+
 // PlatformServices that use inline values in apps/templates/.
 var PlatformServices = map[string]bool{
 	"mctl-api":   true,
@@ -171,46 +175,179 @@ func GenerateCPUBump(content string) (string, string, error) {
 	return strings.Join(modified, "\n"), summary, nil
 }
 
-// GenerateProbeFix creates a patch that increases initialDelaySeconds for a probe.
-func GenerateProbeFix(content string, probeField string) (string, string, error) {
-	lines := strings.Split(content, "\n")
-	var modified []string
-	summary := ""
-	probeName := strings.TrimSuffix(probeField, ".initialDelaySeconds")
-	inProbe := false
-	probeIndent := ""
+// probeKinds maps a diagnosis YAMLField onto the probe kinds it refers to.
+// The probe_fix skill emits "livenessProbe.initialDelaySeconds",
+// "readinessProbe.initialDelaySeconds", or — when the logs only say the
+// generic "probe failed" and the side is unknown —
+// "liveness/readinessProbe.initialDelaySeconds". That last form is not a YAML
+// key anywhere; it means "both", and used to be looked up verbatim, which
+// could never match and made every ambiguous probe ticket fail to patch.
+func probeKinds(probeField string) []string {
+	name := strings.TrimSuffix(probeField, ".initialDelaySeconds")
+	name = strings.TrimSuffix(name, "Probe")
+	switch name {
+	case "liveness", "readiness", "startup":
+		return []string{name}
+	case "liveness/readiness":
+		return []string{"liveness", "readiness"}
+	}
+	return nil
+}
 
-	for _, line := range lines {
+// probeBlock is one probe definition located inside a YAML document.
+type probeBlock struct {
+	// firstChild is the index of the block's first child line, where an
+	// initialDelaySeconds is inserted when the block does not have one.
+	firstChild int
+	// childIndent is the indentation shared by the block's direct children.
+	childIndent string
+	// delayLine is the index of the block's own initialDelaySeconds line,
+	// or -1 when the block does not set one.
+	delayLine int
+}
+
+// findProbeBlocks locates every block describing one of the given probe kinds.
+// Two shapes are recognised, because the agent patches both raw Kubernetes
+// manifests and base-service values.yaml files:
+//
+//	livenessProbe:            # raw manifest (apps/templates/*.yaml)
+//	  initialDelaySeconds: 10
+//
+//	probes:                   # base-service chart (services/<tenant>/*/values.yaml)
+//	  liveness:
+//	    initialDelaySeconds: 10
+//
+// Only the chart shape appears in tenant values.yaml, so the manifest-only
+// lookup previously left every tenant service unpatchable.
+func findProbeBlocks(lines []string, kinds []string) []probeBlock {
+	wanted := make(map[string]bool, len(kinds)*2)
+	for _, k := range kinds {
+		wanted[k+"Probe:"] = true
+		wanted[k+":"] = true
+	}
+
+	var blocks []probeBlock
+	probesIndent := ""
+	inProbes := false
+
+	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-		if trimmed == probeName+":" {
-			inProbe = true
-			probeIndent = indent
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
 		}
-		if inProbe && indent == probeIndent && trimmed != "" && trimmed != probeName+":" && !strings.HasPrefix(trimmed, "initialDelaySeconds:") && !strings.HasPrefix(indent, probeIndent+" ") && !strings.HasPrefix(indent, probeIndent+"\t") {
-			inProbe = false
+		indent := lineIndent(line)
+
+		// Track the chart-shaped "probes:" mapping so that a bare
+		// "liveness:" key is only treated as a probe inside it.
+		if inProbes && len(indent) <= len(probesIndent) {
+			inProbes = false
 		}
-		if inProbe && strings.HasPrefix(trimmed, "initialDelaySeconds:") {
-			parts := strings.Split(line, ":")
-			if len(parts) == 2 {
-				val, _ := strconv.Atoi(strings.TrimSpace(parts[1]))
-				newVal := val + 15
-				if newVal < 30 {
-					newVal = 30
-				}
-				line = strings.Replace(line, parts[1], fmt.Sprintf(" %d", newVal), 1)
-				summary = fmt.Sprintf("Increase %s initialDelaySeconds to %d", probeField, newVal)
-				inProbe = false
+		if trimmed == "probes:" {
+			inProbes = true
+			probesIndent = indent
+			continue
+		}
+
+		if !wanted[trimmed] {
+			continue
+		}
+		if !strings.HasSuffix(trimmed, "Probe:") && !inProbes {
+			// A bare "liveness:"/"readiness:" outside a probes: mapping is
+			// some unrelated key — do not touch it.
+			continue
+		}
+
+		if b, ok := scanProbeBlock(lines, i, indent); ok {
+			blocks = append(blocks, b)
+		}
+	}
+	return blocks
+}
+
+// scanProbeBlock walks the children of the probe block opened at start.
+func scanProbeBlock(lines []string, start int, blockIndent string) (probeBlock, bool) {
+	b := probeBlock{firstChild: -1, delayLine: -1}
+	for i := start + 1; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if trimmed == "" {
+			continue
+		}
+		indent := lineIndent(lines[i])
+		if len(indent) <= len(blockIndent) {
+			break // block ended
+		}
+		if b.firstChild < 0 {
+			b.firstChild = i
+			b.childIndent = indent
+		}
+		if indent == b.childIndent && strings.HasPrefix(trimmed, "initialDelaySeconds:") {
+			b.delayLine = i
+			break
+		}
+	}
+	return b, b.firstChild >= 0
+}
+
+func lineIndent(line string) string {
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+}
+
+// bumpedDelay raises a probe delay by 15s, with a 30s floor.
+func bumpedDelay(current int) int {
+	next := current + 15
+	if next < 30 {
+		next = 30
+	}
+	return next
+}
+
+// GenerateProbeFix creates a patch that increases initialDelaySeconds for a
+// probe. When the probe block exists but sets no initialDelaySeconds (the
+// chart supplies a default), the field is inserted rather than reported as
+// unpatchable.
+func GenerateProbeFix(content string, probeField string) (string, string, error) {
+	kinds := probeKinds(probeField)
+	if len(kinds) == 0 {
+		return content, "", fmt.Errorf("unrecognised probe field %q", probeField)
+	}
+
+	lines := strings.Split(content, "\n")
+	blocks := findProbeBlocks(lines, kinds)
+	if len(blocks) == 0 {
+		return content, "", fmt.Errorf("could not find a %s probe block to patch", strings.Join(kinds, "/"))
+	}
+
+	var changes []string
+	// Apply from the bottom up so that inserting lines does not shift the
+	// indices of the blocks still to be patched.
+	for i := len(blocks) - 1; i >= 0; i-- {
+		b := blocks[i]
+		if b.delayLine >= 0 {
+			key, value, ok := strings.Cut(lines[b.delayLine], ":")
+			if !ok {
+				continue
 			}
+			current, err := strconv.Atoi(strings.TrimSpace(value))
+			if err != nil {
+				continue
+			}
+			next := bumpedDelay(current)
+			lines[b.delayLine] = fmt.Sprintf("%s: %d", key, next)
+			changes = append(changes, fmt.Sprintf("%d", next))
+			continue
 		}
-		modified = append(modified, line)
+		inserted := fmt.Sprintf("%sinitialDelaySeconds: %d", b.childIndent, defaultProbeDelay)
+		lines = append(lines[:b.firstChild], append([]string{inserted}, lines[b.firstChild:]...)...)
+		changes = append(changes, fmt.Sprintf("%d", defaultProbeDelay))
 	}
 
-	if summary == "" {
-		return content, "", fmt.Errorf("could not find %s initialDelaySeconds to bump", probeField)
+	if len(changes) == 0 {
+		return content, "", fmt.Errorf("found a %s probe block but its initialDelaySeconds is not a number", strings.Join(kinds, "/"))
 	}
 
-	return strings.Join(modified, "\n"), summary, nil
+	summary := fmt.Sprintf("Increase %s initialDelaySeconds to %s",
+		strings.Join(kinds, "/"), strings.Join(changes, "/"))
+	return strings.Join(lines, "\n"), summary, nil
 }
 
 // GenerateWorkflowParamFix replaces 'default:' with 'value:' in workflow arguments.
