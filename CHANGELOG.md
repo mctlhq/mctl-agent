@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.16.2](https://github.com/mctlhq/mctl-agent/compare/1.16.1...1.16.2) (2026-08-23)
+
+
+### Bug Fixes
+
+* **fixer:** handle comments in probe blocks and pair summaries correctly ([923a97a](https://github.com/mctlhq/mctl-agent/commit/923a97a3ac6c2fe949e177f48cc0535ea1b16f17))
+* **fixer:** make probe_fix able to patch the files it is pointed at ([ad70909](https://github.com/mctlhq/mctl-agent/commit/ad709099d92d86b3539acb0b9e4139d6db03038b))
+* **probe_fix:** only match the kubelet's own probe-failure phrasing ([c09c146](https://github.com/mctlhq/mctl-agent/commit/c09c14619bb22d8d163fdb83d2cab85b62bc289c))
+
 ## [1.16.1](https://github.com/mctlhq/mctl-agent/compare/1.16.0...1.16.1) (2026-08-18)
 
 
