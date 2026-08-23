@@ -360,6 +360,42 @@ func TestProbeFixSkillMatch(t *testing.T) {
 	}
 }
 
+// TestProbeFixSkillDiagnose pins the probeType → YAMLField mapping, including
+// the startup branch added alongside the tightened Match().
+func TestProbeFixSkillDiagnose(t *testing.T) {
+	s := NewProbeFixSkill()
+	ctx := context.Background()
+
+	tests := []struct {
+		name  string
+		logs  string
+		field string
+	}{
+		{"liveness", "Liveness probe failed: connection refused", "livenessProbe.initialDelaySeconds"},
+		{"readiness", "Readiness probe failed: HTTP 503", "readinessProbe.initialDelaySeconds"},
+		{"startup", "Startup probe failed: HTTP 404", "startupProbe.initialDelaySeconds"},
+		// Both sides in the evidence: liveness wins, and the field stays a
+		// single real probe name rather than the ambiguous placeholder.
+		{"both", "Liveness probe failed\nReadiness probe failed", "livenessProbe.initialDelaySeconds"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ev := skill.NewEvidenceSet([]ticket.Evidence{{Type: "logs", Content: tt.logs}})
+			diag, err := s.Diagnose(ctx, &ticket.Ticket{}, ev)
+			if err != nil {
+				t.Fatalf("Diagnose: %v", err)
+			}
+			if diag.YAMLField != tt.field {
+				t.Errorf("YAMLField = %q, want %q", diag.YAMLField, tt.field)
+			}
+			if diag.FixType != "adjust_probe" {
+				t.Errorf("FixType = %q, want adjust_probe", diag.FixType)
+			}
+		})
+	}
+}
+
 func TestCPUThrottleSkillMatch(t *testing.T) {
 	s := NewCPUThrottleSkill()
 	ctx := context.Background()
