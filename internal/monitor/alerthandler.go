@@ -16,6 +16,7 @@ package monitor
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -88,15 +89,39 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A store failure must reach AlertManager as 5xx. AM retries a webhook
+	// only on 5xx; a 200 tells it the batch is delivered and it never sends
+	// that notification again. For a `resolved` webhook that is permanent:
+	// the ticket stays open forever, and the poller's AM reconcile is the
+	// only thing left that might close it. Answering 500 costs a redelivery
+	// of the whole batch, which is safe — every path here is idempotent by
+	// (tenant, service, type): a re-sent firing alert dedups onto the
+	// existing ticket, a re-sent resolve finds nothing left open.
+	//
+	// Processing continues past the first failure so one bad alert does not
+	// hide the rest of the batch; the first error is what gets reported.
+	var firstErr error
 	for _, a := range payload.Alerts {
-		h.processAlert(a)
+		if err := h.processAlert(a); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		slog.Error("alert batch not fully processed, asking AlertManager to retry",
+			"error", firstErr, "alerts", len(payload.Alerts))
+		http.Error(w, "failed to process alerts", http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"accepted"}`))
 }
 
-func (h *AlertHandler) processAlert(a alert) {
+// processAlert turns one AlertManager alert into ticket state. It returns
+// an error only for failures that a retry could fix — i.e. store failures —
+// so ServeHTTP can ask AlertManager to redeliver. Everything else is handled
+// in place.
+func (h *AlertHandler) processAlert(a alert) error {
 	alertName := a.Labels["alertname"]
 	namespace := a.Labels["namespace"]
 	pod := a.Labels["pod"]
@@ -229,6 +254,7 @@ func (h *AlertHandler) processAlert(a alert) {
 		ids, err := h.store.ResolveByTenantService(tenant, service, tType)
 		if err != nil {
 			slog.Error("failed to resolve tickets", "error", err, "tenant", tenant, "service", service)
+			return fmt.Errorf("resolve tickets for %s/%s: %w", tenant, service, err)
 		}
 		// Migration fallback: a ticket created before the tenant/service
 		// fallbacks above existed may still sit on the old fully-empty
@@ -240,6 +266,7 @@ func (h *AlertHandler) processAlert(a alert) {
 			legacyIDs, legacyErr := h.store.ResolveByTenantService("", "", tType)
 			if legacyErr != nil {
 				slog.Error("failed to resolve legacy empty-tenant tickets", "error", legacyErr)
+				return fmt.Errorf("resolve legacy empty-tenant tickets: %w", legacyErr)
 			}
 			ids = append(ids, legacyIDs...)
 		}
@@ -248,7 +275,7 @@ func (h *AlertHandler) processAlert(a alert) {
 		if len(ids) > 0 && h.OnResolve != nil {
 			h.OnResolve(ids)
 		}
-		return
+		return nil
 	}
 
 	// Service-name filter: drop firing alerts for demo/PR-preview services
@@ -256,22 +283,24 @@ func (h *AlertHandler) processAlert(a alert) {
 	if h.IgnoreService != nil && service != "" && h.IgnoreService.MatchString(service) {
 		slog.Info("alert dropped by service filter",
 			"alertname", alertName, "tenant", tenant, "service", service)
-		return
+		return nil
 	}
 
 	// Dedup: check for existing open ticket.
 	existing, err := h.store.FindDuplicate(tenant, service, tType)
 	if err != nil {
 		slog.Error("dedup check failed", "error", err)
+		return fmt.Errorf("dedup check for %s/%s: %w", tenant, service, err)
 	}
 	if existing != nil {
 		// Bump UpdatedAt so the stale-ticket GC can distinguish a still-
 		// firing alert from one that has stopped firing.
 		if err := h.store.TouchWithFingerprint(existing.ID, a.Fingerprint); err != nil {
 			slog.Error("failed to touch ticket on duplicate alert", "error", err, "id", existing.ID)
+			return fmt.Errorf("touch ticket %s: %w", existing.ID, err)
 		}
 		slog.Debug("duplicate ticket exists", "id", existing.ID, "alertname", alertName)
-		return
+		return nil
 	}
 
 	// Flap suppression: if the same alert was just resolved, skip creating
@@ -284,12 +313,13 @@ func (h *AlertHandler) processAlert(a alert) {
 		recent, err := h.store.FindRecentlyResolved(tenant, service, tType, alertName, h.FlapCooldown)
 		if err != nil {
 			slog.Error("flap cooldown check failed", "error", err)
+			return fmt.Errorf("flap cooldown check for %s/%s: %w", tenant, service, err)
 		}
 		if recent != nil {
 			slog.Info("suppressing flap alert within cooldown",
 				"alertname", alertName, "tenant", tenant, "service", service,
 				"previous_ticket", recent.ID, "cooldown", h.FlapCooldown)
-			return
+			return nil
 		}
 	}
 
@@ -311,7 +341,7 @@ func (h *AlertHandler) processAlert(a alert) {
 
 	if err := h.store.Create(t); err != nil {
 		slog.Error("failed to create ticket from alert", "error", err, "alertname", alertName)
-		return
+		return fmt.Errorf("create ticket for %s: %w", alertName, err)
 	}
 
 	// Store the raw alert as evidence.
@@ -328,6 +358,7 @@ func (h *AlertHandler) processAlert(a alert) {
 	if h.onTicket != nil {
 		h.onTicket(t)
 	}
+	return nil
 }
 
 // classifyAlert maps AlertManager alertname to ticket type and severity.

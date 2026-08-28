@@ -1107,3 +1107,101 @@ func TestAlertHandlerRolloutWindowOpensOneNewTicket(t *testing.T) {
 		t.Error("the aggregate legacy ticket was closed by one workload's resolve; B is still firing in it")
 	}
 }
+
+func TestAlertHandlerStoreFailureAsksForRetry(t *testing.T) {
+	// AlertManager retries a webhook only on 5xx. Answering 200 after a
+	// store failure tells it the batch is delivered and it never resends —
+	// permanent for a `resolved` webhook, whose ticket then stays open
+	// until (and unless) the poller's AM reconcile closes it.
+	newClosedStore := func(t *testing.T) *ticket.Store {
+		t.Helper()
+		store, err := ticket.NewStore(context.Background(), ":memory:")
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Closing the store is the cheapest faithful stand-in for a DB
+		// that is down: every query returns an error.
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+
+	firing := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{{
+			Status:      "firing",
+			Fingerprint: "aaaa1111",
+			Labels: map[string]string{
+				"alertname": "KubePodCrashLooping",
+				"namespace": "admins",
+				"pod":       "admins-mctl-api-base-service-6d4b5c7f8-abc12",
+			},
+			Annotations: map[string]string{"summary": "crashloop"},
+		}},
+	}
+	resolved := alertManagerPayload{
+		Status: "resolved",
+		Alerts: []alert{{
+			Status:      "resolved",
+			Fingerprint: "aaaa1111",
+			Labels: map[string]string{
+				"alertname": "KubePodCrashLooping",
+				"namespace": "admins",
+				"pod":       "admins-mctl-api-base-service-6d4b5c7f8-abc12",
+			},
+			Annotations: map[string]string{"summary": "crashloop"},
+		}},
+	}
+
+	for _, tt := range []struct {
+		name    string
+		payload alertManagerPayload
+	}{
+		{"firing", firing},
+		{"resolved", resolved},
+	} {
+		t.Run(tt.name+" alert returns 500 when the store is down", func(t *testing.T) {
+			handler := NewAlertHandler(newClosedStore(t), func(*ticket.Ticket) {})
+			body, _ := json.Marshal(tt.payload)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("status: got %d, want %d (AlertManager only retries on 5xx)",
+					rec.Code, http.StatusInternalServerError)
+			}
+		})
+	}
+
+	t.Run("healthy store still returns 200", func(t *testing.T) {
+		handler := NewAlertHandler(newTestStore(t), func(*ticket.Ticket) {})
+		body, _ := json.Marshal(firing)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("status: got %d, want %d", rec.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("a redelivered batch does not duplicate the ticket", func(t *testing.T) {
+		// The 500 above costs a redelivery of the whole batch, which is
+		// only safe if replaying it is idempotent.
+		store := newTestStore(t)
+		var received []*ticket.Ticket
+		handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+			received = append(received, tk)
+		})
+		body, _ := json.Marshal(firing)
+		for i := 0; i < 3; i++ {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+		}
+		if len(received) != 1 {
+			t.Errorf("expected the replayed batch to dedup onto one ticket, got %d", len(received))
+		}
+	})
+}
