@@ -193,6 +193,13 @@ func main() {
 	// Daily digest at 09:00 UTC.
 	go runDailyDigest(ctx, store, telegram)
 
+	// Inbound auth tokens fail closed when unset (internal/api/auth.go
+	// rejects every request rather than disabling the check), so a missing
+	// Vault key silently turns these routes into "reject everything" rather
+	// than "public". Warn at startup for each one so that's visible in boot
+	// logs instead of discovered via a wave of 401s.
+	warnUnsetAuthTokens(cfg.AgentAPIToken, cfg.AlertWebhookToken, cfg.TelegramWebhookSecret)
+
 	// Start server.
 	go func() {
 		slog.Info("mctl-agent starting",
@@ -234,6 +241,24 @@ func main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+}
+
+// warnUnsetAuthTokens logs a slog.Warn for each inbound auth token that is
+// empty, naming the env var an operator needs to set. Extracted from main()
+// so it can be unit-tested directly without booting the full binary.
+func warnUnsetAuthTokens(agentAPIToken, alertWebhookToken, telegramWebhookSecret string) {
+	if agentAPIToken == "" {
+		slog.Warn("inbound auth token not configured; affected routes will reject all requests",
+			"variable", "AGENT_API_TOKEN")
+	}
+	if alertWebhookToken == "" {
+		slog.Warn("inbound auth token not configured; affected routes will reject all requests",
+			"variable", "ALERTMANAGER_WEBHOOK_TOKEN")
+	}
+	if telegramWebhookSecret == "" {
+		slog.Warn("inbound auth token not configured; affected routes will reject all requests",
+			"variable", "TELEGRAM_WEBHOOK_SECRET")
 	}
 }
 

@@ -15,9 +15,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"path/filepath"
 	"strings"
@@ -26,6 +28,57 @@ import (
 
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
+
+// captureWarnUnsetAuthTokens redirects the default slog logger to a buffer
+// for the duration of the call, restoring the previous default on return, so
+// tests can assert on emitted warnings without touching stdout.
+func captureWarnUnsetAuthTokens(t *testing.T, agentAPIToken, alertWebhookToken, telegramWebhookSecret string) string {
+	t.Helper()
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+
+	warnUnsetAuthTokens(agentAPIToken, alertWebhookToken, telegramWebhookSecret)
+
+	return buf.String()
+}
+
+func TestWarnUnsetAuthTokensWarnsForEachUnsetVar(t *testing.T) {
+	out := captureWarnUnsetAuthTokens(t, "", "", "")
+
+	for _, want := range []string{"AGENT_API_TOKEN", "ALERTMANAGER_WEBHOOK_TOKEN", "TELEGRAM_WEBHOOK_SECRET"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected a warning naming %q, got:\n%s", want, out)
+		}
+	}
+	if got := strings.Count(out, "level=WARN"); got != 3 {
+		t.Errorf("expected 3 warnings (one per unset var), got %d:\n%s", got, out)
+	}
+}
+
+func TestWarnUnsetAuthTokensSilentWhenAllSet(t *testing.T) {
+	out := captureWarnUnsetAuthTokens(t, "api-token", "alert-token", "telegram-secret")
+
+	if out != "" {
+		t.Errorf("expected no warnings when all tokens are set, got:\n%s", out)
+	}
+}
+
+func TestWarnUnsetAuthTokensWarnsOnlyForUnsetVars(t *testing.T) {
+	out := captureWarnUnsetAuthTokens(t, "api-token", "", "telegram-secret")
+
+	if strings.Contains(out, "AGENT_API_TOKEN") {
+		t.Errorf("did not expect a warning for AGENT_API_TOKEN (it was set), got:\n%s", out)
+	}
+	if !strings.Contains(out, "ALERTMANAGER_WEBHOOK_TOKEN") {
+		t.Errorf("expected a warning for ALERTMANAGER_WEBHOOK_TOKEN, got:\n%s", out)
+	}
+	if strings.Contains(out, "TELEGRAM_WEBHOOK_SECRET") {
+		t.Errorf("did not expect a warning for TELEGRAM_WEBHOOK_SECRET (it was set), got:\n%s", out)
+	}
+}
 
 func TestRedactDSNHidesPassword(t *testing.T) {
 	const dsn = "postgresql://mctl-agent:s3cr3t@shared-pg-rw.platform-db.svc:5432/mctl-agent"

@@ -9,6 +9,8 @@ import (
 
 	"github.com/mctlhq/mctl-agent/internal/monitor"
 	"github.com/mctlhq/mctl-agent/internal/notify"
+	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
@@ -153,11 +155,15 @@ func TestTelegramFailClosedWithoutChatAllowlist(t *testing.T) {
 	}
 }
 
+// TestTelegramFailClosedWithoutWebhookSecret covers a webhook secret that is
+// unset while a chat allowlist is configured. telegramSecretOK now fails
+// closed on an empty secret (see auth.go), so the request itself is
+// rejected with 401 at the door — the same fail-closed contract as every
+// other inbound auth token this proposal covers — before the command ever
+// reaches the webhook-secret/chat-allowlist execution gate below.
 func TestTelegramFailClosedWithoutWebhookSecret(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
-	// Chat allowlist configured but no webhook secret: a direct POST with
-	// a spoofed allowlisted chat.id must not execute commands.
 	tg := notify.NewTelegram("token", "210408407", "", nil)
 	router := NewRouter(Options{
 		Store:    store,
@@ -172,20 +178,25 @@ func TestTelegramFailClosedWithoutWebhookSecret(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/telegram", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("rejected command should still return 200: status=%d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("unset webhook secret must reject the request: status=%d, want 401", w.Code)
 	}
 	if pipe.IsPaused() {
 		t.Fatal("command must not execute when a chat allowlist is set without a webhook secret")
 	}
 }
 
-func TestTelegramOpenModeWhenFullyUnconfigured(t *testing.T) {
+// TestTelegramFailsClosedWhenFullyUnconfigured used to be named
+// TestTelegramOpenModeWhenFullyUnconfigured and asserted that leaving both
+// TELEGRAM_WEBHOOK_SECRET and the chat allowlist unset opened a "local dev"
+// bypass where commands executed. That was itself a fail-open bug: an
+// unconfigured webhook secret must reject the request (401, via
+// telegramSecretOK) and, independent of that, an unconfigured secret and/or
+// allowlist must never let a command run (see the AND-gate in
+// telegramWebhookHandler).
+func TestTelegramFailsClosedWhenFullyUnconfigured(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
-	// Neither TELEGRAM_WEBHOOK_SECRET nor a chat allowlist is set: this is
-	// the local-dev "fully open" mode, distinct from the fail-closed cases
-	// above where exactly one of the two is configured. Commands must run.
 	tg := notify.NewTelegram("token", "", "", nil)
 	router := NewRouter(Options{
 		Store:    store,
@@ -200,11 +211,11 @@ func TestTelegramOpenModeWhenFullyUnconfigured(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/telegram", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("open mode command: status=%d, want 200", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("fully unconfigured webhook secret must reject the request: status=%d, want 401", w.Code)
 	}
-	if !pipe.IsPaused() {
-		t.Fatal("command must execute when neither webhook secret nor chat allowlist is configured")
+	if pipe.IsPaused() {
+		t.Fatal("command must not execute when neither webhook secret nor chat allowlist is configured")
 	}
 }
 
@@ -257,12 +268,14 @@ func TestTicketListHandlerSanitizesStoreError(t *testing.T) {
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
+		APIToken: "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tickets", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusInternalServerError {
@@ -328,5 +341,64 @@ func TestMCPRequiresBearerWhenConfigured(t *testing.T) {
 	router.ServeHTTP(w, req)
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated MCP: status=%d, want 401", w.Code)
+	}
+}
+
+// TestRoutesFailClosedWhenGoverningTokenUnset is the core regression for
+// this proposal: an unset AGENT_API_TOKEN / ALERTMANAGER_WEBHOOK_TOKEN must
+// reject every request on the routes it governs (401), never fall back to
+// "auth disabled". Each case fails against pre-fix code, where an empty
+// token short-circuited requireBearer/requireBearerFunc to a no-op.
+func TestRoutesFailClosedWhenGoverningTokenUnset(t *testing.T) {
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		body   []byte
+	}{
+		{"alerts", http.MethodPost, "/api/v1/alerts", []byte(`{}`)},
+		{"skills register", http.MethodPost, "/api/v1/skills/register", []byte(`{"name":"x","version":"1.0","endpoint":"http://example.com"}`)},
+		{"mcp", http.MethodPost, "/mcp", []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`)},
+		{"tickets", http.MethodGet, "/api/v1/tickets", nil},
+		{"skills", http.MethodGet, "/api/v1/skills", nil},
+		{"webhooks", http.MethodGet, "/api/v1/webhooks", nil},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			pipe := newTestPipeline(t, store)
+			reg := skill.NewRegistry()
+			remoteMgr := remote.NewManager(reg)
+			webhookStore, err := webhook.NewStore(store.DB(), store.Dialect())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// APIToken and AlertWebhookToken are both left unset: the
+			// scenario this proposal fixes.
+			router := NewRouter(Options{
+				Store:         store,
+				Pipeline:      pipe,
+				RemoteManager: remoteMgr,
+				WebhookStore:  webhookStore,
+				OnAlert: func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				},
+			})
+
+			var body *bytes.Reader
+			if tt.body != nil {
+				body = bytes.NewReader(tt.body)
+			} else {
+				body = bytes.NewReader(nil)
+			}
+			req := httptest.NewRequest(tt.method, tt.path, body)
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+			if w.Code != http.StatusUnauthorized {
+				t.Fatalf("%s %s with no token configured: status=%d, want 401", tt.method, tt.path, w.Code)
+			}
+		})
 	}
 }
