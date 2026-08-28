@@ -142,11 +142,17 @@ func (h *AlertHandler) processAlert(a alert) {
 	// filed under before this branch existed, so the rollout window can
 	// still find tickets opened by the previous version — see the
 	// migration fallbacks at FindDuplicate and the resolved branch below.
-	legacyService := ""
+	//
+	// hasLegacy, rather than legacyService != "": on a cluster whose
+	// scrape config drops the target `pod` label, these alerts arrive with
+	// no pod at all, so the previous version filed them under the EMPTY
+	// service name. That is a real legacy key to migrate from, and testing
+	// the string for emptiness would silently skip it.
+	legacyService, hasLegacy := "", false
 	for _, key := range []string{"deployment", "statefulset", "daemonset"} {
 		if obj := a.Labels[key]; obj != "" {
 			if service != obj {
-				legacyService = service
+				legacyService, hasLegacy = service, true
 			}
 			service = obj
 			break
@@ -244,13 +250,23 @@ func (h *AlertHandler) processAlert(a alert) {
 		// after AMReconcileMinAge and only while reconcile is enabled.
 		// Close it directly instead. Becomes a no-op once pre-rollout
 		// tickets have aged out.
-		if len(ids) == 0 && legacyService != "" {
-			legacyIDs, legacyErr := h.store.ResolveByTenantService(tenant, legacyService, tType)
-			if legacyErr != nil {
-				slog.Error("failed to resolve legacy workload-key tickets", "error", legacyErr,
-					"tenant", tenant, "legacy_service", legacyService)
+		//
+		// Resolved by ID, never by (tenant, legacyService, type): that
+		// key is shared by every workload in the tenant, so a blanket
+		// resolve would close another object's still-firing incident.
+		// legacyTicket gates on the fingerprint for exactly that reason.
+		if len(ids) == 0 {
+			if lt := h.legacyTicket(tenant, legacyService, tType, a.Fingerprint, hasLegacy); lt != nil {
+				reason := "Resolved via pre-rollout workload key " + legacyService +
+					" (fingerprint " + a.Fingerprint + ")"
+				resolved, resolveErr := h.store.ResolveByIDFromStatus(lt.ID, lt.Status, reason)
+				if resolveErr != nil {
+					slog.Error("failed to resolve legacy workload-key ticket", "error", resolveErr,
+						"id", lt.ID, "tenant", tenant, "legacy_service", legacyService)
+				} else if resolved {
+					ids = append(ids, lt.ID)
+				}
 			}
-			ids = append(ids, legacyIDs...)
 		}
 		slog.Info("resolved tickets for alert",
 			"alertname", alertName, "tenant", tenant, "service", service, "count", len(ids))
@@ -280,17 +296,13 @@ func (h *AlertHandler) processAlert(a alert) {
 	// notification) for one incident. The ticket keeps its old service
 	// name until it resolves — renaming it mid-flight would break the
 	// fingerprint-keyed AM reconcile pass — but no duplicate is created.
-	if existing == nil && legacyService != "" {
-		legacyExisting, legacyErr := h.store.FindDuplicate(tenant, legacyService, tType)
-		if legacyErr != nil {
-			slog.Error("legacy dedup check failed", "error", legacyErr)
-		}
-		if legacyExisting != nil {
+	if existing == nil {
+		if lt := h.legacyTicket(tenant, legacyService, tType, a.Fingerprint, hasLegacy); lt != nil {
 			slog.Info("duplicate found under pre-rollout workload key",
-				"id", legacyExisting.ID, "alertname", alertName,
+				"id", lt.ID, "alertname", alertName,
 				"tenant", tenant, "legacy_service", legacyService, "service", service)
+			existing = lt
 		}
-		existing = legacyExisting
 	}
 	if existing != nil {
 		// Bump UpdatedAt so the stale-ticket GC can distinguish a still-
@@ -318,13 +330,19 @@ func (h *AlertHandler) processAlert(a alert) {
 		// version deployed left its ticket under the pod-derived key, so
 		// a re-fire inside the cooldown would miss the suppression and
 		// notify again. Same no-op condition as the other two.
-		if recent == nil && legacyService != "" {
+		if recent == nil && hasLegacy && a.Fingerprint != "" {
 			legacyRecent, legacyErr := h.store.FindRecentlyResolved(tenant, legacyService, tType, alertName, h.FlapCooldown)
 			if legacyErr != nil {
 				slog.Error("legacy flap cooldown check failed", "error", legacyErr,
 					"tenant", tenant, "legacy_service", legacyService)
 			}
-			recent = legacyRecent
+			// Same shared-key hazard as the two fallbacks above: without
+			// the fingerprint check this would suppress workload B's
+			// first-ever ticket because unrelated workload A resolved
+			// moments earlier under the same legacy key.
+			if legacyRecent != nil && fingerprintSetHas(legacyRecent.AlertFingerprint, a.Fingerprint) {
+				recent = legacyRecent
+			}
 		}
 		if recent != nil {
 			slog.Info("suppressing flap alert within cooldown",
@@ -402,6 +420,51 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 	default:
 		return ticket.TypeGeneric, ticket.SeverityWarning
 	}
+}
+
+// legacyTicket returns the open pre-rollout ticket for this exact alert —
+// the one filed under the pod-derived service name before the workload-label
+// branch in processAlert existed — or nil when there is none.
+//
+// The fingerprint gate is the point of this helper. legacyService is derived
+// from the kube-state-metrics scrape-target pod, so EVERY workload in a
+// tenant collapses onto the same legacy key; matching on
+// (tenant, legacyService, type) alone would attach one object's alert to
+// another object's ticket, and resolve another object's still-firing
+// incident. The AlertManager fingerprint is per label-set, so requiring the
+// stored ticket to carry this alert's fingerprint keeps the migration
+// scoped to the same alert it came from. An alert with no fingerprint, or a
+// pre-Phase-2 ticket that stored none, is left alone rather than guessed at.
+func (h *AlertHandler) legacyTicket(tenant, legacyService, tType, fingerprint string, hasLegacy bool) *ticket.Ticket {
+	if !hasLegacy || fingerprint == "" {
+		return nil
+	}
+	t, err := h.store.FindDuplicate(tenant, legacyService, tType)
+	if err != nil {
+		slog.Error("legacy ticket lookup failed", "error", err,
+			"tenant", tenant, "legacy_service", legacyService)
+		return nil
+	}
+	if t == nil || !fingerprintSetHas(t.AlertFingerprint, fingerprint) {
+		return nil
+	}
+	return t
+}
+
+// fingerprintSetHas reports whether the comma-separated fingerprint set
+// stored on a ticket contains fingerprint. A ticket accumulates several
+// fingerprints when one ticket dedups multiple concurrent alerts, which is
+// why this is a set membership test and not equality.
+func fingerprintSetHas(set, fingerprint string) bool {
+	if set == "" || fingerprint == "" {
+		return false
+	}
+	for _, fp := range strings.Split(set, ",") {
+		if strings.TrimSpace(fp) == fingerprint {
+			return true
+		}
+	}
+	return false
 }
 
 // extractService extracts the service name from a pod name by stripping
