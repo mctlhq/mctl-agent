@@ -198,7 +198,7 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 		// case: commands only execute when both are configured. Neither
 		// configured no longer opens a "local dev" bypass — an unconfigured
 		// webhook secret must not run commands.
-		if !(opts.TelegramWebhookSecret != "" && opts.Telegram.HasChatAllowlist()) {
+		if opts.TelegramWebhookSecret == "" || !opts.Telegram.HasChatAllowlist() {
 			slog.Warn("telegram command rejected: set both TELEGRAM_WEBHOOK_SECRET and TELEGRAM_CHAT_ID",
 				"chat_id", update.Message.Chat.ID,
 				"webhook_secret_set", opts.TelegramWebhookSecret != "",
