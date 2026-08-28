@@ -282,7 +282,7 @@ func TestStoreResolveByTenantService(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop)
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestStoreResolveByTenantServiceReturnsAllOpenIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop)
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestStoreResolveByTenantServiceReturnsAllOpenIDs(t *testing.T) {
 func TestStoreResolveByTenantServiceNoMatch(t *testing.T) {
 	store := newTestStore(t)
 
-	ids, err := store.ResolveByTenantService("nope", "nope", TypePodCrashloop)
+	ids, err := store.ResolveByTenantService("nope", "nope", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -686,17 +686,40 @@ func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, erro
 // mctl-api incident `open` forever — the exact drift this propagation
 // channel was added to fix. Both modernc.org/sqlite (SQLite 3.45+) and
 // pgx support UPDATE…RETURNING with identical syntax.
-func (s *Store) ResolveByTenantService(tenant, service, ticketType string) ([]string, error) {
+// fingerprint, when non-empty, additionally requires the ticket to carry
+// that AlertManager fingerprint in its accumulated set. (tenant, service,
+// type) alone is a coarse key — several alertnames map to one ticket type —
+// so a replayed `resolved` webhook could otherwise close a DIFFERENT
+// incident that opened under the same key in the meantime. Membership, not
+// equality: a ticket that deduped several concurrent alerts holds all of
+// their fingerprints, and resolving on any one of them is the pre-existing
+// behaviour this must not change. Empty fingerprint keeps the old
+// unconditional match, for callers that have none.
+func (s *Store) ResolveByTenantService(tenant, service, ticketType, fingerprint string) ([]string, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
 		RETURNING id`
-
-	rows, err := s.db.Query(s.rebind(query),
+	args := []any{
 		StatusResolved, now, now,
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
-	)
+	}
+	if fingerprint != "" {
+		// The set is stored comma-separated; wrapping both sides in commas
+		// makes this an exact element match rather than a substring one, so
+		// "abc" cannot match "abcdef". `||` is the SQL-standard
+		// concatenation operator and behaves identically in SQLite and
+		// Postgres, the two dialects NewStore supports.
+		query = `
+		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
+		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
+		  AND (',' || alert_fingerprint || ',') LIKE ('%,' || ? || ',%')
+		RETURNING id`
+		args = append(args, fingerprint)
+	}
+
+	rows, err := s.db.Query(s.rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}

@@ -251,25 +251,27 @@ func (h *AlertHandler) processAlert(a alert) error {
 
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
-		ids, err := h.store.ResolveByTenantService(tenant, service, tType)
+		// Scoped by fingerprint: ServeHTTP can now ask AlertManager to
+		// replay a batch, and (tenant, service, type) is coarse enough —
+		// several alertnames map to one ticket type — that a replayed
+		// resolve could otherwise close a different incident that opened
+		// under the same key in between.
+		ids, err := h.store.ResolveByTenantService(tenant, service, tType, a.Fingerprint)
 		if err != nil {
 			slog.Error("failed to resolve tickets", "error", err, "tenant", tenant, "service", service)
 			return fmt.Errorf("resolve tickets for %s/%s: %w", tenant, service, err)
 		}
-		// Migration fallback: a ticket created before the tenant/service
-		// fallbacks above existed may still sit on the old fully-empty
-		// ("", "") key. Only tried when this resolve is for a labelless
-		// alert (namespace and pod both empty — the case the fallbacks
-		// rewrite) and the rewritten key found nothing; becomes a no-op
-		// once pre-rollout tickets have aged out or resolved.
-		if len(ids) == 0 && namespace == "" && pod == "" {
-			legacyIDs, legacyErr := h.store.ResolveByTenantService("", "", tType)
-			if legacyErr != nil {
-				slog.Error("failed to resolve legacy empty-tenant tickets", "error", legacyErr)
-				return fmt.Errorf("resolve legacy empty-tenant tickets: %w", legacyErr)
-			}
-			ids = append(ids, legacyIDs...)
-		}
+		// The ("", "") migration fallback that used to live here is gone.
+		// It resolved the legacy fully-empty key whenever the rewritten key
+		// matched nothing — which, on a replayed batch, is exactly what a
+		// successful first attempt looks like. That legacy ticket is an
+		// AGGREGATE of every labelless alert (they all collapsed onto one
+		// key before the tenant/service fallbacks existed), so closing it
+		// on one alert's replay resolves unrelated labelless alerts that
+		// are still firing. Same reasoning that removed the workload-key
+		// migration in #105: an aggregate can only be closed by
+		// reconcileWithAlertManager, which requires ALL of its fingerprints
+		// to be absent from the active set.
 		slog.Info("resolved tickets for alert",
 			"alertname", alertName, "tenant", tenant, "service", service, "count", len(ids))
 		if len(ids) > 0 && h.OnResolve != nil {

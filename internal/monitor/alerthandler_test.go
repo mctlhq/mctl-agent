@@ -185,12 +185,23 @@ func TestAlertHandlerEmptyNamespaceTenantFallback(t *testing.T) {
 	}
 }
 
-func TestAlertHandlerResolvesLegacyEmptyTenantTicket(t *testing.T) {
-	// A ticket created before the tenant/service fallbacks existed sits on
-	// the old fully-empty ("", "") key. A resolved webhook for the same
-	// labelless alert now resolves under ("platform", alertName) and finds
-	// nothing there — it must fall back to the legacy key so pre-rollout
-	// tickets don't get stuck open forever.
+func TestAlertHandlerLeavesLegacyEmptyTenantTicketToReconcile(t *testing.T) {
+	// Was TestAlertHandlerResolvesLegacyEmptyTenantTicket, which asserted
+	// the opposite: a resolved webhook that matched nothing under the
+	// rewritten ("platform", alertName) key fell back to the legacy
+	// fully-empty ("", "") key and closed whatever sat there.
+	//
+	// That fallback is removed, because ServeHTTP can now ask AlertManager
+	// to replay a batch and "the rewritten key matched nothing" is exactly
+	// what a successful first attempt looks like on replay. The legacy
+	// ticket is an AGGREGATE — every labelless alert collapsed onto that
+	// one key before the tenant/service fallbacks existed — so closing it
+	// on one alert's replay resolves unrelated labelless alerts that are
+	// still firing (agy P1 on PR #106; same aggregate reasoning that
+	// removed the workload-key migration in #105).
+	//
+	// Aggregates are reconcileWithAlertManager's job: it closes a ticket
+	// only when ALL of its fingerprints are absent from the active set.
 	store := newTestStore(t)
 	legacy := &ticket.Ticket{
 		Source:    ticket.SourceAlertManager,
@@ -214,6 +225,7 @@ func TestAlertHandlerResolvesLegacyEmptyTenantTicket(t *testing.T) {
 		Alerts: []alert{
 			{
 				Status:      "resolved",
+				Fingerprint: "aaaa1111",
 				Labels:      map[string]string{"alertname": "MctlAgentMetricsAbsent"},
 				Annotations: map[string]string{"summary": "mctl_agent_open_tickets gauge series missing for 30m"},
 			},
@@ -223,21 +235,22 @@ func TestAlertHandlerResolvesLegacyEmptyTenantTicket(t *testing.T) {
 	body, _ := json.Marshal(payload)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
 	w := httptest.NewRecorder()
-
 	handler.ServeHTTP(w, req)
 
-	if len(resolvedIDs) != 1 || resolvedIDs[0] != legacy.ID {
-		t.Fatalf("expected legacy ticket %q to be resolved, got %v", legacy.ID, resolvedIDs)
+	if w.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d", w.Code, http.StatusOK)
+	}
+	if len(resolvedIDs) != 0 {
+		t.Errorf("expected the aggregate legacy ticket to be left alone, resolved %v", resolvedIDs)
 	}
 	got, err := store.Get(legacy.ID)
 	if err != nil {
 		t.Fatalf("failed to reload ticket: %v", err)
 	}
-	if got.Status != ticket.StatusResolved {
-		t.Errorf("expected legacy ticket status resolved, got %q", got.Status)
+	if got.Status == ticket.StatusResolved {
+		t.Error("aggregate legacy ticket was closed by one alert's resolve")
 	}
 }
-
 func TestAlertHandlerLabellessAlertsDoNotCollide(t *testing.T) {
 	// Two distinct absent()-style alerts with no namespace/pod label both
 	// fall through classifyAlert's default (TypeGeneric). Without the
@@ -1204,4 +1217,117 @@ func TestAlertHandlerStoreFailureAsksForRetry(t *testing.T) {
 			t.Errorf("expected the replayed batch to dedup onto one ticket, got %d", len(received))
 		}
 	})
+}
+
+func TestAlertHandlerMixedBatchProcessesEveryAlert(t *testing.T) {
+	// The batch loop deliberately continues past a failure so one bad
+	// alert does not hide the rest. Every other test here uses a store
+	// that is entirely up or entirely down, so that behaviour was
+	// undertested (claude[bot] P2 on PR #106).
+	//
+	// A per-alert failure is provoked without breaking the whole store: an
+	// oversized summary is fine, so instead the first alert is made to hit
+	// the ignore filter (dropped, not failed) and the assertion is that
+	// the second still lands. For a genuine mid-batch store error the
+	// closed-store test above already covers the 500.
+	store := newTestStore(t)
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+	handler.IgnoreService = regexp.MustCompile(`^openclawpr\d+`)
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status:      "firing",
+				Fingerprint: "dropped1",
+				Labels: map[string]string{
+					"alertname": "KubePodCrashLooping",
+					"namespace": "labs",
+					"pod":       "openclawpr4-base-service-6d4b5c7f8-abc12",
+				},
+				Annotations: map[string]string{"summary": "preview crashloop"},
+			},
+			{
+				Status:      "firing",
+				Fingerprint: "kept2222",
+				Labels: map[string]string{
+					"alertname": "KubePodCrashLooping",
+					"namespace": "admins",
+					"pod":       "admins-mctl-api-base-service-6d4b5c7f8-abc12",
+				},
+				Annotations: map[string]string{"summary": "real crashloop"},
+			},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status: got %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(received) != 1 {
+		t.Fatalf("expected the second alert to still produce a ticket, got %d", len(received))
+	}
+	if received[0].Service != "admins-mctl-api-base-service" {
+		t.Errorf("wrong alert survived: %q", received[0].Service)
+	}
+}
+
+func TestAlertHandlerReplayedResolveSparesNewerIncident(t *testing.T) {
+	// A 500 costs a redelivery of the whole batch, so an already-applied
+	// resolve gets replayed. (tenant, service, type) is a coarse key —
+	// several alertnames map to one ticket type — so without the
+	// fingerprint scope that replay would close a DIFFERENT incident that
+	// opened under the same key in between (Codex P2 on PR #106).
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(*ticket.Ticket) {})
+
+	post := func(status, fp, alertname string) {
+		t.Helper()
+		body, _ := json.Marshal(alertManagerPayload{
+			Status: status,
+			Alerts: []alert{{
+				Status:      status,
+				Fingerprint: fp,
+				Labels: map[string]string{
+					"alertname": alertname,
+					"namespace": "admins",
+					"pod":       "admins-mctl-api-base-service-6d4b5c7f8-abc12",
+				},
+				Annotations: map[string]string{"summary": alertname},
+			}},
+		})
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	}
+
+	// Incident A fires and resolves.
+	post("firing", "aaaa1111", "PodCrashLooping")
+	post("resolved", "aaaa1111", "PodCrashLooping")
+
+	// A different alert of the same ticket type opens a new incident under
+	// the identical (tenant, service, type) key.
+	post("firing", "bbbb2222", "KubePodNotReady")
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("setup: expected the new incident to be open, got %d", len(open))
+	}
+	newID := open[0].ID
+
+	// AlertManager replays the older batch after a 500.
+	post("resolved", "aaaa1111", "PodCrashLooping")
+
+	got, err := store.Get(newID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Error("a replayed resolve closed a newer, unrelated incident sharing the same (tenant, service, type) key")
+	}
 }
