@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -1386,5 +1387,75 @@ func TestAlertHandlerReplayedResolveSparesTheSameAlertsNextOccurrence(t *testing
 	}
 	if got.Status == ticket.StatusResolved {
 		t.Error("a replayed resolve closed the same alert's next, still-firing occurrence")
+	}
+}
+
+// failFirstCreateStore delegates everything to a real store but makes the
+// FIRST Create call fail. That is the one shape no real *ticket.Store can
+// produce: closing the database fails every alert in the batch at once, which
+// proves the 500 but never that a LATER alert still lands after an earlier one
+// errored — the batch-drain property the 5xx design rests on.
+type failFirstCreateStore struct {
+	alertStore
+	failed bool
+}
+
+func (s *failFirstCreateStore) Create(t *ticket.Ticket) error {
+	if !s.failed {
+		s.failed = true
+		return errors.New("injected store failure")
+	}
+	return s.alertStore.Create(t)
+}
+
+func TestAlertHandlerMixedBatchProcessesLaterAlertsAfterAStoreError(t *testing.T) {
+	// claude[bot] P2 on PR #106: the existing mixed-batch test provokes
+	// alert 1's early exit through IgnoreService, which returns nil — the
+	// error branch is never taken, so replacing the loop's implicit continue
+	// with an early return after recording firstErr would pass it.
+	store := newTestStore(t)
+	var created []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { created = append(created, tk) })
+	handler.store = &failFirstCreateStore{alertStore: store}
+
+	mkAlert := func(fp, pod string) alert {
+		return alert{
+			Status:      "firing",
+			Fingerprint: fp,
+			Labels: map[string]string{
+				"alertname": "PodCrashLooping",
+				"namespace": "admins",
+				"pod":       pod,
+			},
+			Annotations: map[string]string{"summary": "PodCrashLooping"},
+		}
+	}
+	body, _ := json.Marshal(alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			mkAlert("aaaa1111", "admins-first-service-6d4b5c7f8-abc12"),
+			mkAlert("bbbb2222", "admins-second-service-6d4b5c7f8-def34"),
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("a failed alert must ask AlertManager to retry: want 500, got %d", rec.Code)
+	}
+
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("the second alert must still be processed after the first errored: want 1 open ticket, got %d", len(open))
+	}
+	if open[0].Service != "admins-second-service" {
+		t.Errorf("want the second alert's ticket to survive, got service %q", open[0].Service)
+	}
+	if len(created) != 1 {
+		t.Errorf("onTicket must fire for the alert that succeeded: want 1 call, got %d", len(created))
 	}
 }

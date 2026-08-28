@@ -798,3 +798,30 @@ func TestStoreResolveByTenantServiceSparesTicketsOpenedAfterTheAlertEnded(t *tes
 		t.Fatalf("ticket predating the alert's end must resolve: want [%s], got %v", tk.ID, ids)
 	}
 }
+
+// Fingerprints have not always been persisted. An open ticket predating that
+// carries an empty set, and reconcileWithAlertManager skips exactly those
+// rows — so if the fingerprint scope refused to match them, they and their
+// mctl-api incidents would stay open until TTL GC.
+func TestStoreResolveByTenantServiceStillResolvesFingerprintlessLegacyTickets(t *testing.T) {
+	store := newTestStore(t)
+
+	legacy := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+	}
+	if err := store.Create(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.AlertFingerprint != "" {
+		t.Fatalf("precondition: want an empty fingerprint set, got %q", legacy.AlertFingerprint)
+	}
+
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-A", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != legacy.ID {
+		t.Fatalf("legacy fingerprintless ticket must still resolve: want [%s], got %v", legacy.ID, ids)
+	}
+}

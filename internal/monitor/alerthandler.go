@@ -27,9 +27,24 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
+// alertStore is the slice of *ticket.Store that AlertHandler actually uses.
+// The narrow interface exists so tests can inject a store that fails on a
+// chosen call: the batch-drain guarantee this handler rests on — one alert's
+// store error must not stop the rest of the batch from being processed —
+// cannot be exercised against a real *ticket.Store, where the only way to
+// provoke an error (closing the database) fails every alert at once.
+type alertStore interface {
+	ResolveByTenantService(tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error)
+	FindDuplicate(tenant, service, ticketType string) (*ticket.Ticket, error)
+	TouchWithFingerprint(id, fingerprint string) error
+	FindRecentlyResolved(tenant, service, ticketType, alertName string, window time.Duration) (*ticket.Ticket, error)
+	Create(t *ticket.Ticket) error
+	AddEvidence(ticketID string, e ticket.Evidence) error
+}
+
 // AlertHandler receives AlertManager webhooks and creates tickets.
 type AlertHandler struct {
-	store    *ticket.Store
+	store    alertStore
 	onTicket func(*ticket.Ticket)
 	// FlapCooldown suppresses creation of a new ticket for the same
 	// (tenant, service, type) if a previous ticket was resolved within

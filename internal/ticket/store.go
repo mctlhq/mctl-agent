@@ -743,8 +743,19 @@ func (s *Store) ResolveByTenantService(tenant, service, ticketType, fingerprint 
 		// would turn this membership test into a wildcard that matches every
 		// ticket under the key, handing an unauthenticated caller the ability
 		// to resolve incidents it knows nothing about.
+		//
+		// The `alert_fingerprint = ''` arm keeps pre-Phase-2 tickets
+		// resolvable. Fingerprints have not always been persisted, and an
+		// open ticket predating that carries an empty set — a predicate
+		// requiring membership would never match it again, and
+		// reconcileWithAlertManager deliberately skips exactly those rows
+		// (poller.go), so the ticket and its mctl-api incident would stay
+		// open until TTL GC. Matching them on (tenant, service, type) alone
+		// is the behaviour that shipped before this scope existed; the arm
+		// restores the status quo for that finite legacy set without
+		// loosening anything for tickets that do carry fingerprints.
 		conds = append(conds,
-			"(',' || alert_fingerprint || ',') LIKE ('%,' || ? || ',%') ESCAPE '\\'")
+			"(alert_fingerprint = '' OR (',' || alert_fingerprint || ',') LIKE ('%,' || ? || ',%') ESCAPE '\\')")
 		args = append(args, escapeLike(fingerprint))
 	}
 	if !notAfter.IsZero() {
