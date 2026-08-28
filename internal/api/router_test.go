@@ -102,12 +102,14 @@ func TestTicketListEndpoint(t *testing.T) {
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
+		APIToken: "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tickets", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -157,6 +159,7 @@ func TestTicketListEndpointFilters(t *testing.T) {
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
+		APIToken: "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
@@ -164,6 +167,7 @@ func TestTicketListEndpointFilters(t *testing.T) {
 
 	fetch := func(query string) int {
 		req := httptest.NewRequest(http.MethodGet, "/api/v1/tickets?"+query, nil)
+		req.Header.Set("Authorization", "Bearer test-token")
 		w := httptest.NewRecorder()
 		router.ServeHTTP(w, req)
 		if w.Code != http.StatusOK {
@@ -203,12 +207,14 @@ func TestSkillListEndpoint(t *testing.T) {
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
+		APIToken: "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/skills", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -236,6 +242,7 @@ func TestRemoteSkillEndpoints(t *testing.T) {
 		Store:         store,
 		Pipeline:      pipe,
 		RemoteManager: remoteMgr,
+		APIToken:      "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
@@ -249,6 +256,7 @@ func TestRemoteSkillEndpoints(t *testing.T) {
 	}
 	body, _ := json.Marshal(regPayload)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/register", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -258,6 +266,7 @@ func TestRemoteSkillEndpoints(t *testing.T) {
 
 	// List remote skills.
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/skills/remote", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -272,6 +281,7 @@ func TestRemoteSkillEndpoints(t *testing.T) {
 
 	// Unregister.
 	req = httptest.NewRequest(http.MethodDelete, "/api/v1/skills/test-remote", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -281,6 +291,7 @@ func TestRemoteSkillEndpoints(t *testing.T) {
 
 	// Unregister again → 404.
 	req = httptest.NewRequest(http.MethodDelete, "/api/v1/skills/test-remote", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -296,6 +307,7 @@ func TestMCPEndpoint(t *testing.T) {
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
+		APIToken: "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
@@ -314,6 +326,7 @@ func TestMCPEndpoint(t *testing.T) {
 	body, _ := json.Marshal(rpcReq)
 	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 
@@ -337,12 +350,14 @@ func TestSkillMetricsEndpoint(t *testing.T) {
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
+		APIToken: "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/skills/oomkilled/metrics", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	w := httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 

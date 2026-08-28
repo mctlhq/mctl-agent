@@ -27,6 +27,7 @@ func newWebhookEnabledRouter(t *testing.T) http.Handler {
 		Telegram:     notify.NewTelegram("", "", "", nil),
 		WebhookStore: webhookStore,
 		WebhookTTL:   15 * time.Minute,
+		APIToken:     "test-token",
 		OnAlert: func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 		},
@@ -37,6 +38,7 @@ func TestWebhookRegisterListDelete(t *testing.T) {
 	router := newWebhookEnabledRouter(t)
 	body := []byte(`{"agent_id":"openclaw-prod","url":"https://example.com/hook","secret":"secret","auth_header_name":"Authorization","auth_header_value":"Bearer hook-token","event_types":["ticket.created"]}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusCreated {
@@ -44,6 +46,7 @@ func TestWebhookRegisterListDelete(t *testing.T) {
 	}
 
 	req = httptest.NewRequest(http.MethodGet, "/api/v1/webhooks", nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -63,6 +66,7 @@ func TestWebhookRegisterListDelete(t *testing.T) {
 	id := items[0].(map[string]interface{})["id"].(string)
 
 	req = httptest.NewRequest(http.MethodDelete, "/api/v1/webhooks/"+id, nil)
+	req.Header.Set("Authorization", "Bearer test-token")
 	rec = httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
