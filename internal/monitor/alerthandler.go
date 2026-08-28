@@ -106,6 +106,34 @@ func (h *AlertHandler) processAlert(a alert) {
 
 	tenant := namespace
 	service := extractService(pod)
+	// Workload-object alerts (KubeDeploymentReplicasMismatch,
+	// KubeStatefulSetReplicasMismatch, KubeDeploymentRolloutStuck, ...)
+	// are computed from kube-state-metrics series like
+	// kube_deployment_spec_replicas, which name the object in a
+	// `deployment`/`statefulset`/`daemonset` label and carry NO `pod`
+	// label of their own. The scrape target's own labels then survive, so
+	// `pod` is kube-state-metrics' pod and extractService() yields
+	// "monitoring-kube-state-metrics" for every such alert, in every
+	// namespace — the actual failing object is lost.
+	//
+	// Pod-scoped alerts are unaffected: kube_pod_* series carry their own
+	// `pod` label, the ServiceMonitor honors metric labels over target
+	// ones, and none of them set a workload label — so the branch below
+	// never fires for them and KubePodCrashLooping keeps resolving to the
+	// real service.
+	//
+	// Observed 2026-06-21..2026-08-28: 20 incidents recorded against
+	// service="monitoring-kube-state-metrics" across tenants admins, labs,
+	// nfc, backstage, minio, vault and monitoring — six namespaces that
+	// never ran a kube-state-metrics pod. No skill can match those
+	// tickets, and the reconciler auto-resolves several as "service does
+	// not exist (likely synthetic / orphaned alert)".
+	for _, key := range []string{"deployment", "statefulset", "daemonset"} {
+		if obj := a.Labels[key]; obj != "" {
+			service = obj
+			break
+		}
+	}
 	if tType == ticket.TypeWorkflowFailed && workflow != "" {
 		service = workflow
 	}

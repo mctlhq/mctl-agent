@@ -926,3 +926,96 @@ func TestAlertHandlerPersistsFingerprint(t *testing.T) {
 		t.Errorf("want fingerprint %q, got %q", "deadbeef12345678", tickets[0].AlertFingerprint)
 	}
 }
+
+func TestAlertHandlerWorkloadLabelBeatsScrapeTargetPod(t *testing.T) {
+	// Workload alerts derived from kube-state-metrics carry the scrape
+	// target's own `pod` label (the kube-state-metrics pod), because the
+	// kube_deployment_* / kube_statefulset_* series have no `pod` label of
+	// their own. Extracting the service from `pod` therefore files every
+	// such alert under "monitoring-kube-state-metrics" and loses the
+	// object that actually broke — 20 incidents between 2026-06-21 and
+	// 2026-08-28, in namespaces that never ran a kube-state-metrics pod.
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		wantService string
+		wantTenant  string
+	}{
+		{
+			name: "deployment label wins over scrape target pod",
+			labels: map[string]string{
+				"alertname":  "KubeDeploymentReplicasMismatch",
+				"namespace":  "admins",
+				"deployment": "admins-mctl-agents-worker-base-service",
+				"pod":        "monitoring-kube-state-metrics-7c9d4f8b6-abc12",
+				"service":    "monitoring-kube-state-metrics",
+			},
+			wantService: "admins-mctl-agents-worker-base-service",
+			wantTenant:  "admins",
+		},
+		{
+			name: "statefulset label wins over scrape target pod",
+			labels: map[string]string{
+				"alertname":   "KubeStatefulSetReplicasMismatch",
+				"namespace":   "vault",
+				"statefulset": "vault",
+				"pod":         "monitoring-kube-state-metrics-7c9d4f8b6-abc12",
+			},
+			wantService: "vault",
+			wantTenant:  "vault",
+		},
+		{
+			name: "daemonset label wins over scrape target pod",
+			labels: map[string]string{
+				"alertname": "KubeDaemonSetNotScheduled",
+				"namespace": "monitoring",
+				"daemonset": "node-exporter",
+				"pod":       "monitoring-kube-state-metrics-7c9d4f8b6-abc12",
+			},
+			wantService: "node-exporter",
+			wantTenant:  "monitoring",
+		},
+		{
+			name: "pod-scoped alert keeps its own pod-derived service",
+			labels: map[string]string{
+				"alertname": "KubePodCrashLooping",
+				"namespace": "admins",
+				"pod":       "admins-mctl-agents-worker-base-service-6d4b5c7f8-abc12",
+			},
+			wantService: "admins-mctl-agents-worker-base-service",
+			wantTenant:  "admins",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			var received []*ticket.Ticket
+			handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+				received = append(received, tk)
+			})
+
+			payload := alertManagerPayload{
+				Status: "firing",
+				Alerts: []alert{{
+					Status:      "firing",
+					Labels:      tt.labels,
+					Annotations: map[string]string{"summary": "replicas mismatch"},
+				}},
+			}
+			body, _ := json.Marshal(payload)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			if len(received) != 1 {
+				t.Fatalf("expected 1 ticket, got %d", len(received))
+			}
+			if received[0].Service != tt.wantService {
+				t.Errorf("service: got %q, want %q", received[0].Service, tt.wantService)
+			}
+			if received[0].Tenant != tt.wantTenant {
+				t.Errorf("tenant: got %q, want %q", received[0].Tenant, tt.wantTenant)
+			}
+		})
+	}
+}
