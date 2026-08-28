@@ -1331,3 +1331,60 @@ func TestAlertHandlerReplayedResolveSparesNewerIncident(t *testing.T) {
 		t.Error("a replayed resolve closed a newer, unrelated incident sharing the same (tenant, service, type) key")
 	}
 }
+
+func TestAlertHandlerReplayedResolveSparesTheSameAlertsNextOccurrence(t *testing.T) {
+	// The fingerprint scope alone does not make a replayed resolve
+	// idempotent: an AlertManager fingerprint names an alert's LABEL SET,
+	// not one occurrence of it, so the same alert flapping back to firing
+	// carries the identical fingerprint. Without the EndsAt boundary the
+	// redelivered resolve matches the fresh ticket too and closes an
+	// incident that is still firing (Codex P2 on PR #106).
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(*ticket.Ticket) {})
+
+	post := func(status string, endsAt time.Time) {
+		t.Helper()
+		body, _ := json.Marshal(alertManagerPayload{
+			Status: status,
+			Alerts: []alert{{
+				Status:      status,
+				Fingerprint: "aaaa1111",
+				EndsAt:      endsAt,
+				Labels: map[string]string{
+					"alertname": "PodCrashLooping",
+					"namespace": "admins",
+					"pod":       "admins-mctl-api-base-service-6d4b5c7f8-abc12",
+				},
+				Annotations: map[string]string{"summary": "PodCrashLooping"},
+			}},
+		})
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	}
+
+	// The alert fires, then resolves at endsAt.
+	post("firing", time.Time{})
+	endsAt := time.Now().UTC()
+	post("resolved", endsAt)
+
+	// It flaps back after the batch was acknowledged, opening a new ticket.
+	post("firing", time.Time{})
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("setup: expected the re-fired alert to be open, got %d", len(open))
+	}
+	newID := open[0].ID
+
+	// AlertManager redelivers the older batch after a 500 elsewhere in it.
+	post("resolved", endsAt)
+
+	got, err := store.Get(newID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status == ticket.StatusResolved {
+		t.Error("a replayed resolve closed the same alert's next, still-firing occurrence")
+	}
+}

@@ -251,12 +251,20 @@ func (h *AlertHandler) processAlert(a alert) error {
 
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
-		// Scoped by fingerprint: ServeHTTP can now ask AlertManager to
-		// replay a batch, and (tenant, service, type) is coarse enough —
-		// several alertnames map to one ticket type — that a replayed
-		// resolve could otherwise close a different incident that opened
-		// under the same key in between.
-		ids, err := h.store.ResolveByTenantService(tenant, service, tType, a.Fingerprint)
+		// Scoped by fingerprint AND by the alert's own end time: ServeHTTP
+		// can now ask AlertManager to replay a batch, and (tenant, service,
+		// type) is coarse enough — several alertnames map to one ticket
+		// type — that a replayed resolve could otherwise close a different
+		// incident that opened under the same key in between. The
+		// fingerprint alone does not close that hole, because it names the
+		// alert's label set rather than one occurrence of it: the same alert
+		// flapping back to firing carries the identical fingerprint. EndsAt
+		// adds the occurrence boundary — a ticket opened after this alert
+		// already ended belongs to a later occurrence and is not ours to
+		// close. AlertManager always sets endsAt on a resolved alert; a zero
+		// value falls through to fingerprint-only scoping rather than
+		// resolving nothing.
+		ids, err := h.store.ResolveByTenantService(tenant, service, tType, a.Fingerprint, a.EndsAt)
 		if err != nil {
 			slog.Error("failed to resolve tickets", "error", err, "tenant", tenant, "service", service)
 			return fmt.Errorf("resolve tickets for %s/%s: %w", tenant, service, err)

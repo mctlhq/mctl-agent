@@ -282,7 +282,7 @@ func TestStoreResolveByTenantService(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "")
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,7 +326,7 @@ func TestStoreResolveByTenantServiceReturnsAllOpenIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "")
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +348,7 @@ func TestStoreResolveByTenantServiceReturnsAllOpenIDs(t *testing.T) {
 func TestStoreResolveByTenantServiceNoMatch(t *testing.T) {
 	store := newTestStore(t)
 
-	ids, err := store.ResolveByTenantService("nope", "nope", TypePodCrashloop, "")
+	ids, err := store.ResolveByTenantService("nope", "nope", TypePodCrashloop, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,5 +684,117 @@ func TestNewStoreClosesDBWhenMigrationFails(t *testing.T) {
 	}
 	if after := runtime.NumGoroutine(); after > before {
 		t.Errorf("goroutine leaked after a failed migration: %d before, %d after", before, after)
+	}
+}
+
+// A ticket that deduped several concurrent alerts carries all of their
+// fingerprints, and a resolve on any single one of them must still close it.
+// Every other test of the fingerprint scope uses a ticket holding exactly one
+// fingerprint, where membership and equality are indistinguishable — so a
+// regression that swapped the padded LIKE for `alert_fingerprint = ?` would
+// pass all of them. This is the test that fails.
+func TestStoreResolveByTenantServiceMatchesFingerprintSetMembership(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+	for _, fp := range []string{"fp-B", "fp-C"} {
+		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := store.Get(tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AlertFingerprint != "fp-A,fp-B,fp-C" {
+		t.Fatalf("precondition: want merged set fp-A,fp-B,fp-C, got %q", got.AlertFingerprint)
+	}
+
+	// A near-miss substring of a real element must NOT match: without the
+	// comma padding, "p-B" is a substring of ",fp-A,fp-B,fp-C," and would.
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "p-B", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("substring %q must not match an element of the set, resolved %v", "p-B", ids)
+	}
+
+	// The middle element must match — not just the first or the last, which
+	// a half-broken padding could still get right by accident.
+	ids, err = store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-B", time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != tk.ID {
+		t.Fatalf("resolving on set member fp-B: want [%s], got %v", tk.ID, ids)
+	}
+}
+
+// The fingerprint is copied verbatim out of the webhook body and the webhook's
+// bearer token is optional, so LIKE metacharacters in it must be inert data.
+// Unescaped, "%" is a wildcard that resolves every ticket under the key.
+func TestStoreResolveByTenantServiceTreatsLikeWildcardsAsLiterals(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, fp := range []string{"%", "fp_A", "%A"} {
+		ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, fp, time.Time{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ids) != 0 {
+			t.Fatalf("fingerprint %q must be matched literally, not as a pattern; resolved %v", fp, ids)
+		}
+	}
+}
+
+// notAfter is the occurrence boundary: an AlertManager fingerprint is stable
+// across flaps, so a redelivered resolve carries the same fingerprint as the
+// alert's next occurrence. A ticket opened after the alert already ended
+// belongs to that next occurrence and must survive the replay.
+func TestStoreResolveByTenantServiceSparesTicketsOpenedAfterTheAlertEnded(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(tk); err != nil {
+		t.Fatal(err)
+	}
+
+	endedBeforeTicket := tk.CreatedAt.Add(-time.Minute)
+	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-A", endedBeforeTicket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("ticket created after the alert ended must not be resolved by it, got %v", ids)
+	}
+
+	endedAfterTicket := tk.CreatedAt.Add(time.Minute)
+	ids, err = store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-A", endedAfterTicket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 1 || ids[0] != tk.ID {
+		t.Fatalf("ticket predating the alert's end must resolve: want [%s], got %v", tk.ID, ids)
 	}
 }
