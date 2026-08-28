@@ -122,6 +122,15 @@ func (h *AlertHandler) processAlert(a alert) {
 	// never fires for them and KubePodCrashLooping keeps resolving to the
 	// real service.
 	//
+	// INVARIANT this relies on: no pod-scoped alert carries a workload
+	// label. It holds because the workload labels only exist on
+	// kube_<workload>_* series, which have no `pod` of their own. A future
+	// VMRule that enriches a pod-scoped series with the owning workload
+	// (the `* on(...) group_left(deployment)` join pattern) would break it
+	// and silently send that alert here instead of to the pod-derived
+	// name. If such a rule is ever added, gate this branch on the alert
+	// types it is meant for, the way the branches below gate on tType.
+	//
 	// Observed 2026-06-21..2026-08-28: 20 incidents recorded against
 	// service="monitoring-kube-state-metrics" across tenants admins, labs,
 	// nfc, backstage, minio, vault and monitoring — six namespaces that
@@ -303,6 +312,19 @@ func (h *AlertHandler) processAlert(a alert) {
 		recent, err := h.store.FindRecentlyResolved(tenant, service, tType, alertName, h.FlapCooldown)
 		if err != nil {
 			slog.Error("flap cooldown check failed", "error", err)
+		}
+		// Third arm of the rollout migration, after FindDuplicate and the
+		// resolved branch: a workload alert resolved just before this
+		// version deployed left its ticket under the pod-derived key, so
+		// a re-fire inside the cooldown would miss the suppression and
+		// notify again. Same no-op condition as the other two.
+		if recent == nil && legacyService != "" {
+			legacyRecent, legacyErr := h.store.FindRecentlyResolved(tenant, legacyService, tType, alertName, h.FlapCooldown)
+			if legacyErr != nil {
+				slog.Error("legacy flap cooldown check failed", "error", legacyErr,
+					"tenant", tenant, "legacy_service", legacyService)
+			}
+			recent = legacyRecent
 		}
 		if recent != nil {
 			slog.Info("suppressing flap alert within cooldown",

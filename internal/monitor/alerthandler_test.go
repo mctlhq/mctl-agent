@@ -1084,6 +1084,32 @@ func TestAlertHandlerWorkloadKeyMigrationWindow(t *testing.T) {
 		}
 	})
 
+	t.Run("flap suppression spans the rollout boundary", func(t *testing.T) {
+		// A workload alert resolved just before the rollout left its
+		// ticket under the pod-derived key. A re-fire inside the
+		// cooldown must still be suppressed, or the migration window
+		// produces exactly the Telegram spam FlapCooldown exists to
+		// prevent — raised by agy on PR #105.
+		store := newTestStore(t)
+		var received []*ticket.Ticket
+		handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+			received = append(received, tk)
+		})
+		handler.FlapCooldown = time.Hour
+
+		post(t, handler, "firing", preRollout)
+		post(t, handler, "resolved", preRollout)
+		if len(received) != 1 {
+			t.Fatalf("setup: expected 1 ticket, got %d", len(received))
+		}
+
+		// New binary: same alert flaps back inside the cooldown.
+		post(t, handler, "firing", postRollout)
+		if len(received) != 1 {
+			t.Errorf("expected the flap to stay suppressed across the rollout, got %d tickets", len(received))
+		}
+	})
+
 	t.Run("resolved closes the pre-rollout ticket", func(t *testing.T) {
 		store := newTestStore(t)
 		handler := NewAlertHandler(store, func(*ticket.Ticket) {})
