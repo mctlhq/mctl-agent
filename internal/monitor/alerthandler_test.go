@@ -1019,3 +1019,84 @@ func TestAlertHandlerWorkloadLabelBeatsScrapeTargetPod(t *testing.T) {
 		})
 	}
 }
+
+func TestAlertHandlerWorkloadKeyMigrationWindow(t *testing.T) {
+	// Rollout window: a workload alert that was already firing when this
+	// version shipped has an open ticket keyed by the pod-derived service
+	// (the kube-state-metrics pod). The next firing webhook must dedup
+	// against it instead of opening a second ticket, and the eventual
+	// resolved webhook must close it — raised by Codex on PR #105.
+	ksmPod := "monitoring-kube-state-metrics-7c9d4f8b6-abc12"
+	preRollout := map[string]string{
+		"alertname": "KubeDeploymentReplicasMismatch",
+		"namespace": "admins",
+		"pod":       ksmPod,
+	}
+	postRollout := map[string]string{
+		"alertname":  "KubeDeploymentReplicasMismatch",
+		"namespace":  "admins",
+		"deployment": "admins-mctl-agents-worker-base-service",
+		"pod":        ksmPod,
+	}
+
+	post := func(t *testing.T, h *AlertHandler, status string, labels map[string]string) {
+		t.Helper()
+		payload := alertManagerPayload{
+			Status: status,
+			Alerts: []alert{{
+				Status:      status,
+				Labels:      labels,
+				Annotations: map[string]string{"summary": "replicas mismatch"},
+			}},
+		}
+		body, _ := json.Marshal(payload)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	t.Run("firing dedups against the pre-rollout ticket", func(t *testing.T) {
+		store := newTestStore(t)
+		var received []*ticket.Ticket
+		handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+			received = append(received, tk)
+		})
+
+		// Old binary: ticket filed under the kube-state-metrics name.
+		post(t, handler, "firing", preRollout)
+		if len(received) != 1 {
+			t.Fatalf("setup: expected 1 ticket, got %d", len(received))
+		}
+		if received[0].Service != "monitoring-kube-state-metrics" {
+			t.Fatalf("setup: got service %q, want the pod-derived name", received[0].Service)
+		}
+
+		// New binary, same alert still firing.
+		post(t, handler, "firing", postRollout)
+		if len(received) != 1 {
+			t.Errorf("expected no second ticket across the rollout, got %d", len(received))
+		}
+		open, err := store.ListOpen()
+		if err != nil {
+			t.Fatalf("ListOpen: %v", err)
+		}
+		if len(open) != 1 {
+			t.Errorf("expected 1 open ticket, got %d", len(open))
+		}
+	})
+
+	t.Run("resolved closes the pre-rollout ticket", func(t *testing.T) {
+		store := newTestStore(t)
+		handler := NewAlertHandler(store, func(*ticket.Ticket) {})
+
+		post(t, handler, "firing", preRollout)
+		post(t, handler, "resolved", postRollout)
+
+		open, err := store.ListOpen()
+		if err != nil {
+			t.Fatalf("ListOpen: %v", err)
+		}
+		if len(open) != 0 {
+			t.Errorf("expected the pre-rollout ticket to be resolved, %d still open", len(open))
+		}
+	})
+}

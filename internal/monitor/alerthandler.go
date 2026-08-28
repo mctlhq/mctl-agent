@@ -128,8 +128,17 @@ func (h *AlertHandler) processAlert(a alert) {
 	// never ran a kube-state-metrics pod. No skill can match those
 	// tickets, and the reconciler auto-resolves several as "service does
 	// not exist (likely synthetic / orphaned alert)".
+	//
+	// legacyService keeps the pod-derived name this alert would have been
+	// filed under before this branch existed, so the rollout window can
+	// still find tickets opened by the previous version — see the
+	// migration fallbacks at FindDuplicate and the resolved branch below.
+	legacyService := ""
 	for _, key := range []string{"deployment", "statefulset", "daemonset"} {
 		if obj := a.Labels[key]; obj != "" {
+			if service != obj {
+				legacyService = service
+			}
 			service = obj
 			break
 		}
@@ -218,6 +227,22 @@ func (h *AlertHandler) processAlert(a alert) {
 			}
 			ids = append(ids, legacyIDs...)
 		}
+		// Rollout migration: a workload alert already firing when this
+		// version was deployed opened its ticket under the pod-derived
+		// key (the kube-state-metrics pod). Its resolved webhook now
+		// carries the workload key and would leave that ticket open —
+		// AM reconcile does eventually close it by fingerprint, but only
+		// after AMReconcileMinAge and only while reconcile is enabled.
+		// Close it directly instead. Becomes a no-op once pre-rollout
+		// tickets have aged out.
+		if len(ids) == 0 && legacyService != "" {
+			legacyIDs, legacyErr := h.store.ResolveByTenantService(tenant, legacyService, tType)
+			if legacyErr != nil {
+				slog.Error("failed to resolve legacy workload-key tickets", "error", legacyErr,
+					"tenant", tenant, "legacy_service", legacyService)
+			}
+			ids = append(ids, legacyIDs...)
+		}
 		slog.Info("resolved tickets for alert",
 			"alertname", alertName, "tenant", tenant, "service", service, "count", len(ids))
 		if len(ids) > 0 && h.OnResolve != nil {
@@ -238,6 +263,25 @@ func (h *AlertHandler) processAlert(a alert) {
 	existing, err := h.store.FindDuplicate(tenant, service, tType)
 	if err != nil {
 		slog.Error("dedup check failed", "error", err)
+	}
+	// Rollout migration, mirroring the resolved branch: an alert that was
+	// already firing when this version was deployed has an open ticket
+	// under the pod-derived key. Without this the next firing webhook
+	// misses the dedup and opens a second ticket (and a second Telegram
+	// notification) for one incident. The ticket keeps its old service
+	// name until it resolves — renaming it mid-flight would break the
+	// fingerprint-keyed AM reconcile pass — but no duplicate is created.
+	if existing == nil && legacyService != "" {
+		legacyExisting, legacyErr := h.store.FindDuplicate(tenant, legacyService, tType)
+		if legacyErr != nil {
+			slog.Error("legacy dedup check failed", "error", legacyErr)
+		}
+		if legacyExisting != nil {
+			slog.Info("duplicate found under pre-rollout workload key",
+				"id", legacyExisting.ID, "alertname", alertName,
+				"tenant", tenant, "legacy_service", legacyService, "service", service)
+		}
+		existing = legacyExisting
 	}
 	if existing != nil {
 		// Bump UpdatedAt so the stale-ticket GC can distinguish a still-
