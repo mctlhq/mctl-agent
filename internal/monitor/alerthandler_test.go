@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -924,5 +925,185 @@ func TestAlertHandlerPersistsFingerprint(t *testing.T) {
 	}
 	if tickets[0].AlertFingerprint != "deadbeef12345678" {
 		t.Errorf("want fingerprint %q, got %q", "deadbeef12345678", tickets[0].AlertFingerprint)
+	}
+}
+
+func TestAlertHandlerWorkloadLabelBeatsScrapeTargetPod(t *testing.T) {
+	// Workload alerts derived from kube-state-metrics carry the scrape
+	// target's own `pod` label (the kube-state-metrics pod), because the
+	// kube_deployment_* / kube_statefulset_* series have no `pod` label of
+	// their own. Extracting the service from `pod` therefore files every
+	// such alert under "monitoring-kube-state-metrics" and loses the
+	// object that actually broke — 20 incidents between 2026-06-21 and
+	// 2026-08-28, in namespaces that never ran a kube-state-metrics pod.
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		wantService string
+		wantTenant  string
+	}{
+		{
+			name: "deployment label wins over scrape target pod",
+			labels: map[string]string{
+				"alertname":  "KubeDeploymentReplicasMismatch",
+				"namespace":  "admins",
+				"deployment": "admins-mctl-agents-worker-base-service",
+				"pod":        "monitoring-kube-state-metrics-7c9d4f8b6-abc12",
+				"service":    "monitoring-kube-state-metrics",
+			},
+			wantService: "admins-mctl-agents-worker-base-service",
+			wantTenant:  "admins",
+		},
+		{
+			name: "statefulset label wins over scrape target pod",
+			labels: map[string]string{
+				"alertname":   "KubeStatefulSetReplicasMismatch",
+				"namespace":   "vault",
+				"statefulset": "vault",
+				"pod":         "monitoring-kube-state-metrics-7c9d4f8b6-abc12",
+			},
+			wantService: "vault",
+			wantTenant:  "vault",
+		},
+		{
+			name: "daemonset label wins over scrape target pod",
+			labels: map[string]string{
+				"alertname": "KubeDaemonSetNotScheduled",
+				"namespace": "monitoring",
+				"daemonset": "node-exporter",
+				"pod":       "monitoring-kube-state-metrics-7c9d4f8b6-abc12",
+			},
+			wantService: "node-exporter",
+			wantTenant:  "monitoring",
+		},
+		{
+			name: "pod-scoped alert keeps its own pod-derived service",
+			labels: map[string]string{
+				"alertname": "KubePodCrashLooping",
+				"namespace": "admins",
+				"pod":       "admins-mctl-agents-worker-base-service-6d4b5c7f8-abc12",
+			},
+			wantService: "admins-mctl-agents-worker-base-service",
+			wantTenant:  "admins",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			var received []*ticket.Ticket
+			handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+				received = append(received, tk)
+			})
+
+			payload := alertManagerPayload{
+				Status: "firing",
+				Alerts: []alert{{
+					Status:      "firing",
+					Labels:      tt.labels,
+					Annotations: map[string]string{"summary": "replicas mismatch"},
+				}},
+			}
+			body, _ := json.Marshal(payload)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+			handler.ServeHTTP(httptest.NewRecorder(), req)
+
+			if len(received) != 1 {
+				t.Fatalf("expected 1 ticket, got %d", len(received))
+			}
+			if received[0].Service != tt.wantService {
+				t.Errorf("service: got %q, want %q", received[0].Service, tt.wantService)
+			}
+			if received[0].Tenant != tt.wantTenant {
+				t.Errorf("tenant: got %q, want %q", received[0].Tenant, tt.wantTenant)
+			}
+		})
+	}
+}
+
+func TestAlertHandlerRolloutWindowOpensOneNewTicket(t *testing.T) {
+	// Documents the accepted bound of this change. An alert already
+	// firing when it ships keeps its pre-existing ticket under the old
+	// pod-derived key and gets ONE new ticket under the corrected name;
+	// the old one is left for reconcileWithAlertManager to close once all
+	// of its fingerprints clear.
+	//
+	// No key-migration fallback is attempted precisely because those
+	// legacy tickets are aggregates: the collapsed key merged several
+	// workloads into one ticket and TouchWithFingerprint accumulated all
+	// of their fingerprints, so resolving on one alert's webhook would
+	// close incidents that are still firing. This test pins the aggregate
+	// case — two workloads on one legacy ticket — so a future migration
+	// attempt has to confront it. See PR #105 review rounds 3 and 4.
+	ksmPod := "monitoring-kube-state-metrics-7c9d4f8b6-abc12"
+	post := func(t *testing.T, h *AlertHandler, status, fp string, labels map[string]string) {
+		t.Helper()
+		body, _ := json.Marshal(alertManagerPayload{
+			Status: status,
+			Alerts: []alert{{
+				Status:      status,
+				Fingerprint: fp,
+				Labels:      labels,
+				Annotations: map[string]string{"summary": "replicas mismatch"},
+			}},
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}
+
+	store := newTestStore(t)
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	// Pre-rollout: workloads A and B collapse onto ONE ticket under the
+	// shared kube-state-metrics key, which accumulates both fingerprints.
+	preLabels := map[string]string{
+		"alertname": "KubeDeploymentReplicasMismatch",
+		"namespace": "admins",
+		"pod":       ksmPod,
+	}
+	post(t, handler, "firing", "aaaa1111", preLabels)
+	post(t, handler, "firing", "bbbb2222", preLabels)
+	if len(received) != 1 {
+		t.Fatalf("setup: expected the collapsed key to yield 1 ticket, got %d", len(received))
+	}
+	legacyID := received[0].ID
+	stored, err := store.Get(legacyID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !strings.Contains(stored.AlertFingerprint, "aaaa1111") || !strings.Contains(stored.AlertFingerprint, "bbbb2222") {
+		t.Fatalf("setup: expected an aggregate ticket, fingerprints=%q", stored.AlertFingerprint)
+	}
+
+	// Post-rollout: A fires again, now correctly named.
+	post(t, handler, "firing", "aaaa1111", map[string]string{
+		"alertname":  "KubeDeploymentReplicasMismatch",
+		"namespace":  "admins",
+		"deployment": "admins-mctl-agents-worker-base-service",
+		"pod":        ksmPod,
+	})
+	if len(received) != 2 {
+		t.Fatalf("expected one new ticket under the corrected name, got %d total", len(received))
+	}
+	if received[1].Service != "admins-mctl-agents-worker-base-service" {
+		t.Errorf("new ticket service: got %q, want the workload name", received[1].Service)
+	}
+
+	// A's resolve must not close the aggregate: B is still firing in it.
+	post(t, handler, "resolved", "aaaa1111", map[string]string{
+		"alertname":  "KubeDeploymentReplicasMismatch",
+		"namespace":  "admins",
+		"deployment": "admins-mctl-agents-worker-base-service",
+		"pod":        ksmPod,
+	})
+	legacy, err := store.Get(legacyID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if legacy.Status == ticket.StatusResolved {
+		t.Error("the aggregate legacy ticket was closed by one workload's resolve; B is still firing in it")
 	}
 }

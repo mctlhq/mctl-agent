@@ -106,6 +106,59 @@ func (h *AlertHandler) processAlert(a alert) {
 
 	tenant := namespace
 	service := extractService(pod)
+	// Workload-object alerts (KubeDeploymentReplicasMismatch,
+	// KubeStatefulSetReplicasMismatch, KubeDeploymentRolloutStuck, ...)
+	// are computed from kube-state-metrics series like
+	// kube_deployment_spec_replicas, which name the object in a
+	// `deployment`/`statefulset`/`daemonset` label and carry NO `pod`
+	// label of their own. The scrape target's own labels then survive, so
+	// `pod` is kube-state-metrics' pod and extractService() yields
+	// "monitoring-kube-state-metrics" for every such alert, in every
+	// namespace — the actual failing object is lost.
+	//
+	// Pod-scoped alerts are unaffected: kube_pod_* series carry their own
+	// `pod` label, the ServiceMonitor honors metric labels over target
+	// ones, and none of them set a workload label — so the branch below
+	// never fires for them and KubePodCrashLooping keeps resolving to the
+	// real service.
+	//
+	// INVARIANT this relies on: no pod-scoped alert carries a workload
+	// label. It holds because the workload labels only exist on
+	// kube_<workload>_* series, which have no `pod` of their own. A future
+	// VMRule that enriches a pod-scoped series with the owning workload
+	// (the `* on(...) group_left(deployment)` join pattern) would break it
+	// and silently send that alert here instead of to the pod-derived
+	// name. If such a rule is ever added, gate this branch on the alert
+	// types it is meant for, the way the branches below gate on tType.
+	//
+	// Observed 2026-06-21..2026-08-28: 20 incidents recorded against
+	// service="monitoring-kube-state-metrics" across tenants admins, labs,
+	// nfc, backstage, minio, vault and monitoring — six namespaces that
+	// never ran a kube-state-metrics pod. No skill can match those
+	// tickets, and the reconciler auto-resolves several as "service does
+	// not exist (likely synthetic / orphaned alert)".
+	//
+	// ROLLOUT NOTE: an alert already firing when this ships keeps its
+	// pre-existing ticket under the old pod-derived key, so it gets one
+	// new ticket (and one notification) under the corrected name. The old
+	// one is closed by reconcileWithAlertManager (poller.go) once its
+	// alerts clear. That is deliberate, and it is why no key-migration
+	// fallback lives here: those legacy tickets are AGGREGATES. The
+	// collapsed key merged every workload in the tenant into one ticket
+	// and TouchWithFingerprint accumulated all their fingerprints, so no
+	// single webhook can say whether the ticket as a whole is resolved —
+	// attaching or closing it on one alert misattributes or prematurely
+	// closes the others. AM reconcile is the only place that can decide
+	// correctly, because it alone requires ALL of a ticket's fingerprints
+	// to be absent from the active set. Earlier revisions of this PR tried
+	// the fallback three ways; each one reintroduced a cross-workload
+	// resolve.
+	for _, key := range []string{"deployment", "statefulset", "daemonset"} {
+		if obj := a.Labels[key]; obj != "" {
+			service = obj
+			break
+		}
+	}
 	if tType == ticket.TypeWorkflowFailed && workflow != "" {
 		service = workflow
 	}
