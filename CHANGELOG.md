@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.17.1](https://github.com/mctlhq/mctl-agent/compare/1.17.0...1.17.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* **agents:** issue-100-default-auto-merge-enabled-false-honor-c ([ac00a8f](https://github.com/mctlhq/mctl-agent/commit/ac00a8f59d8161911396528c6501bb2bd00be8ac))
+* **monitor:** refuse to resolve tickets from a fingerprintless alert ([a34b538](https://github.com/mctlhq/mctl-agent/commit/a34b5382491887b6fb5e514e8a9387864a9fbdd9)), closes [#107](https://github.com/mctlhq/mctl-agent/issues/107)
+* **ticket:** forward the context in ListAll; detach writes at the write ([0fe422c](https://github.com/mctlhq/mctl-agent/commit/0fe422c51904a07e5c845e49d4f89103fbefa119))
+
 ## [1.17.0](https://github.com/mctlhq/mctl-agent/compare/1.16.2...1.17.0) (2026-08-29)
 
 
