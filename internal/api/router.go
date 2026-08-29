@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mcp"
 	_ "github.com/mctlhq/mctl-agent/internal/metrics"
@@ -231,9 +232,28 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 // adds cancellation if the webhook caller disconnects before the command
 // (a GitHub merge/close) finishes, instead of letting it run unbounded.
 func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opts Options) {
+	// Reads and the GitHub calls stay on ctx — cancelling those when the
+	// caller disconnects is the point. The status writes below do not: they
+	// record an external side effect that already happened (a merged or
+	// closed PR), and a cancelled write would leave the ticket claiming the
+	// opposite of what GitHub now shows.
+	//
+	// persist derives its detached context per call, not once for the whole
+	// handler: the 30s ceiling has to cover the write, and a ceiling started
+	// before a slow GitHub round-trip could already be spent by the time the
+	// write runs — reintroducing the very failure detachment prevents.
+	persist := func(t *ticket.Ticket) {
+		writeCtx, cancelWrite := ctxutil.DetachedWrite(ctx)
+		defer cancelWrite()
+		if err := opts.Store.Update(writeCtx, t); err != nil {
+			slog.Error("failed to persist ticket state after command",
+				"command", cmd.Command, "ticket", t.ID, "error", err)
+		}
+	}
+
 	switch cmd.Command {
 	case "status":
-		tickets, err := opts.Store.ListOpen()
+		tickets, err := opts.Store.ListOpen(ctx)
 		if err != nil {
 			slog.Error("failed to list tickets for /status", "error", err)
 			return
@@ -241,7 +261,7 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 		_ = opts.Telegram.SendStatus(tickets)
 
 	case "ticket":
-		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
 		if t == nil {
 			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
 			return
@@ -249,7 +269,7 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 		_ = opts.Telegram.SendTicketDetail(t)
 
 	case "approve":
-		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
 		if t == nil {
 			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
 			return
@@ -263,11 +283,11 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 			return
 		}
 		t.Status = ticket.StatusFixApplied
-		_ = opts.Store.Update(t)
+		persist(t)
 		_ = opts.Telegram.SendText("PR #" + strings.TrimSpace(fmt.Sprint(t.PRNumber)) + " merged for " + t.Service)
 
 	case "reject":
-		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
 		if t == nil {
 			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
 			return
@@ -276,17 +296,17 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 			_ = opts.GitHub.ClosePR(ctx, t.PRNumber, cmd.Reason)
 		}
 		t.Status = ticket.StatusSuppressed
-		_ = opts.Store.Update(t)
+		persist(t)
 		_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " rejected: " + cmd.Reason)
 
 	case "ignore":
-		t := findTicketByPrefix(opts.Store, cmd.TicketID)
+		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
 		if t == nil {
 			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
 			return
 		}
 		t.Status = ticket.StatusSuppressed
-		_ = opts.Store.Update(t)
+		persist(t)
 		_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " suppressed")
 
 	case "pause":
@@ -298,27 +318,27 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 		_ = opts.Telegram.SendText("Pipeline resumed.")
 
 	case "digest":
-		open, err := opts.Store.ListOpen()
+		open, err := opts.Store.ListOpen(ctx)
 		if err != nil {
 			_ = opts.Telegram.SendText("Failed to load tickets: " + err.Error())
 			return
 		}
-		resolved, _ := opts.Store.CountResolvedInWindow(24)
-		prs, _ := opts.Store.CountPRsInWindow(24)
+		resolved, _ := opts.Store.CountResolvedInWindow(ctx, 24)
+		prs, _ := opts.Store.CountPRsInWindow(ctx, 24)
 		_ = opts.Telegram.SendDailyDigest(open, resolved, prs)
 	}
 }
 
 // findTicketByPrefix finds a ticket by the first 8 chars of its ID.
-func findTicketByPrefix(store *ticket.Store, prefix string) *ticket.Ticket {
+func findTicketByPrefix(ctx context.Context, store *ticket.Store, prefix string) *ticket.Ticket {
 	// Try exact match first.
-	t, err := store.Get(prefix)
+	t, err := store.Get(ctx, prefix)
 	if err == nil {
 		return t
 	}
 
 	// Search by prefix in open tickets.
-	tickets, err := store.ListAll()
+	tickets, err := store.ListAll(ctx)
 	if err != nil {
 		return nil
 	}

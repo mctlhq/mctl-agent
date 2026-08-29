@@ -212,7 +212,7 @@ func (s *Store) ensureIndex(ctx context.Context, name, table, column string) err
 }
 
 // Create inserts a new ticket, generating a UUID.
-func (s *Store) Create(t *Ticket) error {
+func (s *Store) Create(ctx context.Context, t *Ticket) error {
 	t.ID = uuid.New().String()
 	now := time.Now().UTC()
 	t.CreatedAt = now
@@ -226,7 +226,7 @@ func (s *Store) Create(t *Ticket) error {
 			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 
-	_, err := s.db.Exec(s.rebind(query),
+	_, err := s.db.ExecContext(ctx, s.rebind(query),
 		t.ID, t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
 		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence, t.AlertFingerprint,
 		t.CreatedAt, t.UpdatedAt, t.ResolvedAt,
@@ -235,7 +235,7 @@ func (s *Store) Create(t *Ticket) error {
 }
 
 // Update saves changes to an existing ticket.
-func (s *Store) Update(t *Ticket) error {
+func (s *Store) Update(ctx context.Context, t *Ticket) error {
 	t.UpdatedAt = time.Now().UTC()
 	query := `
 		UPDATE tickets SET source=?, alert_name=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
@@ -243,7 +243,7 @@ func (s *Store) Update(t *Ticket) error {
 			alert_fingerprint=?, updated_at=?, resolved_at=?
 		WHERE id=?`
 
-	_, err := s.db.Exec(s.rebind(query),
+	_, err := s.db.ExecContext(ctx, s.rebind(query),
 		t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
 		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence,
 		t.AlertFingerprint, t.UpdatedAt, t.ResolvedAt, t.ID,
@@ -252,7 +252,7 @@ func (s *Store) Update(t *Ticket) error {
 }
 
 // Get retrieves a ticket by ID, including evidence.
-func (s *Store) Get(id string) (*Ticket, error) {
+func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
 	query := `
@@ -260,7 +260,7 @@ func (s *Store) Get(id string) (*Ticket, error) {
 			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets WHERE id=?`
 
-	err := s.db.QueryRow(s.rebind(query), id).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
+	err := s.db.QueryRowContext(ctx, s.rebind(query), id).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
@@ -271,7 +271,7 @@ func (s *Store) Get(id string) (*Ticket, error) {
 		t.ResolvedAt = &resolvedAt.Time
 	}
 
-	t.Evidence, err = s.loadEvidence(id)
+	t.Evidence, err = s.loadEvidence(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -279,17 +279,17 @@ func (s *Store) Get(id string) (*Ticket, error) {
 }
 
 // ListOpen returns all non-resolved, non-suppressed tickets.
-func (s *Store) ListOpen() ([]*Ticket, error) {
+func (s *Store) ListOpen(ctx context.Context) ([]*Ticket, error) {
 	// StatusEscalated is included deliberately: it is terminal for the pipeline
 	// but the problem is still open, so the watchdog, the AlertManager reconcile
 	// and orphan pruning must all keep seeing it. Leaving it out would recreate
 	// the stuck-forever bug this status was introduced to fix, minus the watchdog.
-	return s.listByStatus(StatusOpen, StatusAnalyzing, StatusEscalated, StatusFixProposed, StatusFixApplied)
+	return s.listByStatus(ctx, StatusOpen, StatusAnalyzing, StatusEscalated, StatusFixProposed, StatusFixApplied)
 }
 
 // ListAll returns all tickets (latest first, limit 100).
-func (s *Store) ListAll() ([]*Ticket, error) {
-	return s.ListByFilters(context.Background(), "", "", "", 100)
+func (s *Store) ListAll(ctx context.Context) ([]*Ticket, error) {
+	return s.ListByFilters(ctx, "", "", "", 100)
 }
 
 // ListByFilters returns tickets matching the given filters, latest first.
@@ -332,7 +332,7 @@ func (s *Store) ListByFilters(ctx context.Context, status, tenant, service strin
 	return s.scanTickets(rows)
 }
 
-func (s *Store) listByStatus(statuses ...string) ([]*Ticket, error) {
+func (s *Store) listByStatus(ctx context.Context, statuses ...string) ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
@@ -347,7 +347,7 @@ func (s *Store) listByStatus(statuses ...string) ([]*Ticket, error) {
 	}
 	query += ") ORDER BY created_at DESC"
 
-	rows, err := s.db.Query(s.rebind(query), args...)
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +374,7 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 }
 
 // FindDuplicate checks for an existing open ticket with the same tenant, service, and type.
-func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, error) {
+func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
 	query := `
@@ -384,7 +384,7 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
 		ORDER BY created_at DESC LIMIT 1`
 
-	err := s.db.QueryRow(s.rebind(query),
+	err := s.db.QueryRowContext(ctx, s.rebind(query),
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
@@ -403,23 +403,23 @@ func (s *Store) FindDuplicate(tenant, service, ticketType string) (*Ticket, erro
 }
 
 // AddEvidence adds evidence to a ticket.
-func (s *Store) AddEvidence(ticketID string, ev Evidence) error {
+func (s *Store) AddEvidence(ctx context.Context, ticketID string, ev Evidence) error {
 	query := `
 		INSERT INTO evidence (ticket_id, type, content, collected_at)
 		VALUES (?, ?, ?, ?)`
 
-	_, err := s.db.Exec(s.rebind(query),
+	_, err := s.db.ExecContext(ctx, s.rebind(query),
 		ticketID, ev.Type, ev.Content, ev.CollectedAt,
 	)
 	return err
 }
 
-func (s *Store) loadEvidence(ticketID string) ([]Evidence, error) {
+func (s *Store) loadEvidence(ctx context.Context, ticketID string) ([]Evidence, error) {
 	query := `
 		SELECT type, content, collected_at FROM evidence
 		WHERE ticket_id=? ORDER BY collected_at`
 
-	rows, err := s.db.Query(s.rebind(query), ticketID)
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), ticketID)
 	if err != nil {
 		return nil, err
 	}
@@ -437,32 +437,32 @@ func (s *Store) loadEvidence(ticketID string) ([]Evidence, error) {
 }
 
 // CountPRsInWindow counts tickets with non-empty PR URLs created in the last N hours.
-func (s *Store) CountPRsInWindow(hours int) (int, error) {
+func (s *Store) CountPRsInWindow(ctx context.Context, hours int) (int, error) {
 	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
 	var count int
 	query := `
 		SELECT COUNT(*) FROM tickets
 		WHERE pr_url != '' AND created_at > ?`
 
-	err := s.db.QueryRow(s.rebind(query), since).Scan(&count)
+	err := s.db.QueryRowContext(ctx, s.rebind(query), since).Scan(&count)
 	return count, err
 }
 
 // CountResolvedInWindow counts tickets resolved in the last N hours.
-func (s *Store) CountResolvedInWindow(hours int) (int, error) {
+func (s *Store) CountResolvedInWindow(ctx context.Context, hours int) (int, error) {
 	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
 	var count int
 	query := `
 		SELECT COUNT(*) FROM tickets
 		WHERE status=? AND resolved_at > ?`
 
-	err := s.db.QueryRow(s.rebind(query), StatusResolved, since).Scan(&count)
+	err := s.db.QueryRowContext(ctx, s.rebind(query), StatusResolved, since).Scan(&count)
 	return count, err
 }
 
 // FindSimilar returns resolved tickets of the same type, most recent first.
 // Used to inject historical context into LLM diagnosis.
-func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket, error) {
+func (s *Store) FindSimilar(ctx context.Context, ticketType, excludeID string, limit int) ([]*Ticket, error) {
 	since := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
@@ -471,7 +471,7 @@ func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket,
 		WHERE type=? AND status=? AND id != ? AND created_at > ?
 		ORDER BY created_at DESC LIMIT ?`
 
-	rows, err := s.db.Query(s.rebind(query),
+	rows, err := s.db.QueryContext(ctx, s.rebind(query),
 		ticketType, StatusResolved, excludeID, since, limit,
 	)
 	if err != nil {
@@ -494,7 +494,7 @@ func (s *Store) FindSimilar(ticketType, excludeID string, limit int) ([]*Ticket,
 // tenant/service. An empty alertName matches tickets whose alert_name
 // is blank — e.g. tickets created by the poller or other non-
 // AlertManager sources.
-func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName string, window time.Duration) (*Ticket, error) {
+func (s *Store) FindRecentlyResolved(ctx context.Context, tenant, service, ticketType, alertName string, window time.Duration) (*Ticket, error) {
 	if window <= 0 {
 		return nil, nil
 	}
@@ -508,7 +508,7 @@ func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName stri
 		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status=? AND resolved_at > ?
 		ORDER BY resolved_at DESC LIMIT 1`
 
-	err := s.db.QueryRow(s.rebind(query),
+	err := s.db.QueryRowContext(ctx, s.rebind(query),
 		tenant, service, ticketType, alertName, StatusResolved, since,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
@@ -529,10 +529,10 @@ func (s *Store) FindRecentlyResolved(tenant, service, ticketType, alertName stri
 // Touch bumps the ticket's UpdatedAt without changing any other field.
 // Used on duplicate-alert firings so stale-ticket GC can tell a still-
 // firing alert from one that stopped firing.
-func (s *Store) Touch(id string) error {
+func (s *Store) Touch(ctx context.Context, id string) error {
 	now := time.Now().UTC()
 	query := `UPDATE tickets SET updated_at=? WHERE id=?`
-	_, err := s.db.Exec(s.rebind(query), now, id)
+	_, err := s.db.ExecContext(ctx, s.rebind(query), now, id)
 	return err
 }
 
@@ -553,9 +553,9 @@ func (s *Store) Touch(id string) error {
 // fingerprints via a read/modify/write race. The CASE expression
 // computes the new value using only the existing column value — no
 // preceding SELECT is needed.
-func (s *Store) TouchWithFingerprint(id, fingerprint string) error {
+func (s *Store) TouchWithFingerprint(ctx context.Context, id, fingerprint string) error {
 	if fingerprint == "" {
-		return s.Touch(id)
+		return s.Touch(ctx, id)
 	}
 	now := time.Now().UTC()
 
@@ -575,7 +575,7 @@ func (s *Store) TouchWithFingerprint(id, fingerprint string) error {
 		END,
 		updated_at = ?
 		WHERE id = ?`
-	_, err := s.db.Exec(s.rebind(query), fingerprint, escapeLike(fingerprint), fingerprint, now, id)
+	_, err := s.db.ExecContext(ctx, s.rebind(query), fingerprint, escapeLike(fingerprint), fingerprint, now, id)
 	return err
 }
 
@@ -623,12 +623,12 @@ func mergeFingerprint(existing, fingerprint string) string {
 // Returns true when a row was actually updated, false when the gate
 // filtered the write (e.g. the pipeline promoted the ticket first).
 // Callers should check the bool before logging a resolution.
-func (s *Store) ResolveByID(id string) (bool, error) {
+func (s *Store) ResolveByID(ctx context.Context, id string) (bool, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
 		WHERE id=? AND status=?`
-	res, err := s.db.Exec(s.rebind(query),
+	res, err := s.db.ExecContext(ctx, s.rebind(query),
 		StatusResolved, now, now,
 		id, StatusOpen,
 	)
@@ -650,7 +650,7 @@ func (s *Store) ResolveByID(id string) (bool, error) {
 //
 // Returns true when a row was actually updated, false when the gate
 // filtered the write (ticket was already promoted to another status).
-func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, error) {
+func (s *Store) ResolveByIDFromStatus(ctx context.Context, id, fromStatus, reason string) (bool, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET
@@ -669,7 +669,7 @@ func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, erro
 			analysis = CASE WHEN analysis='' THEN ? ELSE analysis || char(10) || ? END
 		WHERE id=? AND status=?`
 	}
-	res, err := s.db.Exec(s.rebind(query),
+	res, err := s.db.ExecContext(ctx, s.rebind(query),
 		StatusResolved, now, now,
 		reason, reason,
 		id, fromStatus,
@@ -720,7 +720,7 @@ func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, erro
 // between AlertManager and this process biases toward leaving a ticket open,
 // which reconcileWithAlertManager then closes on its next pass — the safe
 // direction, same argument as the workload-key migration in #105.
-func (s *Store) ResolveByTenantService(tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error) {
+func (s *Store) ResolveByTenantService(ctx context.Context, tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
@@ -770,7 +770,7 @@ func (s *Store) ResolveByTenantService(tenant, service, ticketType, fingerprint 
 		RETURNING id`
 	}
 
-	rows, err := s.db.Query(s.rebind(query), args...)
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -799,12 +799,12 @@ type StatusSourcePair struct {
 
 // OpenTicketBreakdown returns a count of non-terminal tickets grouped by
 // (status, source). Terminal statuses (resolved, suppressed) are excluded.
-func (s *Store) OpenTicketBreakdown() (map[StatusSourcePair]int, error) {
+func (s *Store) OpenTicketBreakdown(ctx context.Context) (map[StatusSourcePair]int, error) {
 	const q = `
         SELECT status, source, COUNT(*) FROM tickets
         WHERE status NOT IN ('resolved', 'suppressed')
         GROUP BY status, source`
-	rows, err := s.db.Query(s.rebind(q))
+	rows, err := s.db.QueryContext(ctx, s.rebind(q))
 	if err != nil {
 		return nil, err
 	}

@@ -12,6 +12,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// ctx is the context the store calls in this package's tests run under. The
+// store API takes one now; nothing here exercises cancellation, so a single
+// background context keeps the call sites readable. Tests that need their own
+// context shadow this with a local one.
+var ctx = context.Background()
+
 func newTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := NewStore(context.Background(), ":memory:")
@@ -57,7 +63,7 @@ func TestStoreCreateAndGet(t *testing.T) {
 		Severity:  SeverityCritical,
 	}
 
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -71,7 +77,7 @@ func TestStoreCreateAndGet(t *testing.T) {
 		t.Error("expected CreatedAt to be set")
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,11 +111,11 @@ func TestStorePersistsPRMetadata(t *testing.T) {
 		PRCommitSHA: "deadbeef101",
 	}
 
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,17 +128,17 @@ func TestStoreUpdate(t *testing.T) {
 	store := newTestStore(t)
 
 	tk := &Ticket{Source: SourcePolling, Type: TypeArgoCDDegraded, Tenant: "data", Service: "etl"}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
 	tk.Status = StatusAnalyzing
 	tk.Analysis = "ArgoCD app is degraded"
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,16 +154,16 @@ func TestStoreAddEvidence(t *testing.T) {
 	store := newTestStore(t)
 
 	tk := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "t", Service: "s"}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
 	ev := Evidence{Type: "logs", Content: "error: OOMKilled", CollectedAt: time.Now().UTC()}
-	if err := store.AddEvidence(tk.ID, ev); err != nil {
+	if err := store.AddEvidence(ctx, tk.ID, ev); err != nil {
 		t.Fatal(err)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +182,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	store := newTestStore(t)
 
 	// No tickets yet — should return nil.
-	dup, err := store.FindDuplicate("billing", "api", TypePodCrashloop)
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,12 +192,12 @@ func TestStoreFindDuplicate(t *testing.T) {
 
 	// Create a ticket.
 	tk := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api"}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
 	// Same tenant/service/type → should find duplicate.
-	dup, err = store.FindDuplicate("billing", "api", TypePodCrashloop)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +209,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	}
 
 	// Different type → no duplicate.
-	dup, err = store.FindDuplicate("billing", "api", TypeResourceLimit)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,10 +221,10 @@ func TestStoreFindDuplicate(t *testing.T) {
 	tk.Status = StatusResolved
 	now := time.Now().UTC()
 	tk.ResolvedAt = &now
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
-	dup, err = store.FindDuplicate("billing", "api", TypePodCrashloop)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,18 +240,18 @@ func TestStoreListOpenAndListAll(t *testing.T) {
 	for _, s := range []string{StatusOpen, StatusAnalyzing, StatusEscalated, StatusResolved, StatusSuppressed} {
 		tk := &Ticket{Source: SourcePolling, Type: TypeArgoCDDegraded, Tenant: "t", Service: "s", Status: s}
 		tk.Status = "" // Let Create set default
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 		if s != StatusOpen {
 			tk.Status = s
-			if err := store.Update(tk); err != nil {
+			if err := store.Update(ctx, tk); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
 
-	open, err := store.ListOpen()
+	open, err := store.ListOpen(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,7 +271,7 @@ func TestStoreListOpenAndListAll(t *testing.T) {
 		t.Error("ListOpen must include escalated tickets, otherwise they are never GC'd")
 	}
 
-	all, err := store.ListAll()
+	all, err := store.ListAll(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,11 +284,11 @@ func TestStoreResolveByTenantService(t *testing.T) {
 	store := newTestStore(t)
 
 	tk := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api"}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "", time.Time{})
+	ids, err := store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +296,7 @@ func TestStoreResolveByTenantService(t *testing.T) {
 		t.Errorf("expected resolved ids = [%s], got %v", tk.ID, ids)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,24 +315,24 @@ func TestStoreResolveByTenantServiceReturnsAllOpenIDs(t *testing.T) {
 	// to mctl-api needs every open ID, not just the most recent.
 	t1 := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api"}
 	t2 := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api"}
-	if err := store.Create(t1); err != nil {
+	if err := store.Create(ctx, t1); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Create(t2); err != nil {
+	if err := store.Create(ctx, t2); err != nil {
 		t.Fatal(err)
 	}
 	// Already-resolved ticket on the same key must be excluded from results.
 	t3 := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "api", Status: StatusResolved}
-	if err := store.Create(t3); err != nil {
+	if err := store.Create(ctx, t3); err != nil {
 		t.Fatal(err)
 	}
 	// Ticket on a different service is unrelated and must not be returned.
 	other := &Ticket{Source: SourceAlertManager, Type: TypePodCrashloop, Tenant: "billing", Service: "worker"}
-	if err := store.Create(other); err != nil {
+	if err := store.Create(ctx, other); err != nil {
 		t.Fatal(err)
 	}
 
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "", time.Time{})
+	ids, err := store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +354,7 @@ func TestStoreResolveByTenantServiceReturnsAllOpenIDs(t *testing.T) {
 func TestStoreResolveByTenantServiceNoMatch(t *testing.T) {
 	store := newTestStore(t)
 
-	ids, err := store.ResolveByTenantService("nope", "nope", TypePodCrashloop, "", time.Time{})
+	ids, err := store.ResolveByTenantService(ctx, "nope", "nope", TypePodCrashloop, "", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -361,7 +367,7 @@ func TestStoreCountPRsInWindow(t *testing.T) {
 	store := newTestStore(t)
 
 	// No tickets → count = 0.
-	count, err := store.CountPRsInWindow(1)
+	count, err := store.CountPRsInWindow(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -371,11 +377,11 @@ func TestStoreCountPRsInWindow(t *testing.T) {
 
 	// Create ticket with PR URL.
 	tk := &Ticket{Source: SourcePolling, Type: TypePodCrashloop, Tenant: "t", Service: "s", PRURL: "https://github.com/mctlhq/mctl-gitops/pull/1"}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
-	count, err = store.CountPRsInWindow(1)
+	count, err = store.CountPRsInWindow(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,11 +391,11 @@ func TestStoreCountPRsInWindow(t *testing.T) {
 
 	// Ticket without PR URL should not count.
 	tk2 := &Ticket{Source: SourcePolling, Type: TypePodCrashloop, Tenant: "t2", Service: "s2"}
-	if err := store.Create(tk2); err != nil {
+	if err := store.Create(ctx, tk2); err != nil {
 		t.Fatal(err)
 	}
 
-	count, err = store.CountPRsInWindow(1)
+	count, err = store.CountPRsInWindow(ctx, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +423,7 @@ func TestListByFiltersSurviveTableCap(t *testing.T) {
 			Service: "shared",
 			Status:  StatusAnalyzing,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -435,7 +441,7 @@ func TestListByFiltersSurviveTableCap(t *testing.T) {
 			Service: "svc",
 			Status:  StatusSuppressed,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -480,21 +486,21 @@ func TestTouchWithFingerprintMergesNotOverwrites(t *testing.T) {
 		Severity:         SeverityCritical,
 		AlertFingerprint: "fp-A",
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := store.TouchWithFingerprint(tk.ID, "fp-B"); err != nil {
+	if err := store.TouchWithFingerprint(ctx, tk.ID, "fp-B"); err != nil {
 		t.Fatalf("touch fp-B: %v", err)
 	}
-	if err := store.TouchWithFingerprint(tk.ID, "fp-A"); err != nil {
+	if err := store.TouchWithFingerprint(ctx, tk.ID, "fp-A"); err != nil {
 		t.Fatalf("touch fp-A again (dup): %v", err)
 	}
-	if err := store.TouchWithFingerprint(tk.ID, "fp-C"); err != nil {
+	if err := store.TouchWithFingerprint(ctx, tk.ID, "fp-C"); err != nil {
 		t.Fatalf("touch fp-C: %v", err)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +528,7 @@ func TestTouchWithFingerprintRepeatedSequential(t *testing.T) {
 		Severity:         SeverityCritical,
 		AlertFingerprint: "",
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -532,18 +538,18 @@ func TestTouchWithFingerprintRepeatedSequential(t *testing.T) {
 		fps[i] = "fp-" + string(rune('A'+i))
 	}
 	for _, fp := range fps {
-		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+		if err := store.TouchWithFingerprint(ctx, tk.ID, fp); err != nil {
 			t.Fatalf("TouchWithFingerprint(%s): %v", fp, err)
 		}
 	}
 	// Idempotency: second pass must not duplicate or drop entries.
 	for _, fp := range fps {
-		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+		if err := store.TouchWithFingerprint(ctx, tk.ID, fp); err != nil {
 			t.Fatalf("TouchWithFingerprint repeat(%s): %v", fp, err)
 		}
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -600,7 +606,7 @@ func TestStoreOpenTicketBreakdown(t *testing.T) {
 			Summary:  "open alert",
 			Severity: SeverityCritical,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -614,11 +620,11 @@ func TestStoreOpenTicketBreakdown(t *testing.T) {
 			Summary:  "analyzing alert",
 			Severity: SeverityWarning,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 		tk.Status = StatusAnalyzing
-		if err := store.Update(tk); err != nil {
+		if err := store.Update(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -631,15 +637,15 @@ func TestStoreOpenTicketBreakdown(t *testing.T) {
 		Summary:  "done",
 		Severity: SeverityInfo,
 	}
-	if err := store.Create(resolved); err != nil {
+	if err := store.Create(ctx, resolved); err != nil {
 		t.Fatal(err)
 	}
 	resolved.Status = StatusResolved
-	if err := store.Update(resolved); err != nil {
+	if err := store.Update(ctx, resolved); err != nil {
 		t.Fatal(err)
 	}
 
-	breakdown, err := store.OpenTicketBreakdown()
+	breakdown, err := store.OpenTicketBreakdown(ctx)
 	if err != nil {
 		t.Fatalf("OpenTicketBreakdown: %v", err)
 	}
@@ -701,15 +707,15 @@ func TestStoreResolveByTenantServiceMatchesFingerprintSetMembership(t *testing.T
 		Tenant: "billing", Service: "api", Summary: "crashloop",
 		AlertFingerprint: "fp-A",
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	for _, fp := range []string{"fp-B", "fp-C"} {
-		if err := store.TouchWithFingerprint(tk.ID, fp); err != nil {
+		if err := store.TouchWithFingerprint(ctx, tk.ID, fp); err != nil {
 			t.Fatal(err)
 		}
 	}
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +725,7 @@ func TestStoreResolveByTenantServiceMatchesFingerprintSetMembership(t *testing.T
 
 	// A near-miss substring of a real element must NOT match: without the
 	// comma padding, "p-B" is a substring of ",fp-A,fp-B,fp-C," and would.
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "p-B", time.Time{})
+	ids, err := store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, "p-B", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -729,7 +735,7 @@ func TestStoreResolveByTenantServiceMatchesFingerprintSetMembership(t *testing.T
 
 	// The middle element must match — not just the first or the last, which
 	// a half-broken padding could still get right by accident.
-	ids, err = store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-B", time.Time{})
+	ids, err = store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, "fp-B", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -749,12 +755,12 @@ func TestStoreResolveByTenantServiceTreatsLikeWildcardsAsLiterals(t *testing.T) 
 		Tenant: "billing", Service: "api", Summary: "crashloop",
 		AlertFingerprint: "fp-A",
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
 	for _, fp := range []string{"%", "fp_A", "%A"} {
-		ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, fp, time.Time{})
+		ids, err := store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, fp, time.Time{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -776,12 +782,12 @@ func TestStoreResolveByTenantServiceSparesTicketsOpenedAfterTheAlertEnded(t *tes
 		Tenant: "billing", Service: "api", Summary: "crashloop",
 		AlertFingerprint: "fp-A",
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
 	endedBeforeTicket := tk.CreatedAt.Add(-time.Minute)
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-A", endedBeforeTicket)
+	ids, err := store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, "fp-A", endedBeforeTicket)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -790,7 +796,7 @@ func TestStoreResolveByTenantServiceSparesTicketsOpenedAfterTheAlertEnded(t *tes
 	}
 
 	endedAfterTicket := tk.CreatedAt.Add(time.Minute)
-	ids, err = store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-A", endedAfterTicket)
+	ids, err = store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, "fp-A", endedAfterTicket)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -810,18 +816,42 @@ func TestStoreResolveByTenantServiceStillResolvesFingerprintlessLegacyTickets(t 
 		Source: "alertmanager", Type: TypePodCrashloop,
 		Tenant: "billing", Service: "api", Summary: "crashloop",
 	}
-	if err := store.Create(legacy); err != nil {
+	if err := store.Create(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
 	if legacy.AlertFingerprint != "" {
 		t.Fatalf("precondition: want an empty fingerprint set, got %q", legacy.AlertFingerprint)
 	}
 
-	ids, err := store.ResolveByTenantService("billing", "api", TypePodCrashloop, "fp-A", time.Time{})
+	ids, err := store.ResolveByTenantService(ctx, "billing", "api", TypePodCrashloop, "fp-A", time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(ids) != 1 || ids[0] != legacy.ID {
 		t.Fatalf("legacy fingerprintless ticket must still resolve: want [%s], got %v", legacy.ID, ids)
+	}
+}
+
+// Every wrapper that forwards to another Store method must forward the
+// context too. ListAll shipped in this refactor's first commit taking a ctx
+// and then calling ListByFilters(context.Background(), ...) — the parameter
+// was accepted and silently dropped, so its one caller could never cancel the
+// query it had asked to be cancellable.
+func TestStoreListAllHonoursItsContext(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := store.ListAll(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListAll must use the context it is given: want context.Canceled, got %v", err)
 	}
 }

@@ -101,11 +101,11 @@ func (p *Provider) SendNotification(text string) error {
 // Context provides a capability-restricted view for a specific skill.
 // Skills receive this instead of the raw Provider.
 type Context struct {
-	provider   *Provider
-	skillName  string
-	allowed    map[skill.CapabilityID]bool
-	Ticket     *ticket.Ticket
-	Evidence   skill.EvidenceSet
+	provider  *Provider
+	skillName string
+	allowed   map[skill.CapabilityID]bool
+	Ticket    *ticket.Ticket
+	Evidence  skill.EvidenceSet
 }
 
 // NewContext creates a sandboxed context for a skill, granting only the requested capabilities.

@@ -34,7 +34,7 @@ import (
 // the given moment. Used to simulate a ticket that went stale.
 func backdate(t *testing.T, store *ticket.Store, id string, when time.Time) {
 	t.Helper()
-	full, err := store.Get(id)
+	full, err := store.Get(ctx, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func backdate(t *testing.T, store *ticket.Store, id string, when time.Time) {
 	if full.CreatedAt.After(when) {
 		full.CreatedAt = when
 	}
-	if err := store.Update(full); err != nil {
+	if err := store.Update(ctx, full); err != nil {
 		t.Fatal(err)
 	}
 	// Update bumps UpdatedAt to now; rewrite it directly with a raw query.
@@ -67,7 +67,7 @@ func TestPollerResolvesStaleOpenTicket(t *testing.T) {
 		Summary:  "stale",
 		Severity: ticket.SeverityCritical,
 	}
-	if err := store.Create(oldTicket); err != nil {
+	if err := store.Create(ctx, oldTicket); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, oldTicket.ID, time.Now().UTC().Add(-30*time.Hour))
@@ -81,7 +81,7 @@ func TestPollerResolvesStaleOpenTicket(t *testing.T) {
 		Summary:  "fresh",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(freshTicket); err != nil {
+	if err := store.Create(ctx, freshTicket); err != nil {
 		t.Fatal(err)
 	}
 
@@ -95,19 +95,19 @@ func TestPollerResolvesStaleOpenTicket(t *testing.T) {
 		Summary:  "analyzing",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(analyzing); err != nil {
+	if err := store.Create(ctx, analyzing); err != nil {
 		t.Fatal(err)
 	}
 	analyzing.Status = ticket.StatusAnalyzing
-	if err := store.Update(analyzing); err != nil {
+	if err := store.Update(ctx, analyzing); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, analyzing.ID, time.Now().UTC().Add(-30*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
 	// Verify: oldTicket is resolved, others still open.
-	got, err := store.Get(oldTicket.ID)
+	got, err := store.Get(ctx, oldTicket.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestPollerResolvesStaleOpenTicket(t *testing.T) {
 		t.Errorf("stale open ticket: status = %q, want resolved", got.Status)
 	}
 
-	got, err = store.Get(freshTicket.ID)
+	got, err = store.Get(ctx, freshTicket.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestPollerResolvesStaleOpenTicket(t *testing.T) {
 		t.Error("fresh ticket was resolved; should have been left alone")
 	}
 
-	got, err = store.Get(analyzing.ID)
+	got, err = store.Get(ctx, analyzing.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,15 +153,15 @@ func TestResolveByIDIgnoresNonOpenTickets(t *testing.T) {
 				Summary:  "in pipeline",
 				Severity: ticket.SeverityWarning,
 			}
-			if err := store.Create(tk); err != nil {
+			if err := store.Create(ctx, tk); err != nil {
 				t.Fatal(err)
 			}
 			tk.Status = status
-			if err := store.Update(tk); err != nil {
+			if err := store.Update(ctx, tk); err != nil {
 				t.Fatal(err)
 			}
 
-			resolved, err := store.ResolveByID(tk.ID)
+			resolved, err := store.ResolveByID(ctx, tk.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -169,7 +169,7 @@ func TestResolveByIDIgnoresNonOpenTickets(t *testing.T) {
 				t.Errorf("ResolveByID returned resolved=true for status=%s; should report no-op", status)
 			}
 
-			got, err := store.Get(tk.ID)
+			got, err := store.Get(ctx, tk.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -194,14 +194,14 @@ func TestPollerResolveStaleDisabledWhenZero(t *testing.T) {
 		Summary:  "s",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(stale); err != nil {
+	if err := store.Create(ctx, stale); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, stale.ID, time.Now().UTC().Add(-30*24*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
-	got, _ := store.Get(stale.ID)
+	got, _ := store.Get(ctx, stale.ID)
 	if got.Status == ticket.StatusResolved {
 		t.Error("StaleAfter=0 must disable the GC; ticket was still resolved")
 	}
@@ -225,14 +225,14 @@ func TestResolveStaleSkipsManualSource(t *testing.T) {
 		Summary:  "triggered via MCP",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(manual); err != nil {
+	if err := store.Create(ctx, manual); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, manual.ID, time.Now().UTC().Add(-30*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
-	got, _ := store.Get(manual.ID)
+	got, _ := store.Get(ctx, manual.ID)
 	if got.Status == ticket.StatusResolved {
 		t.Errorf("SourceManual ticket must be spared by stale GC; got status=%q", got.Status)
 	}
@@ -255,7 +255,7 @@ func TestResolveStaleArgoGatedOnRefresh(t *testing.T) {
 			Summary:  "x",
 			Severity: ticket.SeverityWarning,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 		backdate(t, store, tk.ID, time.Now().UTC().Add(-30*time.Hour))
@@ -268,15 +268,15 @@ func TestResolveStaleArgoGatedOnRefresh(t *testing.T) {
 
 	// Run with partial failure: svc-broken's status fetch failed.
 	state := refreshState{failedServices: map[string]bool{"labs/svc-broken": true}}
-	p.resolveStale(state)
+	p.resolveStale(ctx, state)
 
-	if got, _ := store.Get(argoRefreshed); got.Status != ticket.StatusResolved {
+	if got, _ := store.Get(ctx, argoRefreshed); got.Status != ticket.StatusResolved {
 		t.Errorf("argo ticket for refreshed service: status=%q, want resolved", got.Status)
 	}
-	if got, _ := store.Get(argoFailed); got.Status == ticket.StatusResolved {
+	if got, _ := store.Get(ctx, argoFailed); got.Status == ticket.StatusResolved {
 		t.Errorf("argo ticket for failed service must NOT be resolved; telemetry gap")
 	}
-	if got, _ := store.Get(podCrash); got.Status != ticket.StatusResolved {
+	if got, _ := store.Get(ctx, podCrash); got.Status != ticket.StatusResolved {
 		t.Errorf("pod_crashloop ticket is AlertManager-based; must GC regardless; got %q", got.Status)
 	}
 }
@@ -298,7 +298,7 @@ func TestResolveStaleOnlyHeartbeatTypes(t *testing.T) {
 			Summary:  "x",
 			Severity: ticket.SeverityWarning,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 		backdate(t, store, tk.ID, time.Now().UTC().Add(-30*time.Hour))
@@ -320,14 +320,14 @@ func TestResolveStaleOnlyHeartbeatTypes(t *testing.T) {
 	// Unknown type must be preserved by the whitelist gate.
 	unknownID := mkStale(ticket.TypeDeploymentFailed)
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
 	for i, id := range resolvableIDs {
-		if got, _ := store.Get(id); got.Status != ticket.StatusResolved {
+		if got, _ := store.Get(ctx, id); got.Status != ticket.StatusResolved {
 			t.Errorf("heartbeat type %q: status=%q, want resolved", resolvable[i], got.Status)
 		}
 	}
-	if got, _ := store.Get(unknownID); got.Status == ticket.StatusResolved {
+	if got, _ := store.Get(ctx, unknownID); got.Status == ticket.StatusResolved {
 		t.Errorf("non-heartbeat type %q must be spared; got %q",
 			ticket.TypeDeploymentFailed, got.Status)
 	}
@@ -348,7 +348,7 @@ func TestResolveStaleArgoSkippedWhenAllUnknown(t *testing.T) {
 		Summary:  "x",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(argoTicket); err != nil {
+	if err := store.Create(ctx, argoTicket); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, argoTicket.ID, time.Now().UTC().Add(-30*time.Hour))
@@ -361,17 +361,17 @@ func TestResolveStaleArgoSkippedWhenAllUnknown(t *testing.T) {
 		Summary:  "x",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(amTicket); err != nil {
+	if err := store.Create(ctx, amTicket); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, amTicket.ID, time.Now().UTC().Add(-30*time.Hour))
 
-	p.resolveStale(refreshState{allUnknown: true})
+	p.resolveStale(ctx, refreshState{allUnknown: true})
 
-	if got, _ := store.Get(argoTicket.ID); got.Status == ticket.StatusResolved {
+	if got, _ := store.Get(ctx, argoTicket.ID); got.Status == ticket.StatusResolved {
 		t.Error("ArgoCDDegraded ticket must not be resolved when allUnknown=true")
 	}
-	if got, _ := store.Get(amTicket.ID); got.Status != ticket.StatusResolved {
+	if got, _ := store.Get(ctx, amTicket.ID); got.Status != ticket.StatusResolved {
 		t.Errorf("AlertManager ticket must still GC; got %q", got.Status)
 	}
 }
@@ -390,23 +390,23 @@ func TestPollerResolvesStaleAnalyzingTicket(t *testing.T) {
 		Summary:  "stuck in analyzing",
 		Severity: ticket.SeverityCritical,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	tk.Status = ticket.StatusAnalyzing
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-72*time.Hour))
 
 	before := testutil.ToFloat64(metrics.StaleTTLResolved.WithLabelValues("analyzing"))
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 	after := testutil.ToFloat64(metrics.StaleTTLResolved.WithLabelValues("analyzing"))
 	if after-before != 1 {
 		t.Errorf("StaleTTLResolved{analyzing}: delta = %f, want 1", after-before)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -433,18 +433,18 @@ func TestPollerResolvesStaleFixProposedTicket(t *testing.T) {
 		Summary:  "fix proposed, PR abandoned",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	tk.Status = ticket.StatusFixProposed
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-200*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,18 +471,18 @@ func TestPollerKeepsRecentAnalyzingTicket(t *testing.T) {
 		Summary:  "only 24h old, should not resolve",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	tk.Status = ticket.StatusAnalyzing
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-24*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,12 +515,12 @@ func TestPrunesOrphanTicketAfterGracePeriod(t *testing.T) {
 				Summary:  "synthetic alert",
 				Severity: ticket.SeverityCritical,
 			}
-			if err := store.Create(tk); err != nil {
+			if err := store.Create(ctx, tk); err != nil {
 				t.Fatal(err)
 			}
 			if status != ticket.StatusOpen {
 				tk.Status = status
-				if err := store.Update(tk); err != nil {
+				if err := store.Update(ctx, tk); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -530,13 +530,13 @@ func TestPrunesOrphanTicketAfterGracePeriod(t *testing.T) {
 				knownServices: map[string]bool{"ovk/real-service": true},
 			}
 			before := testutil.ToFloat64(metrics.OrphanPruned)
-			p.pruneOrphans(state)
+			p.pruneOrphans(ctx, state)
 			after := testutil.ToFloat64(metrics.OrphanPruned)
 			if after-before != 1 {
 				t.Errorf("OrphanPruned delta = %f, want 1", after-before)
 			}
 
-			got, err := store.Get(tk.ID)
+			got, err := store.Get(ctx, tk.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -565,7 +565,7 @@ func TestKeepsTicketWhoseServiceExists(t *testing.T) {
 		Summary:  "real alert",
 		Severity: ticket.SeverityCritical,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
@@ -573,9 +573,9 @@ func TestKeepsTicketWhoseServiceExists(t *testing.T) {
 	state := refreshState{
 		knownServices: map[string]bool{"ovk/real-service": true},
 	}
-	p.pruneOrphans(state)
+	p.pruneOrphans(ctx, state)
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -608,7 +608,7 @@ func TestSkipsOrphanPruneForAlertManagerSource(t *testing.T) {
 		Summary:  "ArgoCD application admins-mctl-agent OutOfSync for 1h",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
@@ -618,9 +618,9 @@ func TestSkipsOrphanPruneForAlertManagerSource(t *testing.T) {
 	state := refreshState{
 		knownServices: map[string]bool{"admins/mctl-web": true},
 	}
-	p.pruneOrphans(state)
+	p.pruneOrphans(ctx, state)
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -644,20 +644,20 @@ func TestSkipsOrphanPruneWhenInventoryUnknown(t *testing.T) {
 		Summary:  "orphan",
 		Severity: ticket.SeverityCritical,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
 
 	state := refreshState{allUnknown: true}
 	before := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_unknown"))
-	p.pruneOrphans(state)
+	p.pruneOrphans(ctx, state)
 	after := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("am_unknown"))
 	if after-before != 1 {
 		t.Errorf("CleanupSkipped{am_unknown} delta = %f, want 1", after-before)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +681,7 @@ func TestSkipsManualOrphanTicket(t *testing.T) {
 		Summary:  "operator investigation",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
@@ -691,9 +691,9 @@ func TestSkipsManualOrphanTicket(t *testing.T) {
 	state := refreshState{
 		knownServices: map[string]bool{"ovk/something-else": true},
 	}
-	p.pruneOrphans(state)
+	p.pruneOrphans(ctx, state)
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -719,7 +719,7 @@ func TestSkipsOrphanPruneOnEmptyInventory(t *testing.T) {
 		Summary:  "real alert",
 		Severity: ticket.SeverityCritical,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
@@ -729,13 +729,13 @@ func TestSkipsOrphanPruneOnEmptyInventory(t *testing.T) {
 		knownServices: map[string]bool{},
 	}
 	before := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("empty_inventory"))
-	p.pruneOrphans(state)
+	p.pruneOrphans(ctx, state)
 	after := testutil.ToFloat64(metrics.CleanupSkipped.WithLabelValues("empty_inventory"))
 	if after-before != 1 {
 		t.Errorf("CleanupSkipped{empty_inventory} delta = %f, want 1", after-before)
 	}
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -762,7 +762,7 @@ func TestSkipsOrphanPruneForGitHubWebhookSource(t *testing.T) {
 		Summary:  "build failed on main",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
@@ -772,9 +772,9 @@ func TestSkipsOrphanPruneForGitHubWebhookSource(t *testing.T) {
 	state := refreshState{
 		knownServices: map[string]bool{"ovk/something-else": true},
 	}
-	p.pruneOrphans(state)
+	p.pruneOrphans(ctx, state)
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -825,7 +825,7 @@ func createAMTicket(t *testing.T, store *ticket.Store, fp, status string) *ticke
 		AlertFingerprint: fp,
 		Status:           status,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	return tk
@@ -846,7 +846,7 @@ func TestAMReconcileResolvesNonFiringTicket(t *testing.T) {
 		t.Errorf("AMReconcileResolved delta = %f, want 1", after-before)
 	}
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -869,7 +869,7 @@ func TestAMReconcileKeepsActiveTicket(t *testing.T) {
 
 	p.reconcileWithAlertManager(context.Background())
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -889,7 +889,7 @@ func TestAMReconcileSkipsBelowMinAge(t *testing.T) {
 
 	p.reconcileWithAlertManager(context.Background())
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -914,7 +914,7 @@ func TestAMReconcileSkipsEmptyActiveSet(t *testing.T) {
 		t.Errorf("CleanupSkipped{am_empty_set} delta = %f, want 1", after-before)
 	}
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -940,7 +940,7 @@ func TestAMReconcileSkipsOnAMError(t *testing.T) {
 		t.Errorf("CleanupSkipped{am_fetch_error} delta = %f, want 1", after-before)
 	}
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -959,7 +959,7 @@ func TestAMReconcileSkipsTicketsWithoutFingerprint(t *testing.T) {
 
 	p.reconcileWithAlertManager(context.Background())
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -982,14 +982,14 @@ func TestAMReconcileSkipsNonAlertManagerSource(t *testing.T) {
 		Severity:         ticket.SeverityWarning,
 		AlertFingerprint: "other-fp",
 	}
-	if err := p.store.Create(tk); err != nil {
+	if err := p.store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, p.store, tk.ID, time.Now().UTC().Add(-20*time.Minute))
 
 	p.reconcileWithAlertManager(context.Background())
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1024,7 +1024,7 @@ func TestAMReconcileSkipsWhenDisabled(t *testing.T) {
 	if hitCount != 0 {
 		t.Errorf("AM should not be called when disabled, got %d calls", hitCount)
 	}
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,7 +1051,7 @@ func TestAMReconcileKeepsTicketWhenAnyFingerprintActive(t *testing.T) {
 
 	p.reconcileWithAlertManager(context.Background())
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,7 +1078,7 @@ func TestAMReconcileResolvesWhenAllFingerprintsAbsent(t *testing.T) {
 		t.Errorf("AMReconcileResolved delta = %f, want 1", after-before)
 	}
 
-	got, err := p.store.Get(tk.ID)
+	got, err := p.store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1115,7 +1115,7 @@ func TestPollerUpdatesOpenTicketsGauge(t *testing.T) {
 			Summary:  "open",
 			Severity: ticket.SeverityCritical,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1127,11 +1127,11 @@ func TestPollerUpdatesOpenTicketsGauge(t *testing.T) {
 		Summary:  "analyzing",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(analyzing); err != nil {
+	if err := store.Create(ctx, analyzing); err != nil {
 		t.Fatal(err)
 	}
 	analyzing.Status = ticket.StatusAnalyzing
-	if err := store.Update(analyzing); err != nil {
+	if err := store.Update(ctx, analyzing); err != nil {
 		t.Fatal(err)
 	}
 	resolved := &ticket.Ticket{
@@ -1142,15 +1142,15 @@ func TestPollerUpdatesOpenTicketsGauge(t *testing.T) {
 		Summary:  "done",
 		Severity: ticket.SeverityInfo,
 	}
-	if err := store.Create(resolved); err != nil {
+	if err := store.Create(ctx, resolved); err != nil {
 		t.Fatal(err)
 	}
 	resolved.Status = ticket.StatusResolved
-	if err := store.Update(resolved); err != nil {
+	if err := store.Update(ctx, resolved); err != nil {
 		t.Fatal(err)
 	}
 
-	p.poll()
+	p.poll(ctx)
 
 	openGauge := testutil.ToFloat64(metrics.OpenTickets.WithLabelValues(ticket.StatusOpen, ticket.SourceAlertManager))
 	if openGauge != 2 {
@@ -1218,12 +1218,12 @@ func TestPollerPropagatesStaleResolveToMctlAPI(t *testing.T) {
 		Summary:  "stale",
 		Severity: ticket.SeverityCritical,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-30*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
 	if got := rc.await(t); got != tk.ID {
 		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
@@ -1268,14 +1268,14 @@ func TestOrphanPrunePropagatesResolveToMctlAPI(t *testing.T) {
 		Summary:  "orphan",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, tk.ID, time.Now().UTC().Add(-2*time.Hour))
 
 	// Inventory is known and non-empty but does not contain labs/deleted-svc.
 	state := refreshState{knownServices: map[string]bool{"labs/other": true}}
-	p.pruneOrphans(state)
+	p.pruneOrphans(ctx, state)
 
 	if got := rc.await(t); got != tk.ID {
 		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
@@ -1299,11 +1299,11 @@ func TestMaxAnalyzingAgePropagatesResolveToMctlAPI(t *testing.T) {
 		Summary:  "stuck",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	tk.Status = ticket.StatusAnalyzing
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	// MaxAnalyzingAge is measured from CreatedAt; store.Update does not
@@ -1315,7 +1315,7 @@ func TestMaxAnalyzingAgePropagatesResolveToMctlAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
 	if got := rc.await(t); got != tk.ID {
 		t.Errorf("propagated resolve id = %q, want %q", got, tk.ID)
@@ -1345,18 +1345,18 @@ func TestResolveStaleEscalatedOnlyConfig(t *testing.T) {
 		Summary:  "escalated and forgotten",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(escalated); err != nil {
+	if err := store.Create(ctx, escalated); err != nil {
 		t.Fatal(err)
 	}
 	escalated.Status = ticket.StatusEscalated
-	if err := store.Update(escalated); err != nil {
+	if err := store.Update(ctx, escalated); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, escalated.ID, time.Now().UTC().Add(-30*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
-	got, err := store.Get(escalated.ID)
+	got, err := store.Get(ctx, escalated.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1380,18 +1380,18 @@ func TestResolveStaleEscalatedRespectsThreshold(t *testing.T) {
 		Summary:  "still worth a look",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(fresh); err != nil {
+	if err := store.Create(ctx, fresh); err != nil {
 		t.Fatal(err)
 	}
 	fresh.Status = ticket.StatusEscalated
-	if err := store.Update(fresh); err != nil {
+	if err := store.Update(ctx, fresh); err != nil {
 		t.Fatal(err)
 	}
 	backdate(t, store, fresh.ID, time.Now().UTC().Add(-30*time.Hour))
 
-	p.resolveStale(refreshState{})
+	p.resolveStale(ctx, refreshState{})
 
-	got, err := store.Get(fresh.ID)
+	got, err := store.Get(ctx, fresh.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -31,7 +31,7 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 	// Workflow specific evidence.
 	if t.Type == ticket.TypeWorkflowFailed && t.Service != "" {
 		if wf, err := p.apiClient.GetWorkflow(t.Service); err == nil {
-			_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+			_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 				Type:        "workflow_live_status",
 				Content:     ticket.EvidenceJSON(wf),
 				CollectedAt: now,
@@ -42,7 +42,7 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 	// Status from ArgoCD.
 	if t.Service != "" && t.Type != ticket.TypeWorkflowFailed {
 		if status, err := p.apiClient.GetServiceStatus(t.Tenant, t.Service); err == nil {
-			_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+			_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 				Type:        "argocd_status",
 				Content:     ticket.EvidenceJSON(status),
 				CollectedAt: now,
@@ -52,7 +52,7 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Service config.
 	if config, err := p.apiClient.GetServiceConfig(t.Tenant, t.Service); err == nil && t.Type != ticket.TypeWorkflowFailed {
-		_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "config",
 			Content:     ticket.EvidenceJSON(config),
 			CollectedAt: now,
@@ -61,7 +61,7 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Logs (100 lines, 1 hour).
 	if logs, err := p.apiClient.GetServiceLogs(t.Tenant, t.Service, 100, time.Hour); err == nil {
-		_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "logs",
 			Content:     ticket.EvidenceJSON(logs),
 			CollectedAt: now,
@@ -70,7 +70,7 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Resource usage.
 	if resources, err := p.apiClient.GetResourceUsage(t.Tenant); err == nil {
-		_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "resources",
 			Content:     ticket.EvidenceJSON(resources),
 			CollectedAt: now,
@@ -79,7 +79,7 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Audit log.
 	if audit, err := p.apiClient.ListAudit(); err == nil {
-		_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "audit",
 			Content:     ticket.EvidenceJSON(audit),
 			CollectedAt: now,
@@ -89,8 +89,8 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 // collectHistoricalEvidence adds resolved similar incidents as evidence,
 // giving the LLM context on how this type of issue has been handled before.
-func (p *Pipeline) collectHistoricalEvidence(t *ticket.Ticket) {
-	similar, err := p.store.FindSimilar(t.Type, t.ID, 3)
+func (p *Pipeline) collectHistoricalEvidence(ctx context.Context, t *ticket.Ticket) {
+	similar, err := p.store.FindSimilar(ctx, t.Type, t.ID, 3)
 	if err != nil || len(similar) == 0 {
 		return
 	}
@@ -110,7 +110,7 @@ func (p *Pipeline) collectHistoricalEvidence(t *ticket.Ticket) {
 		}
 	}
 
-	_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+	_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 		Type:        "history",
 		Content:     sb.String(),
 		CollectedAt: time.Now().UTC(),

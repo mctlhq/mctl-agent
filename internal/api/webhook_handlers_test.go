@@ -86,7 +86,7 @@ func TestExternalClaimAndResult(t *testing.T) {
 		Severity: ticket.SeverityWarning,
 		Status:   ticket.StatusOpen,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	webhookStore, err := webhook.NewStore(store.DB(), store.Dialect())
@@ -164,7 +164,7 @@ func TestExternalClaimAndResult(t *testing.T) {
 		t.Fatalf("result status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	updated, err := store.Get(tk.ID)
+	updated, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestExternalClaimRejectsWrongBearerToken(t *testing.T) {
 		Severity: ticket.SeverityWarning,
 		Status:   ticket.StatusOpen,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	webhookStore, err := webhook.NewStore(store.DB(), store.Dialect())

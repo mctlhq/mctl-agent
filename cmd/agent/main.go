@@ -272,21 +272,21 @@ func runDailyDigest(ctx context.Context, store *ticket.Store, tg *notify.Telegra
 		}
 		select {
 		case <-time.After(time.Until(next)):
-			sendDigest(store, tg)
+			sendDigest(ctx, store, tg)
 		case <-ctx.Done():
 			return
 		}
 	}
 }
 
-func sendDigest(store *ticket.Store, tg *notify.Telegram) {
-	open, err := store.ListOpen()
+func sendDigest(ctx context.Context, store *ticket.Store, tg *notify.Telegram) {
+	open, err := store.ListOpen(ctx)
 	if err != nil {
 		slog.Error("daily digest: failed to list open tickets", "error", err)
 		return
 	}
-	resolved, _ := store.CountResolvedInWindow(24)
-	prs, _ := store.CountPRsInWindow(24)
+	resolved, _ := store.CountResolvedInWindow(ctx, 24)
+	prs, _ := store.CountPRsInWindow(ctx, 24)
 	if err := tg.SendDailyDigest(open, resolved, prs); err != nil {
 		slog.Error("daily digest: failed to send", "error", err)
 	}

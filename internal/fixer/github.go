@@ -81,11 +81,11 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 	}
 
 	// Rate limiting.
-	hourCount, err := f.store.CountPRsInWindow(1)
+	hourCount, err := f.store.CountPRsInWindow(ctx, 1)
 	if err != nil {
 		return "", 0, fmt.Errorf("checking hourly PR count: %w", err)
 	}
-	dayCount, err := f.store.CountPRsInWindow(24)
+	dayCount, err := f.store.CountPRsInWindow(ctx, 24)
 	if err != nil {
 		return "", 0, fmt.Errorf("checking daily PR count: %w", err)
 	}

@@ -22,6 +22,10 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
+// ctx is the context this package's store calls run under; nothing here
+// exercises cancellation.
+var ctx = context.Background()
+
 func newTestTicketStore(t *testing.T) *ticket.Store {
 	t.Helper()
 	store, err := ticket.NewStore(context.Background(), ":memory:")
@@ -43,7 +47,7 @@ func seedPRTicket(t *testing.T, store *ticket.Store) {
 		Service: "s",
 		PRURL:   "https://github.com/mctlhq/mctl-gitops/pull/1",
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 }

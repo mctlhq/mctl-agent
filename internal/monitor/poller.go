@@ -21,8 +21,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -72,7 +72,7 @@ func NewPoller(client *mctlclient.Client, store *ticket.Store, onTicket func(*ti
 // `analyzing`. reason is the GC reason that closed the ticket locally, so
 // mctl-api records why each path resolved it. Fire-and-forget: ResolveAlert
 // logs and swallows errors and the poll loop must not block on a remote write.
-func (p *Poller) propagateResolve(id, reason string) {
+func (p *Poller) propagateResolve(ctx context.Context, id, reason string) {
 	if p.client == nil {
 		return
 	}
@@ -84,7 +84,7 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 	slog.Info("poller starting", "interval", interval)
 
 	// Run immediately on start, then on interval.
-	p.poll()
+	p.poll(ctx)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -95,7 +95,7 @@ func (p *Poller) Run(ctx context.Context, interval time.Duration) {
 			slog.Info("poller stopped")
 			return
 		case <-ticker.C:
-			p.poll()
+			p.poll(ctx)
 		}
 	}
 }
@@ -126,12 +126,12 @@ func (rs refreshState) argoRefreshed(tenant, service string) bool {
 	return !rs.failedServices[tenant+"/"+service]
 }
 
-func (p *Poller) poll() {
-	state := p.pollDegraded()
-	p.resolveStale(state)
-	p.pruneOrphans(state)
-	p.reconcileWithAlertManager(context.Background())
-	if breakdown, err := p.store.OpenTicketBreakdown(); err == nil {
+func (p *Poller) poll(ctx context.Context) {
+	state := p.pollDegraded(ctx)
+	p.resolveStale(ctx, state)
+	p.pruneOrphans(ctx, state)
+	p.reconcileWithAlertManager(ctx)
+	if breakdown, err := p.store.OpenTicketBreakdown(ctx); err == nil {
 		metrics.OpenTickets.Reset()
 		for k, v := range breakdown {
 			metrics.OpenTickets.WithLabelValues(k.Status, k.Source).Set(float64(v))
@@ -144,7 +144,7 @@ func (p *Poller) poll() {
 // pollDegraded scans all services for ArgoCD Degraded/Missing health,
 // creating or touching tickets, and returns the refresh outcome for
 // downstream GC gating.
-func (p *Poller) pollDegraded() refreshState {
+func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 	services, err := p.client.ListServices()
 	if err != nil {
 		slog.Error("poller: failed to list services", "error", err)
@@ -181,7 +181,7 @@ func (p *Poller) pollDegraded() refreshState {
 		}
 
 		// Dedup: check for existing open ticket.
-		existing, err := p.store.FindDuplicate(team, app, ticket.TypeArgoCDDegraded)
+		existing, err := p.store.FindDuplicate(ctx, team, app, ticket.TypeArgoCDDegraded)
 		if err != nil {
 			slog.Error("poller: dedup check failed", "error", err)
 			continue
@@ -189,7 +189,7 @@ func (p *Poller) pollDegraded() refreshState {
 		if existing != nil {
 			// Bump UpdatedAt so stale-ticket GC sees the condition is
 			// still active.
-			if err := p.store.Touch(existing.ID); err != nil {
+			if err := p.store.Touch(ctx, existing.ID); err != nil {
 				slog.Error("poller: failed to touch ticket", "error", err, "id", existing.ID)
 			}
 			continue
@@ -204,13 +204,13 @@ func (p *Poller) pollDegraded() refreshState {
 			Severity: ticket.SeverityWarning,
 		}
 
-		if err := p.store.Create(t); err != nil {
+		if err := p.store.Create(ctx, t); err != nil {
 			slog.Error("poller: failed to create ticket", "error", err, "team", team, "app", app)
 			continue
 		}
 
 		// Store status as evidence.
-		_ = p.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "argocd_status",
 			Content:     ticket.EvidenceJSON(status.ArgoCD),
 			CollectedAt: time.Now().UTC(),
@@ -289,13 +289,13 @@ func (p *Poller) eligibleSource(src string) bool {
 // telemetry gap, not real recovery. The other heartbeat-enabled types
 // do not depend on mctl-api reachability and are GC'd purely by
 // UpdatedAt, so a partial poller outage does not block noise cleanup.
-func (p *Poller) resolveStale(state refreshState) {
+func (p *Poller) resolveStale(ctx context.Context, state refreshState) {
 	// Every duration that appears in the thresholds map below must appear here
 	// too, or configuring only that one leaves the whole GC pass short-circuited.
 	if p.StaleAfter <= 0 && p.AnalyzingAfter <= 0 && p.EscalatedAfter <= 0 && p.FixProposedAfter <= 0 && p.MaxAnalyzingAge <= 0 {
 		return
 	}
-	open, err := p.store.ListOpen()
+	open, err := p.store.ListOpen(ctx)
 	if err != nil {
 		slog.Error("poller: failed to list open tickets for stale GC", "error", err)
 		return
@@ -322,14 +322,14 @@ func (p *Poller) resolveStale(state refreshState) {
 					"Auto-resolved: stuck in analyzing for %s (max_age=%s); any re-fire will open a new ticket",
 					age, p.MaxAnalyzingAge,
 				)
-				resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+				resolved, err := p.store.ResolveByIDFromStatus(ctx, t.ID, t.Status, reason)
 				if err != nil {
 					slog.Warn("poller: max-age force-resolve failed", "ticket", t.ID, "err", err)
 					continue
 				}
 				if resolved {
 					metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
-					p.propagateResolve(t.ID, reason)
+					p.propagateResolve(ctx, t.ID, reason)
 					slog.Info("poller: force-resolved stuck analyzing ticket",
 						"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
 						"type", t.Type, "created_at", t.CreatedAt, "age", age)
@@ -365,7 +365,7 @@ func (p *Poller) resolveStale(state refreshState) {
 
 		if t.Status == ticket.StatusOpen {
 			// StatusOpen: existing behavior — no reason appended to analysis.
-			resolved, err := p.store.ResolveByID(t.ID)
+			resolved, err := p.store.ResolveByID(ctx, t.ID)
 			if err != nil {
 				slog.Error("poller: failed to auto-resolve stale ticket",
 					"error", err, "id", t.ID)
@@ -377,7 +377,7 @@ func (p *Poller) resolveStale(state refreshState) {
 				continue
 			}
 			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
-			p.propagateResolve(t.ID, "Auto-resolved by stale TTL GC (status=open)")
+			p.propagateResolve(ctx, t.ID, "Auto-resolved by stale TTL GC (status=open)")
 			slog.Info("poller: auto-resolved stale ticket",
 				"id", t.ID, "tenant", t.Tenant, "service", t.Service,
 				"type", t.Type, "last_updated", t.UpdatedAt, "stale_after", p.StaleAfter)
@@ -386,7 +386,7 @@ func (p *Poller) resolveStale(state refreshState) {
 				"Auto-resolved by stale TTL GC (status=%s, age=%s, threshold=%s)",
 				t.Status, age, cutoff,
 			)
-			resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+			resolved, err := p.store.ResolveByIDFromStatus(ctx, t.ID, t.Status, reason)
 			if err != nil {
 				slog.Warn("poller: stale TTL resolve failed", "ticket", t.ID, "err", err)
 				continue
@@ -397,7 +397,7 @@ func (p *Poller) resolveStale(state refreshState) {
 				continue
 			}
 			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
-			p.propagateResolve(t.ID, reason)
+			p.propagateResolve(ctx, t.ID, reason)
 			slog.Info("poller: stale TTL resolved",
 				"ticket", t.ID, "status", t.Status, "age", age, "threshold", cutoff)
 		}
@@ -427,7 +427,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 		return
 	}
 
-	open, err := p.store.ListOpen()
+	open, err := p.store.ListOpen(ctx)
 	if err != nil {
 		slog.Error("poller: AM reconcile failed to list open tickets", "err", err)
 		return
@@ -471,7 +471,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 			"Auto-resolved by AM reconcile (fingerprints=%s, last_seen_active=%s)",
 			t.AlertFingerprint, t.UpdatedAt.Format(time.RFC3339),
 		)
-		resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+		resolved, err := p.store.ResolveByIDFromStatus(ctx, t.ID, t.Status, reason)
 		if err != nil {
 			slog.Warn("poller: AM reconcile resolve failed", "ticket", t.ID, "err", err)
 			continue
@@ -481,7 +481,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 			continue
 		}
 		metrics.AMReconcileResolved.Inc()
-		p.propagateResolve(t.ID, reason)
+		p.propagateResolve(ctx, t.ID, reason)
 		slog.Info("poller: AM reconcile resolved",
 			"ticket", t.ID, "fingerprint", t.AlertFingerprint,
 			"status", t.Status, "tenant", t.Tenant, "service", t.Service)
@@ -521,7 +521,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 // checks the real AlertManager active-alert fingerprint set instead of
 // a name-inventory heuristic, backstopped by the MaxAnalyzingAge /
 // AnalyzingAfter / FixProposedAfter TTLs for tickets no skill resolves.
-func (p *Poller) pruneOrphans(state refreshState) {
+func (p *Poller) pruneOrphans(ctx context.Context, state refreshState) {
 	if p.OrphanAfter <= 0 {
 		return
 	}
@@ -539,7 +539,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 		return
 	}
 
-	open, err := p.store.ListOpen()
+	open, err := p.store.ListOpen(ctx)
 	if err != nil {
 		slog.Error("poller: failed to list tickets for orphan pruning", "error", err)
 		return
@@ -568,7 +568,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 		}
 
 		const reason = "Auto-resolved: service does not exist (likely synthetic / orphaned alert)"
-		resolved, err := p.store.ResolveByIDFromStatus(t.ID, t.Status, reason)
+		resolved, err := p.store.ResolveByIDFromStatus(ctx, t.ID, t.Status, reason)
 		if err != nil {
 			slog.Warn("poller: orphan prune failed", "ticket", t.ID, "err", err)
 			continue
@@ -578,7 +578,7 @@ func (p *Poller) pruneOrphans(state refreshState) {
 			continue
 		}
 		metrics.OrphanPruned.Inc()
-		p.propagateResolve(t.ID, reason)
+		p.propagateResolve(ctx, t.ID, reason)
 		slog.Info("poller: orphan-pruned",
 			"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
 			"status", t.Status, "age", time.Since(t.UpdatedAt).Round(time.Hour))
