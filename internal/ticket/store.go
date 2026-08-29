@@ -251,29 +251,25 @@ func (s *Store) Update(ctx context.Context, t *Ticket) error {
 	return err
 }
 
-// Get retrieves a ticket by ID, including evidence.
-// UpdateFromStatus is Update with a guard: it applies only while the stored
-// row is still at fromStatus, and reports whether it did.
+// EscalateFromStatus records an escalation, and only the fields an escalation
+// owns: status, analysis and confidence. It applies while the stored row is
+// still at fromStatus, and reports whether it did.
 //
-// Update writes every column unconditionally from an in-memory ticket, which
-// is safe only while nothing else can have moved the row on. That stops being
-// true the moment a write is detached from its caller's cancellation: an
-// AlertManager resolve or a reconcile pass can land in between, and the
-// detached write then puts a stale status — and a stale nil resolved_at —
-// back over a row that had legitimately reached a terminal state, reopening
-// the incident locally and mirroring the wrong status outward.
-func (s *Store) UpdateFromStatus(ctx context.Context, t *Ticket, fromStatus string) (bool, error) {
-	t.UpdatedAt = time.Now().UTC()
-	query := `
-		UPDATE tickets SET source=?, alert_name=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
-			analysis=?, proposed_fix=?, pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?, confidence=?,
-			alert_fingerprint=?, updated_at=?, resolved_at=?
-		WHERE id=? AND status=?`
-
-	res, err := s.db.ExecContext(ctx, s.rebind(query),
-		t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
-		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence,
-		t.AlertFingerprint, t.UpdatedAt, t.ResolvedAt, t.ID, fromStatus,
+// Deliberately NOT a guarded Update. Update rewrites every column from an
+// in-memory ticket, which is safe only while nothing else can have touched the
+// row — and the whole point of a detached write is that it lands after the
+// caller's context is gone, with plenty of room for something else to have
+// touched it. A same-status guard is not enough either: a duplicate firing
+// appends to alert_fingerprint via TouchWithFingerprint without changing
+// status, so a full-row write would pass the guard and revert the fingerprint
+// set. Reconciliation resolves a ticket only when ALL of its fingerprints are
+// absent from the active set, so losing one lets a still-firing incident be
+// closed. Narrow the columns instead of widening the guard.
+func (s *Store) EscalateFromStatus(ctx context.Context, id, fromStatus, status, analysis, confidence string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.rebind(`
+		UPDATE tickets SET status=?, analysis=?, confidence=?, updated_at=?
+		WHERE id=? AND status=?`),
+		status, analysis, confidence, time.Now().UTC(), id, fromStatus,
 	)
 	if err != nil {
 		return false, err
@@ -285,6 +281,32 @@ func (s *Store) UpdateFromStatus(ctx context.Context, t *Ticket, fromStatus stri
 	return n > 0, nil
 }
 
+// RecordPRLinkage stores the PR a fix produced, and advances the status only
+// while the row is still at fromStatus.
+//
+// The asymmetry is deliberate. The PR exists on GitHub whatever the ticket now
+// says, so its coordinates must be recorded unconditionally — losing them
+// leaves an open PR nothing points at. The status is a different matter: if an
+// AlertManager resolve landed while CreatePR was running, that resolution is
+// newer than anything this caller knows, and overwriting it would reopen a
+// closed incident. Columns this caller does not own (alert_fingerprint,
+// resolved_at, analysis) are left alone for the same reason as in
+// EscalateFromStatus.
+func (s *Store) RecordPRLinkage(ctx context.Context, t *Ticket, fromStatus string) error {
+	t.UpdatedAt = time.Now().UTC()
+	_, err := s.db.ExecContext(ctx, s.rebind(`
+		UPDATE tickets SET
+			pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?,
+			status = CASE WHEN status=? THEN ? ELSE status END,
+			updated_at=?
+		WHERE id=?`),
+		t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA,
+		fromStatus, t.Status, t.UpdatedAt, t.ID,
+	)
+	return err
+}
+
+// Get retrieves a ticket by ID, including evidence.
 func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime

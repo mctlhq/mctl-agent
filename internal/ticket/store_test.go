@@ -855,3 +855,88 @@ func TestStoreListAllHonoursItsContext(t *testing.T) {
 		t.Fatalf("ListAll must use the context it is given: want context.Canceled, got %v", err)
 	}
 }
+
+// A same-status guard is not enough on its own: a duplicate firing appends to
+// alert_fingerprint through TouchWithFingerprint without moving the status, so
+// a full-row write would pass the guard and revert the fingerprint set.
+// Reconciliation resolves a ticket only when ALL of its fingerprints are absent
+// from the active set, so losing one lets a still-firing incident be closed
+// (codex P1 on #113).
+func TestStoreEscalateFromStatusLeavesFingerprintsAlone(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: StatusAnalyzing, AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	// A duplicate firing arrives while the fix step is still running.
+	if err := store.TouchWithFingerprint(ctx, tk.ID, "fp-B"); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := store.EscalateFromStatus(ctx, tk.ID, StatusAnalyzing,
+		StatusEscalated, "escalated after timeout", ConfidenceLow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("the escalation should have applied: status was unchanged")
+	}
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusEscalated {
+		t.Errorf("status: want %q, got %q", StatusEscalated, got.Status)
+	}
+	if got.AlertFingerprint != "fp-A,fp-B" {
+		t.Errorf("the escalation must not rewrite the fingerprint set: want %q, got %q",
+			"fp-A,fp-B", got.AlertFingerprint)
+	}
+}
+
+// The PR exists on GitHub whatever the ticket now says, so its coordinates are
+// recorded unconditionally — but a resolution that landed while CreatePR was
+// running is newer than anything the caller knows, and must survive.
+func TestStoreRecordPRLinkageKeepsANewerResolution(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: StatusAnalyzing, AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := store.ResolveByIDFromStatus(ctx, tk.ID, StatusAnalyzing, "resolved meanwhile")
+	if err != nil || !applied {
+		t.Fatalf("setup resolve failed: applied=%v err=%v", applied, err)
+	}
+
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/1"
+	tk.PRNumber = 1
+	tk.Status = StatusFixProposed
+	if err := store.RecordPRLinkage(ctx, tk, StatusAnalyzing); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusResolved {
+		t.Errorf("a newer resolution must survive: want %q, got %q", StatusResolved, got.Status)
+	}
+	if got.ResolvedAt == nil {
+		t.Error("resolved_at was cleared")
+	}
+	if got.PRURL != tk.PRURL || got.PRNumber != 1 {
+		t.Errorf("the PR coordinates must be recorded regardless: got %q #%d", got.PRURL, got.PRNumber)
+	}
+}

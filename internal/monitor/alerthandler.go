@@ -125,7 +125,34 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer batchCancel()
 
 	var firstErr error
+	processed := 0
 	for _, a := range payload.Alerts {
+		// Stop rather than hand the remaining alerts a context that is
+		// already spent. Under sustained store latency the batch budget runs
+		// out partway; continuing would issue store calls that cannot
+		// succeed, adding load to the database that is the reason they are
+		// slow. The 500 below asks AlertManager to redeliver, which is the
+		// backpressure this situation actually calls for.
+		//
+		// The tail of a long batch therefore waits for the store to recover
+		// before it is processed. That is a deliberate trade, not an
+		// oversight: bounding total detached work and giving every alert in an
+		// unbounded batch a full ceiling cannot both hold in a sequential
+		// loop, and unbounded work during a database outage is the worse of
+		// the two. Normal batches never reach this branch — the budget covers
+		// MaxBatchWrite/WriteTimeout alerts at full latency, and far more when
+		// the store is healthy, because a fast alert returns its ceiling
+		// unused.
+		if err := batchCtx.Err(); err != nil {
+			slog.Error("alert batch budget exhausted, deferring the rest to redelivery",
+				"processed", processed, "total", len(payload.Alerts), "error", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("batch budget exhausted after %d/%d alerts: %w",
+					processed, len(payload.Alerts), err)
+			}
+			break
+		}
+
 		// Derived from batchCtx, not from r.Context(): the request's
 		// cancellation is already stripped upstream, and nesting here is what
 		// keeps the two bounds composed rather than competing.
@@ -134,6 +161,7 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			defer cancel()
 			return h.processAlert(ctx, a)
 		}()
+		processed++
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}

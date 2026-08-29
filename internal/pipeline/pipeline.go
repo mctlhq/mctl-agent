@@ -142,27 +142,31 @@ func (p *Pipeline) publishAlert(t *ticket.Ticket) {
 	p.apiClient.PublishAlert(t)
 }
 
-// persist writes a ticket state that records an external side effect which has
-// already happened — a created or merged PR. It deliberately derives a fresh
-// detached context at the call site rather than reusing the diagnosis context:
-// that one may be seconds from its deadline by the time GitHub answers, and a
-// write cancelled there leaves the ticket claiming the opposite of what GitHub
-// now shows, with no PR linkage to find it by.
-func (p *Pipeline) persist(parent context.Context, t *ticket.Ticket) {
+// recordPRLinkage stores the PR a fix produced. It derives a fresh detached
+// context at the call site rather than reusing the diagnosis context: that one
+// may be seconds from its deadline by the time GitHub answers, and a write
+// cancelled there leaves an open PR that nothing points at.
+//
+// fromStatus is the status this caller last saw. The PR coordinates are
+// written unconditionally — the PR exists whatever the ticket now says — while
+// the status advances only if nothing else moved the row on; see
+// Store.RecordPRLinkage.
+func (p *Pipeline) recordPRLinkage(parent context.Context, t *ticket.Ticket, fromStatus string) {
 	ctx, cancel := ctxutil.DetachedWrite(parent)
 	defer cancel()
-	if err := p.store.Update(ctx, t); err != nil {
-		slog.Error("failed to persist ticket state", "ticket", t.ID, "status", t.Status, "error", err)
+	if err := p.store.RecordPRLinkage(ctx, t, fromStatus); err != nil {
+		slog.Error("failed to record PR linkage", "ticket", t.ID, "pr", t.PRURL, "error", err)
 	}
 }
 
 // persistEscalation writes the escalated state only while the row is still at
-// fromStatus. Returns false when something else moved it on, in which case the
-// caller must not mirror or announce an escalation that did not happen.
+// fromStatus, and only the columns an escalation owns. Returns false when
+// something else moved it on, in which case the caller must not mirror or
+// announce an escalation that did not happen.
 func (p *Pipeline) persistEscalation(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
 	ctx, cancel := ctxutil.DetachedWrite(parent)
 	defer cancel()
-	applied, err := p.store.UpdateFromStatus(ctx, t, fromStatus)
+	applied, err := p.store.EscalateFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence)
 	if err != nil {
 		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
 		return false
@@ -637,14 +641,16 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		return
 	}
 
+	fromStatus := t.Status
 	t.PRURL = prURL
 	t.PRNumber = prNumber
 	t.Status = ticket.StatusFixProposed
 	// Detached, and derived only now: the PR exists on GitHub already. If the
 	// diagnosis deadline expired during CreatePR, writing under ctx would
 	// silently drop the PR linkage and leave the ticket looking untouched
-	// while a real PR sits open against it.
-	p.persist(ctx, t)
+	// while a real PR sits open against it. The status half is guarded on
+	// fromStatus so a resolve that landed during CreatePR is not overwritten.
+	p.recordPRLinkage(ctx, t, fromStatus)
 
 	// Sync PR info to mctl-api.
 	p.updateAlert(t)
@@ -663,9 +669,10 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 				_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag,
 					"Auto-merge failed: "+err.Error())
 			} else {
+				mergedFrom := t.Status
 				t.Status = ticket.StatusFixApplied
 				// Same reasoning as above: the merge already happened.
-				p.persist(ctx, t)
+				p.recordPRLinkage(ctx, t, mergedFrom)
 				p.updateAlert(t)
 				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
 			}
