@@ -15,6 +15,7 @@
 package config
 
 import (
+	"log/slog"
 	"os"
 	"strconv"
 	"strings"
@@ -92,9 +93,16 @@ func Load() Config {
 		}
 	}
 
-	autoMergeEnabled := true
-	if v := os.Getenv("AUTO_MERGE_ENABLED"); v == "false" {
-		autoMergeEnabled = false
+	// Opt-in: auto-merge only turns on with the exact string "true". Any
+	// other non-empty value is almost certainly a misconfiguration (e.g.
+	// "1", "TRUE", "yes") rather than an intentional opt-out, so it is
+	// logged rather than silently treated the same as "unset" — a
+	// fail-closed default should not also fail silently.
+	autoMergeEnabled := false
+	if v := os.Getenv("AUTO_MERGE_ENABLED"); v == "true" {
+		autoMergeEnabled = true
+	} else if v != "" {
+		slog.Warn("AUTO_MERGE_ENABLED set to unrecognized value, defaulting to false", "value", v)
 	}
 
 	webhookEnabled := false

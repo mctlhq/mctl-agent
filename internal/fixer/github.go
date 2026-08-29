@@ -27,11 +27,13 @@ import (
 
 // GitHubFixer creates PRs in the GitOps repo via the GitHub API.
 type GitHubFixer struct {
-	client *github.Client
-	owner  string
-	repo   string
-	store  *ticket.Store
-	dryRun bool
+	client       *github.Client
+	owner        string
+	repo         string
+	store        *ticket.Store
+	dryRun       bool
+	maxPRPerHour int
+	maxPRPerDay  int
 }
 
 // NewGitHubFixer creates a new GitHub PR fixer.
@@ -39,17 +41,22 @@ type GitHubFixer struct {
 // tokenFile, when set, is a mounted Secret file re-read before every API call
 // so a rotated GitHub App installation token is picked up without a restart —
 // see tokenSource. When empty, token is used as-is and behaviour is unchanged.
-func NewGitHubFixer(token, tokenFile, owner, repo string, store *ticket.Store, dryRun bool) *GitHubFixer {
+//
+// maxPRPerHour and maxPRPerDay bound how many PRs CreatePR will open in a
+// rolling window; see Config.MaxPRPerHour / Config.MaxPRPerDay.
+func NewGitHubFixer(token, tokenFile, owner, repo string, store *ticket.Store, dryRun bool, maxPRPerHour, maxPRPerDay int) *GitHubFixer {
 	src := newTokenSource(token, tokenFile)
 	client := github.NewClient(&http.Client{
 		Transport: &authTransport{base: http.DefaultTransport, src: src},
 	})
 	return &GitHubFixer{
-		client: client,
-		owner:  owner,
-		repo:   repo,
-		store:  store,
-		dryRun: dryRun,
+		client:       client,
+		owner:        owner,
+		repo:         repo,
+		store:        store,
+		dryRun:       dryRun,
+		maxPRPerHour: maxPRPerHour,
+		maxPRPerDay:  maxPRPerDay,
 	}
 }
 
@@ -82,11 +89,11 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 	if err != nil {
 		return "", 0, fmt.Errorf("checking daily PR count: %w", err)
 	}
-	if hourCount >= 5 {
-		return "", 0, fmt.Errorf("hourly PR limit reached (%d/5)", hourCount)
+	if hourCount >= f.maxPRPerHour {
+		return "", 0, fmt.Errorf("hourly PR limit reached (%d/%d)", hourCount, f.maxPRPerHour)
 	}
-	if dayCount >= 20 {
-		return "", 0, fmt.Errorf("daily PR limit reached (%d/20)", dayCount)
+	if dayCount >= f.maxPRPerDay {
+		return "", 0, fmt.Errorf("daily PR limit reached (%d/%d)", dayCount, f.maxPRPerDay)
 	}
 
 	branchName := fmt.Sprintf("agent/fix/%s/%s-%s-%d",
