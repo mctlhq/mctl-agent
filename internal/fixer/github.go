@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-github/v68/github"
+	"github.com/mctlhq/mctl-agent/internal/gitopspath"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -34,6 +35,7 @@ type GitHubFixer struct {
 	dryRun       bool
 	maxPRPerHour int
 	maxPRPerDay  int
+	allowlist    gitopspath.Allowlist
 }
 
 // NewGitHubFixer creates a new GitHub PR fixer.
@@ -44,7 +46,11 @@ type GitHubFixer struct {
 //
 // maxPRPerHour and maxPRPerDay bound how many PRs CreatePR will open in a
 // rolling window; see Config.MaxPRPerHour / Config.MaxPRPerDay.
-func NewGitHubFixer(token, tokenFile, owner, repo string, store *ticket.Store, dryRun bool, maxPRPerHour, maxPRPerDay int) *GitHubFixer {
+//
+// allowlist bounds every path GetFileContent/CreatePR are allowed to read or
+// write, independent of what validation (if any) ran upstream — see
+// Config.GitOpsPathAllowlist.
+func NewGitHubFixer(token, tokenFile, owner, repo string, store *ticket.Store, dryRun bool, maxPRPerHour, maxPRPerDay int, allowlist gitopspath.Allowlist) *GitHubFixer {
 	src := newTokenSource(token, tokenFile)
 	client := github.NewClient(&http.Client{
 		Transport: &authTransport{base: http.DefaultTransport, src: src},
@@ -57,6 +63,7 @@ func NewGitHubFixer(token, tokenFile, owner, repo string, store *ticket.Store, d
 		dryRun:       dryRun,
 		maxPRPerHour: maxPRPerHour,
 		maxPRPerDay:  maxPRPerDay,
+		allowlist:    allowlist,
 	}
 }
 
@@ -96,6 +103,13 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 		return "", 0, fmt.Errorf("daily PR limit reached (%d/%d)", dayCount, f.maxPRPerDay)
 	}
 
+	// Path allowlist check — the outermost boundary right before any
+	// GitHub API call, independent of whether an upstream caller already
+	// validated the path (defense in depth).
+	if err := f.allowlist.Validate(req.FilePath); err != nil {
+		return "", 0, fmt.Errorf("gitops path rejected: %w", err)
+	}
+
 	branchName := fmt.Sprintf("agent/fix/%s/%s-%s-%d",
 		req.Ticket.Service, req.Ticket.Type,
 		req.Ticket.ID[:8], time.Now().Unix())
@@ -121,6 +135,9 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 		&github.RepositoryContentGetOptions{Ref: "main"})
 	if err != nil {
 		return "", 0, fmt.Errorf("getting file content: %w", err)
+	}
+	if fileContent.GetType() == "symlink" {
+		return "", 0, fmt.Errorf("refusing to write %s: existing blob is a symlink", req.FilePath)
 	}
 
 	// 4. Update file on branch.
@@ -199,12 +216,27 @@ func (f *GitHubFixer) ClosePR(ctx context.Context, prNumber int, reason string) 
 	return err
 }
 
+// ValidatePath checks candidate against the configured path allowlist
+// without making any GitHub API call. It lets a caller such as the pipeline
+// reject an invalid path up front, before GetFileContent/CreatePR's own
+// (defense-in-depth) check, so it can surface a caller-specific failure path.
+func (f *GitHubFixer) ValidatePath(candidate string) error {
+	return f.allowlist.Validate(candidate)
+}
+
 // GetFileContent fetches a file from the repo.
 func (f *GitHubFixer) GetFileContent(ctx context.Context, path, ref string) (string, error) {
+	if err := f.allowlist.Validate(path); err != nil {
+		return "", fmt.Errorf("gitops path rejected: %w", err)
+	}
+
 	fileContent, _, _, err := f.client.Repositories.GetContents(ctx, f.owner, f.repo, path,
 		&github.RepositoryContentGetOptions{Ref: ref})
 	if err != nil {
 		return "", err
+	}
+	if fileContent.GetType() == "symlink" {
+		return "", fmt.Errorf("refusing to read %s: blob is a symlink", path)
 	}
 	content, err := fileContent.GetContent()
 	if err != nil {

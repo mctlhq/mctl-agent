@@ -33,6 +33,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/capability"
 	"github.com/mctlhq/mctl-agent/internal/config"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/gitopspath"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/monitor"
 	"github.com/mctlhq/mctl-agent/internal/notify"
@@ -67,7 +68,7 @@ func main() {
 
 	// Initialize components.
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)
-	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubTokenFile, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun, cfg.MaxPRPerHour, cfg.MaxPRPerDay)
+	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubTokenFile, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun, cfg.MaxPRPerHour, cfg.MaxPRPerDay, gitopspath.NewAllowlist(cfg.GitOpsPathAllowlist))
 	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.OpenClawBotUsername, cfg.TelegramTenantChatIDs)
 	var webhookStore *webhook.Store
 	var webhookDispatcher *webhook.Dispatcher

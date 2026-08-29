@@ -526,6 +526,22 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		filePath = fixer.DetectFilePath(t.Tenant, t.Service)
 	}
 
+	// Reject any path outside the configured gitops allowlist before ever
+	// reading or writing it. GetFileContent/CreatePR enforce the same check
+	// again (defense in depth), but validating here lets a rejection be
+	// surfaced through the same "patch generation failed" path as other
+	// fix-generation errors, rather than the read-failure escalation below.
+	if err := p.github.ValidatePath(filePath); err != nil {
+		log.Warn("rejected gitops path", "skill", s.Name(), "ticket", t.ID, "path", filePath, "error", err)
+		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+			"Fix identified but patch generation failed: "+err.Error())
+		t.Status = ticket.StatusFixProposed
+		_ = p.store.Update(ctx, t)
+		p.updateAlert(t)
+		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
+		return
+	}
+
 	// Get current file content from GitOps repo.
 	content, err := p.github.GetFileContent(ctx, filePath, "main")
 	if err != nil {

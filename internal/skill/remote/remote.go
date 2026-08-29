@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -121,13 +122,46 @@ type Skill struct {
 }
 
 // New creates a remote skill from a registration.
+//
+// The client's Transport dials through guardedDialContext, which re-checks
+// the resolved connection IP against the same denied ranges
+// ValidateRegistration enforces at registration time. This closes the DNS
+// rebinding gap: an endpoint could resolve to a public IP at registration
+// and be repointed to a private/loopback/CGNAT address before the next
+// /match, /diagnose, or /fix call — the dialer refuses that connection
+// regardless of what registration-time validation saw.
 func New(reg Registration) *Skill {
 	return &Skill{
 		reg: reg,
 		client: &http.Client{
 			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				DialContext: guardedDialContext,
+			},
 		},
 	}
+}
+
+// guardedDialContext wraps the default dialer and refuses to connect if the
+// resolved address is in a denied range (loopback/private/link-local/CGNAT).
+// This covers both the initial request and any redirect the endpoint issues,
+// since http.Transport re-invokes DialContext for each connection it opens.
+func guardedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	ips, err := resolveHost(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	for _, ip := range ips {
+		if isDeniedIP(ip) {
+			return nil, fmt.Errorf("refusing to dial %s: resolved address %s is disallowed", addr, ip)
+		}
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, network, addr)
 }
 
 func (s *Skill) Name() string        { return s.reg.Name }
@@ -286,6 +320,9 @@ func (m *Manager) Register(reg Registration) error {
 	}
 	if reg.Version == "" {
 		reg.Version = "1.0.0"
+	}
+	if err := ValidateRegistration(reg); err != nil {
+		return err
 	}
 
 	s := New(reg)
