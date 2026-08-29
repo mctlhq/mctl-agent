@@ -8,7 +8,8 @@ import (
 func TestLoadDefaults(t *testing.T) {
 	// Clear env vars that might be set.
 	envVars := []string{"PORT", "MCTL_API_URL", "GITHUB_OWNER", "GITHUB_REPO",
-		"POLL_INTERVAL", "DRY_RUN", "DB_PATH", "MAX_PR_PER_HOUR", "MAX_PR_PER_DAY"}
+		"POLL_INTERVAL", "DRY_RUN", "DB_PATH", "MAX_PR_PER_HOUR", "MAX_PR_PER_DAY",
+		"AUTO_MERGE_ENABLED"}
 	for _, k := range envVars {
 		t.Setenv(k, "")
 	}
@@ -41,6 +42,31 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.MaxPRPerDay != 20 {
 		t.Errorf("MaxPRPerDay = %d, want 20", cfg.MaxPRPerDay)
+	}
+	if cfg.AutoMergeEnabled {
+		t.Error("AutoMergeEnabled should default to false")
+	}
+}
+
+func TestLoadAutoMergeEnabled(t *testing.T) {
+	tests := []struct {
+		envVal string
+		want   bool
+	}{
+		{"true", true},
+		{"false", false},
+		{"1", false},
+		{"", false},
+		{"TRUE", false},
+	}
+	for _, tt := range tests {
+		t.Run("AUTO_MERGE_ENABLED="+tt.envVal, func(t *testing.T) {
+			t.Setenv("AUTO_MERGE_ENABLED", tt.envVal)
+			cfg := Load()
+			if cfg.AutoMergeEnabled != tt.want {
+				t.Errorf("AutoMergeEnabled = %v, want %v", cfg.AutoMergeEnabled, tt.want)
+			}
+		})
 	}
 }
 
