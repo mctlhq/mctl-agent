@@ -72,7 +72,13 @@ func NewPoller(client *mctlclient.Client, store *ticket.Store, onTicket func(*ti
 // `analyzing`. reason is the GC reason that closed the ticket locally, so
 // mctl-api records why each path resolved it. Fire-and-forget: ResolveAlert
 // logs and swallows errors and the poll loop must not block on a remote write.
-func (p *Poller) propagateResolve(ctx context.Context, id, reason string) {
+// propagateResolve deliberately takes no context. The work is a fire-and-forget
+// POST to mctl-api whose client carries its own 15s timeout, so there is
+// nothing here for a caller's cancellation to bound; accepting a ctx and
+// ignoring it would be the same defect review caught in ListAll, dressed up as
+// propagation. Threading one properly means giving mctlclient.ResolveAlert a
+// context, which is a separate change.
+func (p *Poller) propagateResolve(id, reason string) {
 	if p.client == nil {
 		return
 	}
@@ -329,7 +335,7 @@ func (p *Poller) resolveStale(ctx context.Context, state refreshState) {
 				}
 				if resolved {
 					metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
-					p.propagateResolve(ctx, t.ID, reason)
+					p.propagateResolve(t.ID, reason)
 					slog.Info("poller: force-resolved stuck analyzing ticket",
 						"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
 						"type", t.Type, "created_at", t.CreatedAt, "age", age)
@@ -377,7 +383,7 @@ func (p *Poller) resolveStale(ctx context.Context, state refreshState) {
 				continue
 			}
 			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
-			p.propagateResolve(ctx, t.ID, "Auto-resolved by stale TTL GC (status=open)")
+			p.propagateResolve(t.ID, "Auto-resolved by stale TTL GC (status=open)")
 			slog.Info("poller: auto-resolved stale ticket",
 				"id", t.ID, "tenant", t.Tenant, "service", t.Service,
 				"type", t.Type, "last_updated", t.UpdatedAt, "stale_after", p.StaleAfter)
@@ -397,7 +403,7 @@ func (p *Poller) resolveStale(ctx context.Context, state refreshState) {
 				continue
 			}
 			metrics.StaleTTLResolved.WithLabelValues(string(t.Status)).Inc()
-			p.propagateResolve(ctx, t.ID, reason)
+			p.propagateResolve(t.ID, reason)
 			slog.Info("poller: stale TTL resolved",
 				"ticket", t.ID, "status", t.Status, "age", age, "threshold", cutoff)
 		}
@@ -481,7 +487,7 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 			continue
 		}
 		metrics.AMReconcileResolved.Inc()
-		p.propagateResolve(ctx, t.ID, reason)
+		p.propagateResolve(t.ID, reason)
 		slog.Info("poller: AM reconcile resolved",
 			"ticket", t.ID, "fingerprint", t.AlertFingerprint,
 			"status", t.Status, "tenant", t.Tenant, "service", t.Service)
@@ -578,7 +584,7 @@ func (p *Poller) pruneOrphans(ctx context.Context, state refreshState) {
 			continue
 		}
 		metrics.OrphanPruned.Inc()
-		p.propagateResolve(ctx, t.ID, reason)
+		p.propagateResolve(t.ID, reason)
 		slog.Info("poller: orphan-pruned",
 			"ticket", t.ID, "tenant", t.Tenant, "service", t.Service,
 			"status", t.Status, "age", time.Since(t.UpdatedAt).Round(time.Hour))

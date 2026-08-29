@@ -117,15 +117,26 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//
 	// Processing continues past the first failure so one bad alert does not
 	// hide the rest of the batch; the first error is what gets reported.
-	// Deliberately not r.Context(): see ctxutil.DetachedWrite. AlertManager
-	// hangs up on its own deadline, and a ticket write cancelled halfway is
-	// worse than one finished after the caller stopped listening.
-	ctx, cancel := ctxutil.DetachedWrite(r.Context())
-	defer cancel()
-
 	var firstErr error
 	for _, a := range payload.Alerts {
-		if err := h.processAlert(ctx, a); err != nil && firstErr == nil {
+		// Deliberately not r.Context(): see ctxutil.DetachedWrite.
+		// AlertManager hangs up on its own deadline, and a ticket write
+		// cancelled halfway is worse than one finished after the caller
+		// stopped listening.
+		//
+		// Per alert, not per batch. One deadline spanning the whole batch is
+		// a budget the earlier alerts spend: under sustained database latency
+		// a long batch exhausts it partway, and every alert after that point
+		// fails instantly. Redelivery preserves order, so the same early
+		// alerts consume the same budget on every retry and the tail can
+		// starve indefinitely. A per-alert ceiling bounds each unit of work
+		// on its own terms, which is what the ceiling was for.
+		err := func() error {
+			ctx, cancel := ctxutil.DetachedWrite(r.Context())
+			defer cancel()
+			return h.processAlert(ctx, a)
+		}()
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

@@ -187,9 +187,14 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	if t.Confidence == "" {
 		t.Confidence = ticket.ConfidenceLow
 	}
-	if err := p.store.Update(ctx, t); err != nil {
-		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
-	}
+	// Detached: escalation is a TERMINAL state, and the path that reaches it
+	// most often is a fix step (GetFileContent, CreatePR) that failed because
+	// the 15-minute diagnosis deadline expired — so ctx is already cancelled
+	// by the time we get here. Writing under it fails instantly while the rest
+	// of escalate still mirrors to mctl-api and emits the external event,
+	// leaving the ticket stuck in `analyzing` and disagreeing with everything
+	// downstream that was told it escalated.
+	p.persist(ctx, t)
 	// Mirror to mctl-api. Without this the incident there keeps the status it
 	// was published with (analyzing), which is what MCP and the dashboards read.
 	p.updateAlert(t)

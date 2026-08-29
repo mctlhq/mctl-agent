@@ -150,3 +150,36 @@ func TestTriggerAnalysisRejectsCancelledContext(t *testing.T) {
 		t.Fatalf("no ticket should have been created, got %d", len(open))
 	}
 }
+
+// Escalation is a terminal state, and the path that reaches it most often is a
+// fix step that failed because the diagnosis deadline expired — so escalate is
+// routinely called with an already-cancelled context. Writing the terminal
+// status under it fails instantly while the rest of escalate still mirrors to
+// mctl-api and emits the external event, leaving the ticket stuck in
+// `analyzing` and disagreeing with everything downstream (codex P2 on #112).
+func TestEscalatePersistsUnderAnExpiredContext(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p.escalate(expired, tk, "[escalated] the fix step ran out of time", nil)
+
+	got, err := store.Get(context.Background(), tk.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != ticket.StatusEscalated {
+		t.Errorf("the terminal escalation must be persisted even when the caller's context is spent: want %q, got %q",
+			ticket.StatusEscalated, got.Status)
+	}
+}

@@ -101,7 +101,7 @@ func isImageBlockKey(trimmed string) bool {
 //
 // Known limitations (deliberately deferred — neither shape exists in
 // today's mctl-gitops; revisit if a future values file regresses):
-//   - `tag: ""` / `tag: ''` (empty quoted) is treated as no-tag.
+//   - `tag: ""` / `tag: ”` (empty quoted) is treated as no-tag.
 //     Helm sometimes uses this when defaults supply the effective tag,
 //     but rollback has nothing to roll back to in that case anyway.
 //   - If the SHALLOWEST `image:` block has no direct `tag:` child but
