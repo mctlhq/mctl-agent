@@ -18,6 +18,12 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
+// ctx is the context the store calls in this package's tests run under. The
+// store API takes one now; nothing here exercises cancellation, so a single
+// background context keeps the call sites readable. Tests that need their own
+// context shadow this with a local one.
+var ctx = context.Background()
+
 func TestQuietAlertPolicy_RecordingRulesNoData(t *testing.T) {
 	for _, alertName := range []string{
 		quietAlertRecordingRulesNoData,
@@ -104,11 +110,11 @@ func newAnalyzingTicket(t *testing.T, store *ticket.Store) *ticket.Ticket {
 		Summary:   "Degraded for 30m",
 		Severity:  ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	tk.Status = ticket.StatusAnalyzing
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	return tk
@@ -122,7 +128,7 @@ func TestEscalateLeavesAnalyzing(t *testing.T) {
 
 	p.escalate(context.Background(), tk, "Escalated: no skill matched this ticket", nil)
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,13 +150,13 @@ func TestEscalateAppendsToExistingAnalysis(t *testing.T) {
 	tk := newAnalyzingTicket(t, store)
 	tk.Analysis = "root-app has a Degraded CronJob in its tree"
 	tk.Confidence = ticket.ConfidenceHigh
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
 	p.escalate(context.Background(), tk, "[escalated] Infrastructure-scope alert", nil)
 
-	got, err := store.Get(tk.ID)
+	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +180,7 @@ func TestEscalatedTicketStaysInListOpen(t *testing.T) {
 
 	p.escalate(context.Background(), tk, "Escalated: no skill matched", nil)
 
-	open, err := store.ListOpen()
+	open, err := store.ListOpen(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +301,7 @@ func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
 
 			p.handleHighConfidenceFix(context.Background(), tk, tc.s, diag, slog.Default())
 
-			got, err := store.Get(tk.ID)
+			got, err := store.Get(ctx, tk.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -345,13 +351,13 @@ func TestPublishAlertCarriesAnalyzingStatus(t *testing.T) {
 		Summary:   "Degraded for 30m",
 		Severity:  ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
 	// The two statements processTicketSync runs, in the order it runs them.
 	tk.Status = ticket.StatusAnalyzing
-	if err := store.Update(tk); err != nil {
+	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 	p.publishAlert(tk)

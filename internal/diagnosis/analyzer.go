@@ -30,8 +30,8 @@ import (
 
 // Analyzer collects evidence and diagnoses tickets.
 type Analyzer struct {
-	apiClient   *mctlclient.Client
-	store       *ticket.Store
+	apiClient    *mctlclient.Client
+	store        *ticket.Store
 	anthropicKey string
 }
 
@@ -64,7 +64,7 @@ func (a *Analyzer) Analyze(ctx context.Context, t *ticket.Ticket) (*DiagnosisRes
 	a.collectEvidence(ctx, t)
 
 	// Reload ticket with evidence.
-	t, err := a.store.Get(t.ID)
+	t, err := a.store.Get(ctx, t.ID)
 	if err != nil {
 		return nil, fmt.Errorf("reloading ticket: %w", err)
 	}
@@ -113,7 +113,7 @@ func (a *Analyzer) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 	// Workflow specific evidence.
 	if t.Type == ticket.TypeWorkflowFailed && t.Service != "" {
 		if wf, err := a.apiClient.GetWorkflow(t.Service); err == nil {
-			_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+			_ = a.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 				Type:        "workflow_live_status",
 				Content:     ticket.EvidenceJSON(wf),
 				CollectedAt: now,
@@ -124,7 +124,7 @@ func (a *Analyzer) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 	// Status from ArgoCD.
 	if t.Service != "" && t.Type != ticket.TypeWorkflowFailed {
 		if status, err := a.apiClient.GetServiceStatus(t.Tenant, t.Service); err == nil {
-			_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+			_ = a.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 				Type:        "argocd_status",
 				Content:     ticket.EvidenceJSON(status),
 				CollectedAt: now,
@@ -134,7 +134,7 @@ func (a *Analyzer) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Service config.
 	if config, err := a.apiClient.GetServiceConfig(t.Tenant, t.Service); err == nil {
-		_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = a.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "config",
 			Content:     ticket.EvidenceJSON(config),
 			CollectedAt: now,
@@ -143,7 +143,7 @@ func (a *Analyzer) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Logs (100 lines, 1 hour).
 	if logs, err := a.apiClient.GetServiceLogs(t.Tenant, t.Service, 100, time.Hour); err == nil {
-		_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = a.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "logs",
 			Content:     ticket.EvidenceJSON(logs),
 			CollectedAt: now,
@@ -152,7 +152,7 @@ func (a *Analyzer) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Resource usage.
 	if resources, err := a.apiClient.GetResourceUsage(t.Tenant); err == nil {
-		_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = a.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "resources",
 			Content:     ticket.EvidenceJSON(resources),
 			CollectedAt: now,
@@ -161,7 +161,7 @@ func (a *Analyzer) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 
 	// Audit log.
 	if audit, err := a.apiClient.ListAudit(); err == nil {
-		_ = a.store.AddEvidence(t.ID, ticket.Evidence{
+		_ = a.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 			Type:        "audit",
 			Content:     ticket.EvidenceJSON(audit),
 			CollectedAt: now,

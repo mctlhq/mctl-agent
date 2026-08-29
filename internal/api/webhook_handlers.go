@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
@@ -140,7 +141,7 @@ func externalClaimHandler(ticketStore *ticket.Store, webhookStore *webhook.Store
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid callback auth"})
 			return
 		}
-		if _, err := ticketStore.Get(ticketID); err != nil {
+		if _, err := ticketStore.Get(r.Context(), ticketID); err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "ticket not found"})
 			return
 		}
@@ -228,7 +229,7 @@ func externalResultHandler(ticketStore *ticket.Store, webhookStore *webhook.Stor
 			writeJSON(w, http.StatusConflict, map[string]string{"error": "claim already completed"})
 			return
 		}
-		tk, err := ticketStore.Get(ticketID)
+		tk, err := ticketStore.Get(r.Context(), ticketID)
 		if err != nil {
 			writeJSON(w, http.StatusNotFound, map[string]string{"error": "ticket not found"})
 			return
@@ -264,7 +265,12 @@ func externalResultHandler(ticketStore *ticket.Store, webhookStore *webhook.Stor
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid result status"})
 			return
 		}
-		if err := ticketStore.Update(tk); err != nil {
+		// Detached: the external agent's result is already in hand and the
+		// claim is completed from it a few lines below. A write cancelled
+		// because that agent hung up would leave ticket and claim disagreeing.
+		writeCtx, cancelWrite := ctxutil.DetachedWrite(r.Context())
+		defer cancelWrite()
+		if err := ticketStore.Update(writeCtx, tk); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 			return
 		}

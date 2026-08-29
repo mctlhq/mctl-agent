@@ -16,6 +16,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// ctx is the context the store calls in this package's tests run under. The
+// store API takes one now; nothing here exercises cancellation, so a single
+// background context keeps 100+ call sites readable. Tests that need their
+// own context shadow this with a local one.
+var ctx = context.Background()
+
 func newTestStore(t *testing.T) *ticket.Store {
 	t.Helper()
 	store, err := ticket.NewStore(context.Background(), ":memory:")
@@ -95,7 +101,7 @@ func TestTicketListEndpoint(t *testing.T) {
 		Service:  "etl",
 		Severity: ticket.SeverityWarning,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,12 +146,12 @@ func TestTicketListEndpointFilters(t *testing.T) {
 			Service:  service,
 			Severity: ticket.SeverityWarning,
 		}
-		if err := store.Create(tk); err != nil {
+		if err := store.Create(ctx, tk); err != nil {
 			t.Fatal(err)
 		}
 		if status != ticket.StatusOpen {
 			tk.Status = status
-			if err := store.Update(tk); err != nil {
+			if err := store.Update(ctx, tk); err != nil {
 				t.Fatal(err)
 			}
 		}

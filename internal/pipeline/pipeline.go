@@ -172,7 +172,7 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	if t.Confidence == "" {
 		t.Confidence = ticket.ConfidenceLow
 	}
-	if err := p.store.Update(t); err != nil {
+	if err := p.store.Update(ctx, t); err != nil {
 		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
 	}
 	// Mirror to mctl-api. Without this the incident there keeps the status it
@@ -223,7 +223,7 @@ func (p *Pipeline) TriggerAnalysis(ctx context.Context, team, service, reason st
 		return nil, err
 	}
 
-	if err := p.store.Create(t); err != nil {
+	if err := p.store.Create(ctx, t); err != nil {
 		return nil, fmt.Errorf("creating ticket: %w", err)
 	}
 
@@ -286,7 +286,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	// receiving `open` with nothing to correct it — leaving every incident
 	// reading `open` for the whole diagnosis, however long that took.
 	t.Status = ticket.StatusAnalyzing
-	if err := p.store.Update(t); err != nil {
+	if err := p.store.Update(ctx, t); err != nil {
 		log.Error("failed to update ticket status", "error", err)
 		return
 	}
@@ -297,10 +297,10 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 
 	// Collect evidence.
 	p.collectEvidence(ctx, t)
-	p.collectHistoricalEvidence(t)
+	p.collectHistoricalEvidence(ctx, t)
 
 	// Reload ticket with evidence.
-	t, err := p.store.Get(t.ID)
+	t, err := p.store.Get(ctx, t.ID)
 	if err != nil {
 		log.Error("failed to reload ticket", "error", err)
 		return
@@ -405,7 +405,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
 			}
 			t.Status = ticket.StatusFixProposed
-			_ = p.store.Update(t)
+			_ = p.store.Update(ctx, t)
 			p.updateAlert(t)
 			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 			return
@@ -485,7 +485,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		t.Status = ticket.StatusFixProposed
-		_ = p.store.Update(t)
+		_ = p.store.Update(ctx, t)
 		p.updateAlert(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
@@ -558,7 +558,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+patchErr.Error())
 		t.Status = ticket.StatusFixProposed
-		_ = p.store.Update(t)
+		_ = p.store.Update(ctx, t)
 		p.updateAlert(t)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
@@ -592,7 +592,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	t.PRURL = prURL
 	t.PRNumber = prNumber
 	t.Status = ticket.StatusFixProposed
-	_ = p.store.Update(t)
+	_ = p.store.Update(ctx, t)
 
 	// Sync PR info to mctl-api.
 	p.updateAlert(t)
@@ -612,7 +612,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 					"Auto-merge failed: "+err.Error())
 			} else {
 				t.Status = ticket.StatusFixApplied
-				_ = p.store.Update(t)
+				_ = p.store.Update(ctx, t)
 				p.updateAlert(t)
 				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
 			}

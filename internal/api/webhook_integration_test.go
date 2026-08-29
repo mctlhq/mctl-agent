@@ -29,7 +29,7 @@ func TestExternalWebhookEndToEnd(t *testing.T) {
 		Severity: ticket.SeverityWarning,
 		Status:   ticket.StatusAnalyzing,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -151,7 +151,7 @@ func TestExternalWebhookEndToEnd(t *testing.T) {
 		t.Fatalf("result status=%d body=%s", rec.Code, rec.Body.String())
 	}
 
-	updated, err := store.Get(tk.ID)
+	updated, err := store.Get(ctx, tk.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

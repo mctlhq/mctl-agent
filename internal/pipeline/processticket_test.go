@@ -94,7 +94,7 @@ func TestProcessTicketDoesNotBlockCallerWhenSaturated(t *testing.T) {
 		Severity: ticket.SeverityWarning,
 		Status:   ticket.StatusOpen,
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,7 +140,9 @@ func TestTriggerAnalysisRejectsCancelledContext(t *testing.T) {
 	if _, err := p.TriggerAnalysis(ctx, "argocd", "root-app", "manual"); err == nil {
 		t.Fatal("expected an error for a cancelled caller context")
 	}
-	open, err := store.ListOpen()
+	// Not the cancelled ctx above: the assertion is about what the store
+	// holds, not about honouring the caller's cancellation.
+	open, err := store.ListOpen(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

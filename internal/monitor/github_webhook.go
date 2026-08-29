@@ -15,6 +15,7 @@
 package monitor
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -94,13 +96,15 @@ func (h *GitHubWebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	h.processWorkflowRun(event)
+	ctx, cancel := ctxutil.DetachedWrite(r.Context())
+	defer cancel()
+	h.processWorkflowRun(ctx, event)
 
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"accepted"}`))
 }
 
-func (h *GitHubWebhookHandler) processWorkflowRun(event workflowRunEvent) {
+func (h *GitHubWebhookHandler) processWorkflowRun(ctx context.Context, event workflowRunEvent) {
 	if event.Action != "completed" || event.WorkflowRun.Conclusion != "failure" {
 		return
 	}
@@ -120,7 +124,7 @@ func (h *GitHubWebhookHandler) processWorkflowRun(event workflowRunEvent) {
 	}
 
 	// Dedup check.
-	existing, err := h.store.FindDuplicate(tenant, service, ticket.TypeGitHubActionsFailed)
+	existing, err := h.store.FindDuplicate(ctx, tenant, service, ticket.TypeGitHubActionsFailed)
 	if err != nil {
 		slog.Error("dedup check failed for github webhook", "error", err)
 	}
@@ -128,7 +132,7 @@ func (h *GitHubWebhookHandler) processWorkflowRun(event workflowRunEvent) {
 		// Bump UpdatedAt so the stale-ticket GC recognizes the failure
 		// is still recurring; otherwise a workflow that keeps failing
 		// on every push would silently auto-resolve after StaleAfter.
-		if err := h.store.Touch(existing.ID); err != nil {
+		if err := h.store.Touch(ctx, existing.ID); err != nil {
 			slog.Error("failed to touch github webhook ticket", "error", err, "id", existing.ID)
 		}
 		slog.Debug("duplicate GitHub Actions ticket exists", "id", existing.ID, "repo", repo)
@@ -147,7 +151,7 @@ func (h *GitHubWebhookHandler) processWorkflowRun(event workflowRunEvent) {
 		Severity: ticket.SeverityWarning,
 	}
 
-	if err := h.store.Create(t); err != nil {
+	if err := h.store.Create(ctx, t); err != nil {
 		slog.Error("failed to create ticket from github webhook", "error", err, "repo", repo)
 		return
 	}
@@ -161,7 +165,7 @@ func (h *GitHubWebhookHandler) processWorkflowRun(event workflowRunEvent) {
 		"run_url":  runURL,
 	}
 	evJSON, _ := json.Marshal(evidence)
-	_ = h.store.AddEvidence(t.ID, ticket.Evidence{
+	_ = h.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 		Type:        "github_workflow_run",
 		Content:     string(evJSON),
 		CollectedAt: time.Now().UTC(),

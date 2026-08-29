@@ -15,6 +15,7 @@
 package monitor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -24,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -34,12 +36,12 @@ import (
 // cannot be exercised against a real *ticket.Store, where the only way to
 // provoke an error (closing the database) fails every alert at once.
 type alertStore interface {
-	ResolveByTenantService(tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error)
-	FindDuplicate(tenant, service, ticketType string) (*ticket.Ticket, error)
-	TouchWithFingerprint(id, fingerprint string) error
-	FindRecentlyResolved(tenant, service, ticketType, alertName string, window time.Duration) (*ticket.Ticket, error)
-	Create(t *ticket.Ticket) error
-	AddEvidence(ticketID string, e ticket.Evidence) error
+	ResolveByTenantService(ctx context.Context, tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error)
+	FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*ticket.Ticket, error)
+	TouchWithFingerprint(ctx context.Context, id, fingerprint string) error
+	FindRecentlyResolved(ctx context.Context, tenant, service, ticketType, alertName string, window time.Duration) (*ticket.Ticket, error)
+	Create(ctx context.Context, t *ticket.Ticket) error
+	AddEvidence(ctx context.Context, ticketID string, e ticket.Evidence) error
 }
 
 // AlertHandler receives AlertManager webhooks and creates tickets.
@@ -115,9 +117,15 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//
 	// Processing continues past the first failure so one bad alert does not
 	// hide the rest of the batch; the first error is what gets reported.
+	// Deliberately not r.Context(): see ctxutil.DetachedWrite. AlertManager
+	// hangs up on its own deadline, and a ticket write cancelled halfway is
+	// worse than one finished after the caller stopped listening.
+	ctx, cancel := ctxutil.DetachedWrite(r.Context())
+	defer cancel()
+
 	var firstErr error
 	for _, a := range payload.Alerts {
-		if err := h.processAlert(a); err != nil && firstErr == nil {
+		if err := h.processAlert(ctx, a); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
@@ -136,7 +144,7 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // an error only for failures that a retry could fix — i.e. store failures —
 // so ServeHTTP can ask AlertManager to redeliver. Everything else is handled
 // in place.
-func (h *AlertHandler) processAlert(a alert) error {
+func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	alertName := a.Labels["alertname"]
 	namespace := a.Labels["namespace"]
 	pod := a.Labels["pod"]
@@ -279,7 +287,7 @@ func (h *AlertHandler) processAlert(a alert) error {
 		// close. AlertManager always sets endsAt on a resolved alert; a zero
 		// value falls through to fingerprint-only scoping rather than
 		// resolving nothing.
-		ids, err := h.store.ResolveByTenantService(tenant, service, tType, a.Fingerprint, a.EndsAt)
+		ids, err := h.store.ResolveByTenantService(ctx, tenant, service, tType, a.Fingerprint, a.EndsAt)
 		if err != nil {
 			slog.Error("failed to resolve tickets", "error", err, "tenant", tenant, "service", service)
 			return fmt.Errorf("resolve tickets for %s/%s: %w", tenant, service, err)
@@ -312,7 +320,7 @@ func (h *AlertHandler) processAlert(a alert) error {
 	}
 
 	// Dedup: check for existing open ticket.
-	existing, err := h.store.FindDuplicate(tenant, service, tType)
+	existing, err := h.store.FindDuplicate(ctx, tenant, service, tType)
 	if err != nil {
 		slog.Error("dedup check failed", "error", err)
 		return fmt.Errorf("dedup check for %s/%s: %w", tenant, service, err)
@@ -320,7 +328,7 @@ func (h *AlertHandler) processAlert(a alert) error {
 	if existing != nil {
 		// Bump UpdatedAt so the stale-ticket GC can distinguish a still-
 		// firing alert from one that has stopped firing.
-		if err := h.store.TouchWithFingerprint(existing.ID, a.Fingerprint); err != nil {
+		if err := h.store.TouchWithFingerprint(ctx, existing.ID, a.Fingerprint); err != nil {
 			slog.Error("failed to touch ticket on duplicate alert", "error", err, "id", existing.ID)
 			return fmt.Errorf("touch ticket %s: %w", existing.ID, err)
 		}
@@ -335,7 +343,7 @@ func (h *AlertHandler) processAlert(a alert) error {
 	// ticket type (e.g. TenantCPUQuotaHigh and CPUThrottlingHigh both ->
 	// TypeResourceLimit) do not suppress each other.
 	if h.FlapCooldown > 0 {
-		recent, err := h.store.FindRecentlyResolved(tenant, service, tType, alertName, h.FlapCooldown)
+		recent, err := h.store.FindRecentlyResolved(ctx, tenant, service, tType, alertName, h.FlapCooldown)
 		if err != nil {
 			slog.Error("flap cooldown check failed", "error", err)
 			return fmt.Errorf("flap cooldown check for %s/%s: %w", tenant, service, err)
@@ -364,14 +372,14 @@ func (h *AlertHandler) processAlert(a alert) error {
 		AlertFingerprint: a.Fingerprint,
 	}
 
-	if err := h.store.Create(t); err != nil {
+	if err := h.store.Create(ctx, t); err != nil {
 		slog.Error("failed to create ticket from alert", "error", err, "alertname", alertName)
 		return fmt.Errorf("create ticket for %s: %w", alertName, err)
 	}
 
 	// Store the raw alert as evidence.
 	alertJSON, _ := json.Marshal(a)
-	_ = h.store.AddEvidence(t.ID, ticket.Evidence{
+	_ = h.store.AddEvidence(ctx, t.ID, ticket.Evidence{
 		Type:        "alert",
 		Content:     string(alertJSON),
 		CollectedAt: time.Now().UTC(),

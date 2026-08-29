@@ -16,6 +16,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// ctx is the context the store calls in this package's tests run under. The
+// store API takes one now; nothing here exercises cancellation, so a single
+// background context keeps the call sites readable. Tests that need their own
+// context shadow this with a local one.
+var ctx = context.Background()
+
 func newTestStore(t *testing.T) *ticket.Store {
 	t.Helper()
 	store, err := ticket.NewStore(context.Background(), ":memory:")
@@ -213,7 +219,7 @@ func TestAlertHandlerLeavesLegacyEmptyTenantTicketToReconcile(t *testing.T) {
 		Summary:   "mctl_agent_open_tickets gauge series missing for 30m",
 		Severity:  ticket.SeverityWarning,
 	}
-	if err := store.Create(legacy); err != nil {
+	if err := store.Create(ctx, legacy); err != nil {
 		t.Fatalf("failed to seed legacy ticket: %v", err)
 	}
 
@@ -244,7 +250,7 @@ func TestAlertHandlerLeavesLegacyEmptyTenantTicketToReconcile(t *testing.T) {
 	if len(resolvedIDs) != 0 {
 		t.Errorf("expected the aggregate legacy ticket to be left alone, resolved %v", resolvedIDs)
 	}
-	got, err := store.Get(legacy.ID)
+	got, err := store.Get(ctx, legacy.ID)
 	if err != nil {
 		t.Fatalf("failed to reload ticket: %v", err)
 	}
@@ -442,7 +448,7 @@ func TestAlertHandlerResolvedAlert(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	// Verify ticket exists.
-	open, _ := store.ListOpen()
+	open, _ := store.ListOpen(ctx)
 	if len(open) != 1 {
 		t.Fatalf("expected 1 open ticket, got %d", len(open))
 	}
@@ -465,7 +471,7 @@ func TestAlertHandlerResolvedAlert(t *testing.T) {
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
 	// Verify ticket is resolved.
-	open, _ = store.ListOpen()
+	open, _ = store.ListOpen(ctx)
 	if len(open) != 0 {
 		t.Errorf("expected 0 open tickets after resolve, got %d", len(open))
 	}
@@ -487,7 +493,7 @@ func TestAlertHandlerResolveFiresOnResolve(t *testing.T) {
 		Tenant:  "billing",
 		Service: "api",
 	}
-	if err := store.Create(tk); err != nil {
+	if err := store.Create(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
 
@@ -833,7 +839,7 @@ func TestAlertHandlerIgnoreFilterSkipsResolve(t *testing.T) {
 		Summary:  "legacy",
 		Severity: ticket.SeverityCritical,
 	}
-	if err := store.Create(t0); err != nil {
+	if err := store.Create(ctx, t0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -857,7 +863,7 @@ func TestAlertHandlerIgnoreFilterSkipsResolve(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	open, _ := store.ListOpen()
+	open, _ := store.ListOpen(ctx)
 	if len(open) != 0 {
 		t.Errorf("expected legacy ticket resolved despite filter, still open: %d", len(open))
 	}
@@ -885,7 +891,7 @@ func TestAlertHandlerDedupBumpsUpdatedAt(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	open, _ := store.ListOpen()
+	open, _ := store.ListOpen(ctx)
 	if len(open) != 1 {
 		t.Fatalf("expected 1 ticket, got %d", len(open))
 	}
@@ -896,7 +902,7 @@ func TestAlertHandlerDedupBumpsUpdatedAt(t *testing.T) {
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
-	open, _ = store.ListOpen()
+	open, _ = store.ListOpen(ctx)
 	if len(open) != 1 {
 		t.Fatalf("expected 1 ticket after dup, got %d", len(open))
 	}
@@ -930,7 +936,7 @@ func TestAlertHandlerPersistsFingerprint(t *testing.T) {
 		t.Fatalf("want 200, got %d", rw.Code)
 	}
 
-	tickets, err := store.ListOpen()
+	tickets, err := store.ListOpen(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,7 +1090,7 @@ func TestAlertHandlerRolloutWindowOpensOneNewTicket(t *testing.T) {
 		t.Fatalf("setup: expected the collapsed key to yield 1 ticket, got %d", len(received))
 	}
 	legacyID := received[0].ID
-	stored, err := store.Get(legacyID)
+	stored, err := store.Get(ctx, legacyID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -1113,7 +1119,7 @@ func TestAlertHandlerRolloutWindowOpensOneNewTicket(t *testing.T) {
 		"deployment": "admins-mctl-agents-worker-base-service",
 		"pod":        ksmPod,
 	})
-	legacy, err := store.Get(legacyID)
+	legacy, err := store.Get(ctx, legacyID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -1312,7 +1318,7 @@ func TestAlertHandlerReplayedResolveSparesNewerIncident(t *testing.T) {
 	// A different alert of the same ticket type opens a new incident under
 	// the identical (tenant, service, type) key.
 	post("firing", "bbbb2222", "KubePodNotReady")
-	open, err := store.ListOpen()
+	open, err := store.ListOpen(ctx)
 	if err != nil {
 		t.Fatalf("ListOpen: %v", err)
 	}
@@ -1324,7 +1330,7 @@ func TestAlertHandlerReplayedResolveSparesNewerIncident(t *testing.T) {
 	// AlertManager replays the older batch after a 500.
 	post("resolved", "aaaa1111", "PodCrashLooping")
 
-	got, err := store.Get(newID)
+	got, err := store.Get(ctx, newID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -1369,7 +1375,7 @@ func TestAlertHandlerReplayedResolveSparesTheSameAlertsNextOccurrence(t *testing
 
 	// It flaps back after the batch was acknowledged, opening a new ticket.
 	post("firing", time.Time{})
-	open, err := store.ListOpen()
+	open, err := store.ListOpen(ctx)
 	if err != nil {
 		t.Fatalf("ListOpen: %v", err)
 	}
@@ -1381,7 +1387,7 @@ func TestAlertHandlerReplayedResolveSparesTheSameAlertsNextOccurrence(t *testing
 	// AlertManager redelivers the older batch after a 500 elsewhere in it.
 	post("resolved", endsAt)
 
-	got, err := store.Get(newID)
+	got, err := store.Get(ctx, newID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -1400,12 +1406,12 @@ type failFirstCreateStore struct {
 	failed bool
 }
 
-func (s *failFirstCreateStore) Create(t *ticket.Ticket) error {
+func (s *failFirstCreateStore) Create(ctx context.Context, t *ticket.Ticket) error {
 	if !s.failed {
 		s.failed = true
 		return errors.New("injected store failure")
 	}
-	return s.alertStore.Create(t)
+	return s.alertStore.Create(ctx, t)
 }
 
 func TestAlertHandlerMixedBatchProcessesLaterAlertsAfterAStoreError(t *testing.T) {
@@ -1445,7 +1451,7 @@ func TestAlertHandlerMixedBatchProcessesLaterAlertsAfterAStoreError(t *testing.T
 		t.Errorf("a failed alert must ask AlertManager to retry: want 500, got %d", rec.Code)
 	}
 
-	open, err := store.ListOpen()
+	open, err := store.ListOpen(ctx)
 	if err != nil {
 		t.Fatalf("ListOpen: %v", err)
 	}
@@ -1457,5 +1463,44 @@ func TestAlertHandlerMixedBatchProcessesLaterAlertsAfterAStoreError(t *testing.T
 	}
 	if len(created) != 1 {
 		t.Errorf("onTicket must fire for the alert that succeeded: want 1 call, got %d", len(created))
+	}
+}
+
+func TestAlertHandlerFinishesTheWriteAfterTheCallerHangsUp(t *testing.T) {
+	// AlertManager gives a webhook a short deadline and hangs up when it
+	// expires. If the store work rode on r.Context(), that disconnect would
+	// cancel the ticket write partway through: the alert keeps firing while
+	// the incident it describes exists nowhere, and the resolve that
+	// eventually arrives finds nothing to close. The write is deliberately
+	// detached from the request (ctxutil.DetachedWrite) so it completes.
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(*ticket.Ticket) {})
+
+	body, _ := json.Marshal(alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{{
+			Status:      "firing",
+			Fingerprint: "aaaa1111",
+			Labels: map[string]string{
+				"alertname": "PodCrashLooping",
+				"namespace": "billing",
+				"pod":       "api-6d4b5c7f8-abc12",
+			},
+			Annotations: map[string]string{"summary": "PodCrashLooping"},
+		}},
+	})
+
+	reqCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)).WithContext(reqCtx)
+	cancel() // the caller is already gone before we ever touch the store
+
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	open, err := store.ListOpen(context.Background())
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("the ticket must survive the caller hanging up: want 1 open ticket, got %d", len(open))
 	}
 }
