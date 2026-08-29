@@ -47,3 +47,27 @@ const WriteTimeout = 30 * time.Second
 func DetachedWrite(parent context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(parent), WriteTimeout)
 }
+
+// MaxBatchWrite caps the total detached work one inbound request may cause,
+// however many items it carries.
+const MaxBatchWrite = 2 * time.Minute
+
+// DetachedBatch is DetachedWrite for a request that processes n items, each of
+// which gets its own ceiling underneath this one.
+//
+// Both bounds are needed and they guard different failures. Without a
+// per-item ceiling a single budget is spent by the early items: under store
+// latency a long batch exhausts it partway and everything after fails at
+// once, and since AlertManager preserves order on redelivery the same early
+// items re-spend it on every retry while the tail starves. Without an overall
+// bound the arithmetic inverts — n items times WriteTimeout each, with request
+// cancellation already stripped, is work no client disconnect can stop, so
+// retries stack on top of the batches still running and pile pressure on the
+// database that is already the reason they are slow.
+func DetachedBatch(parent context.Context, n int) (context.Context, context.CancelFunc) {
+	budget := time.Duration(n) * WriteTimeout
+	if budget > MaxBatchWrite || budget <= 0 {
+		budget = MaxBatchWrite
+	}
+	return context.WithTimeout(context.WithoutCancel(parent), budget)
+}

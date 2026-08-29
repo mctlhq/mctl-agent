@@ -252,6 +252,39 @@ func (s *Store) Update(ctx context.Context, t *Ticket) error {
 }
 
 // Get retrieves a ticket by ID, including evidence.
+// UpdateFromStatus is Update with a guard: it applies only while the stored
+// row is still at fromStatus, and reports whether it did.
+//
+// Update writes every column unconditionally from an in-memory ticket, which
+// is safe only while nothing else can have moved the row on. That stops being
+// true the moment a write is detached from its caller's cancellation: an
+// AlertManager resolve or a reconcile pass can land in between, and the
+// detached write then puts a stale status — and a stale nil resolved_at —
+// back over a row that had legitimately reached a terminal state, reopening
+// the incident locally and mirroring the wrong status outward.
+func (s *Store) UpdateFromStatus(ctx context.Context, t *Ticket, fromStatus string) (bool, error) {
+	t.UpdatedAt = time.Now().UTC()
+	query := `
+		UPDATE tickets SET source=?, alert_name=?, type=?, tenant=?, service=?, summary=?, severity=?, status=?,
+			analysis=?, proposed_fix=?, pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?, confidence=?,
+			alert_fingerprint=?, updated_at=?, resolved_at=?
+		WHERE id=? AND status=?`
+
+	res, err := s.db.ExecContext(ctx, s.rebind(query),
+		t.Source, t.AlertName, t.Type, t.Tenant, t.Service, t.Summary, t.Severity, t.Status,
+		t.Analysis, t.ProposedFix, t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.Confidence,
+		t.AlertFingerprint, t.UpdatedAt, t.ResolvedAt, t.ID, fromStatus,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime

@@ -183,3 +183,48 @@ func TestEscalatePersistsUnderAnExpiredContext(t *testing.T) {
 			ticket.StatusEscalated, got.Status)
 	}
 }
+
+// Detaching the escalation write removed the accident that used to protect a
+// concurrent resolution: while the write rode a cancelled context it could not
+// clobber anything, and now it can. A resolve landing during the slow fix step
+// must not be overwritten by the stale escalated status and its stale nil
+// ResolvedAt (codex P1 on #113).
+func TestEscalateDoesNotClobberAConcurrentResolution(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// The alert resolves while the fix step is still burning its deadline.
+	applied, err := store.ResolveByIDFromStatus(context.Background(), tk.ID,
+		ticket.StatusAnalyzing, "resolved by AlertManager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("setup: the concurrent resolve should have applied")
+	}
+
+	// The pipeline still holds its pre-resolve copy and now escalates it.
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.escalate(expired, tk, "[escalated] the fix step ran out of time", nil)
+
+	got, err := store.Get(context.Background(), tk.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("a concurrently resolved ticket must stay resolved: want %q, got %q",
+			ticket.StatusResolved, got.Status)
+	}
+	if got.ResolvedAt == nil {
+		t.Error("resolved_at was cleared by the stale escalation write")
+	}
+}

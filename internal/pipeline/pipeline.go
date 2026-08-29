@@ -156,6 +156,20 @@ func (p *Pipeline) persist(parent context.Context, t *ticket.Ticket) {
 	}
 }
 
+// persistEscalation writes the escalated state only while the row is still at
+// fromStatus. Returns false when something else moved it on, in which case the
+// caller must not mirror or announce an escalation that did not happen.
+func (p *Pipeline) persistEscalation(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
+	ctx, cancel := ctxutil.DetachedWrite(parent)
+	defer cancel()
+	applied, err := p.store.UpdateFromStatus(ctx, t, fromStatus)
+	if err != nil {
+		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
+		return false
+	}
+	return applied
+}
+
 func (p *Pipeline) updateAlert(t *ticket.Ticket) {
 	if p.apiClient == nil {
 		return
@@ -178,6 +192,10 @@ func (p *Pipeline) updateAlert(t *ticket.Ticket) {
 // diagnosis there first, and ResolveByIDFromStatus later appends its own note
 // the same way.
 func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string, diag *skill.DiagnosisResult) {
+	// Captured before the mutation below: the detached write is guarded on it,
+	// so a ticket that reached a terminal state while the fix step was timing
+	// out keeps that state instead of being dragged back to escalated.
+	fromStatus := t.Status
 	t.Status = ticket.StatusEscalated
 	if t.Analysis == "" {
 		t.Analysis = reason
@@ -194,7 +212,17 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	// of escalate still mirrors to mctl-api and emits the external event,
 	// leaving the ticket stuck in `analyzing` and disagreeing with everything
 	// downstream that was told it escalated.
-	p.persist(ctx, t)
+	//
+	// Guarded, because detaching removes the accident that used to protect
+	// this: with the write cancelled it could not clobber anything, and now it
+	// can. A resolve landing during that slow fix step would otherwise be
+	// overwritten by this stale escalated status and its stale nil
+	// resolved_at, reopening a closed incident.
+	if !p.persistEscalation(ctx, t, fromStatus) {
+		slog.Info("escalation skipped: ticket reached a terminal state concurrently",
+			"ticket", t.ID, "from_status", fromStatus)
+		return
+	}
 	// Mirror to mctl-api. Without this the incident there keeps the status it
 	// was published with (analyzing), which is what MCP and the dashboards read.
 	p.updateAlert(t)

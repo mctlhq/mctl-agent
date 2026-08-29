@@ -117,22 +117,20 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//
 	// Processing continues past the first failure so one bad alert does not
 	// hide the rest of the batch; the first error is what gets reported.
+	// Two nested bounds, per ctxutil.DetachedBatch: the batch context caps the
+	// total detached work this one delivery can cause, and each alert still
+	// gets its own ceiling underneath it so a slow early alert cannot spend
+	// the whole budget and starve the tail on every redelivery.
+	batchCtx, batchCancel := ctxutil.DetachedBatch(r.Context(), len(payload.Alerts))
+	defer batchCancel()
+
 	var firstErr error
 	for _, a := range payload.Alerts {
-		// Deliberately not r.Context(): see ctxutil.DetachedWrite.
-		// AlertManager hangs up on its own deadline, and a ticket write
-		// cancelled halfway is worse than one finished after the caller
-		// stopped listening.
-		//
-		// Per alert, not per batch. One deadline spanning the whole batch is
-		// a budget the earlier alerts spend: under sustained database latency
-		// a long batch exhausts it partway, and every alert after that point
-		// fails instantly. Redelivery preserves order, so the same early
-		// alerts consume the same budget on every retry and the tail can
-		// starve indefinitely. A per-alert ceiling bounds each unit of work
-		// on its own terms, which is what the ceiling was for.
+		// Derived from batchCtx, not from r.Context(): the request's
+		// cancellation is already stripped upstream, and nesting here is what
+		// keeps the two bounds composed rather than competing.
 		err := func() error {
-			ctx, cancel := ctxutil.DetachedWrite(r.Context())
+			ctx, cancel := context.WithTimeout(batchCtx, ctxutil.WriteTimeout)
 			defer cancel()
 			return h.processAlert(ctx, a)
 		}()
