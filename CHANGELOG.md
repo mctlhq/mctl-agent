@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.1](https://github.com/mctlhq/mctl-agent/compare/2.0.0...2.0.1) (2026-08-29)
+
+
+### Bug Fixes
+
+* never auto-merge on an unpersisted transition; carry the diagnosis ([cfc0d75](https://github.com/mctlhq/mctl-agent/commit/cfc0d752b5d57a99b4de4b009a7a8b7cf8145f9b))
+* **pipeline:** do not announce a transition the store refused ([fad74e9](https://github.com/mctlhq/mctl-agent/commit/fad74e95874ed6034268b1f7f3a43aef5f947566))
+* **pipeline:** guard and detach the post-failure diagnosis writes too ([1163403](https://github.com/mctlhq/mctl-agent/commit/1163403cb185994ee04c7ac009f2c4ff524ff27e))
+
 ## [2.0.0](https://github.com/mctlhq/mctl-agent/compare/1.17.1...2.0.0) (2026-08-29)
 
 
