@@ -597,7 +597,8 @@ func TestAlertHandlerFlapCooldown(t *testing.T) {
 	fire := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "firing",
+				Status:      "firing",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
@@ -612,7 +613,8 @@ func TestAlertHandlerFlapCooldown(t *testing.T) {
 	resolve := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "resolved",
+				Status:      "resolved",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
