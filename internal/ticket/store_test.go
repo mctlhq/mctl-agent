@@ -879,7 +879,7 @@ func TestStoreEscalateFromStatusLeavesFingerprintsAlone(t *testing.T) {
 	}
 
 	applied, err := store.SetDiagnosisFromStatus(ctx, tk.ID, StatusAnalyzing,
-		StatusEscalated, "escalated after timeout", ConfidenceLow)
+		StatusEscalated, "escalated after timeout", ConfidenceLow, "raise the memory limit")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -897,6 +897,12 @@ func TestStoreEscalateFromStatusLeavesFingerprintsAlone(t *testing.T) {
 	if got.AlertFingerprint != "fp-A,fp-B" {
 		t.Errorf("the escalation must not rewrite the fingerprint set: want %q, got %q",
 			"fp-A,fp-B", got.AlertFingerprint)
+	}
+	// The generated fix is part of the diagnosis outcome: CreatePR can fail
+	// after patch generation succeeded, and collectHistoricalEvidence reads
+	// proposed_fix from the local row when diagnosing the same service later.
+	if got.ProposedFix != "raise the memory limit" {
+		t.Errorf("proposed_fix must be persisted with the outcome, got %q", got.ProposedFix)
 	}
 }
 

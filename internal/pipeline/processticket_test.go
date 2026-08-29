@@ -390,7 +390,9 @@ func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T
 	}
 	live.Status = ticket.StatusFixProposed
 	live.Analysis = "probe timeout shorter than startup"
-	newPipeline().persistDiagnosisAndMirror(expired, live, ticket.StatusAnalyzing)
+	if !newPipeline().persistDiagnosisAndMirror(expired, live, ticket.StatusAnalyzing) {
+		t.Error("a write that landed must be reported as applied")
+	}
 
 	got, err := store.Get(context.Background(), live.ID)
 	if err != nil {
@@ -421,7 +423,12 @@ func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T
 	}
 	atomic.StoreInt32(&mirrored, 0)
 	raced.Status = ticket.StatusFixProposed
-	newPipeline().persistDiagnosisAndMirror(expired, raced, ticket.StatusAnalyzing)
+	// The return value gates the external webhook: announcing a transition
+	// neither store accepted would tell consumers a resolved ticket was
+	// escalated.
+	if newPipeline().persistDiagnosisAndMirror(expired, raced, ticket.StatusAnalyzing) {
+		t.Error("a transition the store refused must not be reported as applied")
+	}
 
 	got, err = store.Get(context.Background(), raced.ID)
 	if err != nil {
