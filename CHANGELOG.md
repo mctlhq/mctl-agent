@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.17.0](https://github.com/mctlhq/mctl-agent/compare/1.16.2...1.17.0) (2026-08-29)
+
+
+### Features
+
+* **agents:** issue-98-fail-closed-when-inbound-auth-tokens-are ([89a0826](https://github.com/mctlhq/mctl-agent/commit/89a082699156ead6f101853b481ffc6c8586189d))
+
+
+### Bug Fixes
+
+* **auth:** fail closed when inbound auth tokens are empty ([e106b53](https://github.com/mctlhq/mctl-agent/commit/e106b53bdc81e76816d1d1a1d533e1e2406acfe2))
+* **monitor:** bound a replayed resolve to the alert's own occurrence ([40cb438](https://github.com/mctlhq/mctl-agent/commit/40cb438dfb7a4ad5a47833ad30e57323c8bf7648))
+* **monitor:** carry the pre-rollout key through the workload-label switch ([8a162a1](https://github.com/mctlhq/mctl-agent/commit/8a162a138c4fffc35d5a3b74ab2b861904ea65b9))
+* **monitor:** drop the key migration, let AM reconcile own the rollout window ([b7c9eba](https://github.com/mctlhq/mctl-agent/commit/b7c9ebad06521a326547016ca921a06856a4cea1))
+* **monitor:** file workload alerts under the object, not kube-state-metrics ([7c06554](https://github.com/mctlhq/mctl-agent/commit/7c06554ab64f0d5ba392ae713d4d4dc2e7a338cf))
+* **monitor:** keep legacy fingerprintless tickets resolvable; pin batch drain ([7b391ba](https://github.com/mctlhq/mctl-agent/commit/7b391ba004f335b4c8f39c5c2fbec90dc34ad3d1))
+* **monitor:** make a replayed alert batch safe to apply twice ([b13c39e](https://github.com/mctlhq/mctl-agent/commit/b13c39ec4325afe217d07b106b78d7505ef02326))
+* **monitor:** return 5xx so AlertManager retries a failed alert batch ([4d01593](https://github.com/mctlhq/mctl-agent/commit/4d01593cfe6123203ba2bf9ef97fd5cf5ff7563e))
+* **monitor:** scope the pre-rollout key by fingerprint, not by name alone ([5145e9f](https://github.com/mctlhq/mctl-agent/commit/5145e9f23327e59a462c8fd15453e7c225d62c11))
+* **monitor:** suppress flaps across the rollout boundary too ([2061a90](https://github.com/mctlhq/mctl-agent/commit/2061a90226c4627ddbacf4cf1fcf0c44736d68c9))
+
 ## [1.16.2](https://github.com/mctlhq/mctl-agent/compare/1.16.1...1.16.2) (2026-08-23)
 
 
