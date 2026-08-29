@@ -855,3 +855,154 @@ func TestStoreListAllHonoursItsContext(t *testing.T) {
 		t.Fatalf("ListAll must use the context it is given: want context.Canceled, got %v", err)
 	}
 }
+
+// A same-status guard is not enough on its own: a duplicate firing appends to
+// alert_fingerprint through TouchWithFingerprint without moving the status, so
+// a full-row write would pass the guard and revert the fingerprint set.
+// Reconciliation resolves a ticket only when ALL of its fingerprints are absent
+// from the active set, so losing one lets a still-firing incident be closed
+// (codex P1 on #113).
+func TestStoreEscalateFromStatusLeavesFingerprintsAlone(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: StatusAnalyzing, AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	// A duplicate firing arrives while the fix step is still running.
+	if err := store.TouchWithFingerprint(ctx, tk.ID, "fp-B"); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, err := store.SetDiagnosisFromStatus(ctx, tk.ID, StatusAnalyzing,
+		StatusEscalated, "escalated after timeout", ConfidenceLow, "raise the memory limit")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("the escalation should have applied: status was unchanged")
+	}
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusEscalated {
+		t.Errorf("status: want %q, got %q", StatusEscalated, got.Status)
+	}
+	if got.AlertFingerprint != "fp-A,fp-B" {
+		t.Errorf("the escalation must not rewrite the fingerprint set: want %q, got %q",
+			"fp-A,fp-B", got.AlertFingerprint)
+	}
+	// The generated fix is part of the diagnosis outcome: CreatePR can fail
+	// after patch generation succeeded, and collectHistoricalEvidence reads
+	// proposed_fix from the local row when diagnosing the same service later.
+	if got.ProposedFix != "raise the memory limit" {
+		t.Errorf("proposed_fix must be persisted with the outcome, got %q", got.ProposedFix)
+	}
+}
+
+// The PR exists on GitHub whatever the ticket now says, so its coordinates are
+// recorded unconditionally — but a resolution that landed while CreatePR was
+// running is newer than anything the caller knows, and must survive.
+func TestStoreRecordPRLinkageKeepsANewerResolution(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: StatusAnalyzing, AlertFingerprint: "fp-A",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := store.ResolveByIDFromStatus(ctx, tk.ID, StatusAnalyzing, "resolved meanwhile")
+	if err != nil || !applied {
+		t.Fatalf("setup resolve failed: applied=%v err=%v", applied, err)
+	}
+
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/1"
+	tk.PRNumber = 1
+	tk.Status = StatusFixProposed
+	tk.Analysis = "diagnosis produced after the resolve won the race"
+	advanced, err := store.RecordPRLinkage(ctx, tk, StatusAnalyzing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if advanced {
+		t.Error("the status did not advance, and saying otherwise would let the caller mirror the stale value to mctl-api")
+	}
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusResolved {
+		t.Errorf("a newer resolution must survive: want %q, got %q", StatusResolved, got.Status)
+	}
+	if got.ResolvedAt == nil {
+		t.Error("resolved_at was cleared")
+	}
+	if got.PRURL != tk.PRURL || got.PRNumber != 1 {
+		t.Errorf("the PR coordinates must be recorded regardless: got %q #%d", got.PRURL, got.PRNumber)
+	}
+	// The resolve that won the race appended its own reason to analysis;
+	// overwriting it would erase why the incident actually closed.
+	if !strings.Contains(got.Analysis, "resolved meanwhile") {
+		t.Errorf("the winning resolution's analysis must survive, got %q", got.Analysis)
+	}
+}
+
+// On the ordinary path the guard applies, and the diagnosis this caller just
+// produced has to land with the PR: nothing else writes analysis, confidence
+// or proposed_fix for a ticket that reaches fix_proposed, so narrowing the
+// columns too far left the local row permanently blank while mctl-api had the
+// text (claude P2 on #113).
+func TestStoreRecordPRLinkagePersistsTheDiagnosis(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: StatusAnalyzing,
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/2"
+	tk.PRNumber = 2
+	tk.Status = StatusFixProposed
+	tk.Analysis = "the probe timeout is shorter than the startup time"
+	tk.ProposedFix = "raise initialDelaySeconds to 30"
+	tk.Confidence = ConfidenceHigh
+
+	advanced, err := store.RecordPRLinkage(ctx, tk, StatusAnalyzing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !advanced {
+		t.Fatal("the guard should have applied: nothing else touched the row")
+	}
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Analysis != tk.Analysis {
+		t.Errorf("analysis: want %q, got %q", tk.Analysis, got.Analysis)
+	}
+	if got.ProposedFix != tk.ProposedFix {
+		t.Errorf("proposed_fix: want %q, got %q", tk.ProposedFix, got.ProposedFix)
+	}
+	if got.Confidence != tk.Confidence {
+		t.Errorf("confidence: want %q, got %q", tk.Confidence, got.Confidence)
+	}
+	if got.Status != StatusFixProposed {
+		t.Errorf("status: want %q, got %q", StatusFixProposed, got.Status)
+	}
+}

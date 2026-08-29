@@ -64,6 +64,11 @@ type AlertHandler struct {
 	// counterpart resolve channel was the root cause of the 198 stale
 	// incidents accumulated by 2026-05-12.
 	OnResolve func(ids []string)
+	// BatchBudget overrides the ceiling on total detached store work one
+	// delivery may cause. Zero uses ctxutil.DetachedBatch's own budget, which
+	// is what production runs. Tests set it to make the exhaustion path
+	// reachable without waiting minutes for the real one.
+	BatchBudget time.Duration
 }
 
 // NewAlertHandler creates a new AlertManager webhook handler.
@@ -117,15 +122,56 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//
 	// Processing continues past the first failure so one bad alert does not
 	// hide the rest of the batch; the first error is what gets reported.
-	// Deliberately not r.Context(): see ctxutil.DetachedWrite. AlertManager
-	// hangs up on its own deadline, and a ticket write cancelled halfway is
-	// worse than one finished after the caller stopped listening.
-	ctx, cancel := ctxutil.DetachedWrite(r.Context())
-	defer cancel()
+	// Two nested bounds, per ctxutil.DetachedBatch: the batch context caps the
+	// total detached work this one delivery can cause, and each alert still
+	// gets its own ceiling underneath it so a slow early alert cannot spend
+	// the whole budget and starve the tail on every redelivery.
+	batchCtx, batchCancel := ctxutil.DetachedBatch(r.Context(), len(payload.Alerts))
+	if h.BatchBudget > 0 {
+		batchCancel()
+		batchCtx, batchCancel = context.WithTimeout(context.WithoutCancel(r.Context()), h.BatchBudget)
+	}
+	defer batchCancel()
 
 	var firstErr error
+	processed := 0
 	for _, a := range payload.Alerts {
-		if err := h.processAlert(ctx, a); err != nil && firstErr == nil {
+		// Stop rather than hand the remaining alerts a context that is
+		// already spent. Under sustained store latency the batch budget runs
+		// out partway; continuing would issue store calls that cannot
+		// succeed, adding load to the database that is the reason they are
+		// slow. The 500 below asks AlertManager to redeliver, which is the
+		// backpressure this situation actually calls for.
+		//
+		// The tail of a long batch therefore waits for the store to recover
+		// before it is processed. That is a deliberate trade, not an
+		// oversight: bounding total detached work and giving every alert in an
+		// unbounded batch a full ceiling cannot both hold in a sequential
+		// loop, and unbounded work during a database outage is the worse of
+		// the two. Normal batches never reach this branch — the budget covers
+		// MaxBatchWrite/WriteTimeout alerts at full latency, and far more when
+		// the store is healthy, because a fast alert returns its ceiling
+		// unused.
+		if err := batchCtx.Err(); err != nil {
+			slog.Error("alert batch budget exhausted, deferring the rest to redelivery",
+				"processed", processed, "total", len(payload.Alerts), "error", err)
+			if firstErr == nil {
+				firstErr = fmt.Errorf("batch budget exhausted after %d/%d alerts: %w",
+					processed, len(payload.Alerts), err)
+			}
+			break
+		}
+
+		// Derived from batchCtx, not from r.Context(): the request's
+		// cancellation is already stripped upstream, and nesting here is what
+		// keeps the two bounds composed rather than competing.
+		err := func() error {
+			ctx, cancel := context.WithTimeout(batchCtx, ctxutil.WriteTimeout)
+			defer cancel()
+			return h.processAlert(ctx, a)
+		}()
+		processed++
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}

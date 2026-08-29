@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,5 +149,295 @@ func TestTriggerAnalysisRejectsCancelledContext(t *testing.T) {
 	}
 	if len(open) != 0 {
 		t.Fatalf("no ticket should have been created, got %d", len(open))
+	}
+}
+
+// Escalation is a terminal state, and the path that reaches it most often is a
+// fix step that failed because the diagnosis deadline expired — so escalate is
+// routinely called with an already-cancelled context. Writing the terminal
+// status under it fails instantly while the rest of escalate still mirrors to
+// mctl-api and emits the external event, leaving the ticket stuck in
+// `analyzing` and disagreeing with everything downstream (codex P2 on #112).
+func TestEscalatePersistsUnderAnExpiredContext(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p.escalate(expired, tk, "[escalated] the fix step ran out of time", nil)
+
+	got, err := store.Get(context.Background(), tk.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != ticket.StatusEscalated {
+		t.Errorf("the terminal escalation must be persisted even when the caller's context is spent: want %q, got %q",
+			ticket.StatusEscalated, got.Status)
+	}
+}
+
+// Detaching the escalation write removed the accident that used to protect a
+// concurrent resolution: while the write rode a cancelled context it could not
+// clobber anything, and now it can. A resolve landing during the slow fix step
+// must not be overwritten by the stale escalated status and its stale nil
+// ResolvedAt (codex P1 on #113).
+func TestEscalateDoesNotClobberAConcurrentResolution(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// The alert resolves while the fix step is still burning its deadline.
+	applied, err := store.ResolveByIDFromStatus(context.Background(), tk.ID,
+		ticket.StatusAnalyzing, "resolved by AlertManager")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applied {
+		t.Fatal("setup: the concurrent resolve should have applied")
+	}
+
+	// The pipeline still holds its pre-resolve copy and now escalates it.
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	p.escalate(expired, tk, "[escalated] the fix step ran out of time", nil)
+
+	got, err := store.Get(context.Background(), tk.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("a concurrently resolved ticket must stay resolved: want %q, got %q",
+			ticket.StatusResolved, got.Status)
+	}
+	if got.ResolvedAt == nil {
+		t.Error("resolved_at was cleared by the stale escalation write")
+	}
+}
+
+// The local guard alone is not enough: RecordPRLinkage correctly refuses to
+// pull a resolved row back to fix_proposed, but mirroring the in-memory ticket
+// regardless would push that stale status into mctl-api and reopen the
+// incident on the dashboard and in MCP (claude P2 on #113).
+func TestRecordAndMirrorPRDoesNotMirrorASuppressedStatus(t *testing.T) {
+	store, err := ticket.NewStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var mirrored int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch || r.Method == http.MethodPut || r.Method == http.MethodPost {
+			atomic.AddInt32(&mirrored, 1)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := &Pipeline{
+		store:     store,
+		registry:  skill.NewRegistry(),
+		telegram:  notify.NewTelegram("", "", "", nil),
+		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
+		sem:       make(chan struct{}, 1),
+	}
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+	// The alert resolves while CreatePR is still running.
+	applied, err := store.ResolveByIDFromStatus(context.Background(), tk.ID,
+		ticket.StatusAnalyzing, "resolved meanwhile")
+	if err != nil || !applied {
+		t.Fatalf("setup resolve failed: applied=%v err=%v", applied, err)
+	}
+
+	fromStatus := ticket.StatusAnalyzing
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/1"
+	tk.PRNumber = 1
+	tk.Status = ticket.StatusFixProposed
+	p.recordAndMirrorPR(context.Background(), tk, fromStatus)
+
+	if n := atomic.LoadInt32(&mirrored); n != 0 {
+		t.Errorf("a status the store refused to take must not be mirrored to mctl-api, got %d call(s)", n)
+	}
+
+	got, err := store.Get(context.Background(), tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL != tk.PRURL {
+		t.Errorf("the PR coordinates must still be recorded: got %q", got.PRURL)
+	}
+}
+
+// The auto-merge gate hangs on this return value: merging a production change
+// on top of a transition that never landed leaves both incident stores reading
+// `analyzing`, makes the post-merge write guard against a status the row never
+// took, and has Telegram report a success nobody can find afterwards
+// (codex P1 on #113). A failed write must therefore report false, not just log.
+func TestRecordAndMirrorPRReportsAFailedWrite(t *testing.T) {
+	store, err := ticket.NewStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mirrored int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&mirrored, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := &Pipeline{
+		store:     store,
+		registry:  skill.NewRegistry(),
+		telegram:  notify.NewTelegram("", "", "", nil),
+		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
+		sem:       make(chan struct{}, 1),
+	}
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for the transient database outage this path is reached during.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/3"
+	tk.PRNumber = 3
+	tk.Status = ticket.StatusFixProposed
+
+	if p.recordAndMirrorPR(context.Background(), tk, ticket.StatusAnalyzing) {
+		t.Error("a write that failed must not be reported as a persisted transition")
+	}
+	if n := atomic.LoadInt32(&mirrored); n != 0 {
+		t.Errorf("nothing was persisted, so nothing should have been mirrored, got %d call(s)", n)
+	}
+}
+
+// The fix_proposed writes that follow a failed fix step sit in the same
+// position as escalate: the slow step that failed is usually what spent the
+// context. They used to write under it, discard the error, and mirror to
+// mctl-api regardless — the local row kept `analyzing` while mctl-api was told
+// `fix_proposed` (agy P1 on #113).
+func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T) {
+	store, err := ticket.NewStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var mirrored int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&mirrored, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	newPipeline := func() *Pipeline {
+		return &Pipeline{
+			store:     store,
+			registry:  skill.NewRegistry(),
+			telegram:  notify.NewTelegram("", "", "", nil),
+			apiClient: mctlclient.NewClient(srv.URL, "test-token"),
+			sem:       make(chan struct{}, 1),
+		}
+	}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The ordinary case: the write must land despite the spent context.
+	live := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	live.Status = ticket.StatusFixProposed
+	live.Analysis = "probe timeout shorter than startup"
+	if !newPipeline().persistDiagnosisAndMirror(expired, live, ticket.StatusAnalyzing) {
+		t.Error("a write that landed must be reported as applied")
+	}
+
+	got, err := store.Get(context.Background(), live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusFixProposed {
+		t.Errorf("the write must survive the spent context: want %q, got %q",
+			ticket.StatusFixProposed, got.Status)
+	}
+	if n := atomic.LoadInt32(&mirrored); n != 1 {
+		t.Errorf("a persisted status must be mirrored once, got %d", n)
+	}
+
+	// The raced case: a resolution that landed first must stand, and must not
+	// be contradicted outward.
+	raced := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypeGeneric,
+		Tenant: "billing", Service: "worker", Summary: "generic",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), raced); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := store.ResolveByIDFromStatus(context.Background(), raced.ID,
+		ticket.StatusAnalyzing, "resolved meanwhile")
+	if err != nil || !applied {
+		t.Fatalf("setup resolve failed: applied=%v err=%v", applied, err)
+	}
+	atomic.StoreInt32(&mirrored, 0)
+	raced.Status = ticket.StatusFixProposed
+	// The return value gates the external webhook: announcing a transition
+	// neither store accepted would tell consumers a resolved ticket was
+	// escalated.
+	if newPipeline().persistDiagnosisAndMirror(expired, raced, ticket.StatusAnalyzing) {
+		t.Error("a transition the store refused must not be reported as applied")
+	}
+
+	got, err = store.Get(context.Background(), raced.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("a newer resolution must stand: want %q, got %q", ticket.StatusResolved, got.Status)
+	}
+	if n := atomic.LoadInt32(&mirrored); n != 0 {
+		t.Errorf("a status the store refused must not be mirrored, got %d call(s)", n)
 	}
 }

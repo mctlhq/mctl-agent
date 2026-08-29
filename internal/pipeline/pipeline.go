@@ -142,18 +142,90 @@ func (p *Pipeline) publishAlert(t *ticket.Ticket) {
 	p.apiClient.PublishAlert(t)
 }
 
-// persist writes a ticket state that records an external side effect which has
-// already happened — a created or merged PR. It deliberately derives a fresh
-// detached context at the call site rather than reusing the diagnosis context:
-// that one may be seconds from its deadline by the time GitHub answers, and a
-// write cancelled there leaves the ticket claiming the opposite of what GitHub
-// now shows, with no PR linkage to find it by.
-func (p *Pipeline) persist(parent context.Context, t *ticket.Ticket) {
+// recordPRLinkage stores the PR a fix produced. It derives a fresh detached
+// context at the call site rather than reusing the diagnosis context: that one
+// may be seconds from its deadline by the time GitHub answers, and a write
+// cancelled there leaves an open PR that nothing points at.
+//
+// fromStatus is the status this caller last saw. The PR coordinates are
+// written unconditionally — the PR exists whatever the ticket now says — while
+// the status advances only if nothing else moved the row on; see
+// Store.RecordPRLinkage.
+// Returns whether the status advanced. It did not when something else moved
+// the row on first, and the caller must then not mirror the status it wanted:
+// the local store correctly kept the newer state, and pushing the stale one to
+// mctl-api would reopen there what is closed here.
+func (p *Pipeline) recordPRLinkage(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
 	ctx, cancel := ctxutil.DetachedWrite(parent)
 	defer cancel()
-	if err := p.store.Update(ctx, t); err != nil {
-		slog.Error("failed to persist ticket state", "ticket", t.ID, "status", t.Status, "error", err)
+	advanced, err := p.store.RecordPRLinkage(ctx, t, fromStatus)
+	if err != nil {
+		slog.Error("failed to record PR linkage", "ticket", t.ID, "pr", t.PRURL, "error", err)
+		return false
 	}
+	if !advanced {
+		slog.Info("PR recorded but status not advanced: ticket moved on concurrently",
+			"ticket", t.ID, "pr", t.PRURL, "wanted", t.Status, "from_status", fromStatus)
+	}
+	return advanced
+}
+
+// recordAndMirrorPR records the PR a fix produced and mirrors the result to
+// mctl-api — but only the status the store actually took. Mirroring
+// unconditionally would push fix_proposed or fix_applied over a resolution
+// that landed while GitHub was answering, reopening on the dashboard and in
+// MCP what the guard in RecordPRLinkage correctly refused to reopen locally.
+// Returns whether the transition was persisted, which callers must respect
+// before taking further irreversible action on the PR.
+func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, fromStatus string) bool {
+	advanced := p.recordPRLinkage(ctx, t, fromStatus)
+	if advanced {
+		p.updateAlert(t)
+	}
+	return advanced
+}
+
+// persistDiagnosisAndMirror writes a diagnosis outcome (status, analysis,
+// confidence, proposed fix)
+// and mirrors it to mctl-api only if the store took it. The three call sites it
+// serves all sit after a slow step failed, so ctx there is frequently spent
+// already — and they previously wrote under it, discarded the error, and
+// mirrored regardless, which is the same desync this PR exists to close: the
+// local row keeps analyzing while mctl-api is told fix_proposed.
+// Returns whether the store took the transition. Callers must not announce
+// what it refused: an external EventTicketFixFailed or EventTicketEscalated
+// carrying a status neither store accepted tells consumers a resolved ticket
+// was escalated.
+func (p *Pipeline) persistDiagnosisAndMirror(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
+	ctx, cancel := ctxutil.DetachedWrite(parent)
+	defer cancel()
+	applied, err := p.store.SetDiagnosisFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence, t.ProposedFix)
+	if err != nil {
+		slog.Error("failed to persist diagnosis outcome", "ticket", t.ID, "status", t.Status, "error", err)
+		return false
+	}
+	if !applied {
+		slog.Info("diagnosis outcome not persisted: ticket moved on concurrently",
+			"ticket", t.ID, "wanted", t.Status, "from_status", fromStatus)
+		return false
+	}
+	p.updateAlert(t)
+	return true
+}
+
+// persistEscalation writes the escalated state only while the row is still at
+// fromStatus, and only the columns an escalation owns. Returns false when
+// something else moved it on, in which case the caller must not mirror or
+// announce an escalation that did not happen.
+func (p *Pipeline) persistEscalation(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
+	ctx, cancel := ctxutil.DetachedWrite(parent)
+	defer cancel()
+	applied, err := p.store.SetDiagnosisFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence, t.ProposedFix)
+	if err != nil {
+		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
+		return false
+	}
+	return applied
 }
 
 func (p *Pipeline) updateAlert(t *ticket.Ticket) {
@@ -178,6 +250,10 @@ func (p *Pipeline) updateAlert(t *ticket.Ticket) {
 // diagnosis there first, and ResolveByIDFromStatus later appends its own note
 // the same way.
 func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string, diag *skill.DiagnosisResult) {
+	// Captured before the mutation below: the detached write is guarded on it,
+	// so a ticket that reached a terminal state while the fix step was timing
+	// out keeps that state instead of being dragged back to escalated.
+	fromStatus := t.Status
 	t.Status = ticket.StatusEscalated
 	if t.Analysis == "" {
 		t.Analysis = reason
@@ -187,8 +263,23 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	if t.Confidence == "" {
 		t.Confidence = ticket.ConfidenceLow
 	}
-	if err := p.store.Update(ctx, t); err != nil {
-		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
+	// Detached: escalation is a TERMINAL state, and the path that reaches it
+	// most often is a fix step (GetFileContent, CreatePR) that failed because
+	// the 15-minute diagnosis deadline expired — so ctx is already cancelled
+	// by the time we get here. Writing under it fails instantly while the rest
+	// of escalate still mirrors to mctl-api and emits the external event,
+	// leaving the ticket stuck in `analyzing` and disagreeing with everything
+	// downstream that was told it escalated.
+	//
+	// Guarded, because detaching removes the accident that used to protect
+	// this: with the write cancelled it could not clobber anything, and now it
+	// can. A resolve landing during that slow fix step would otherwise be
+	// overwritten by this stale escalated status and its stale nil
+	// resolved_at, reopening a closed incident.
+	if !p.persistEscalation(ctx, t, fromStatus) {
+		slog.Info("escalation skipped: ticket reached a terminal state concurrently",
+			"ticket", t.ID, "from_status", fromStatus)
+		return
 	}
 	// Mirror to mctl-api. Without this the incident there keeps the status it
 	// was published with (analyzing), which is what MCP and the dashboards read.
@@ -419,10 +510,11 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			if shouldNotifyDiagnosis(t) {
 				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
 			}
+			medFrom := t.Status
 			t.Status = ticket.StatusFixProposed
-			_ = p.store.Update(ctx, t)
-			p.updateAlert(t)
-			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
+			if p.persistDiagnosisAndMirror(ctx, t, medFrom) {
+				p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
+			}
 			return
 		}
 
@@ -499,10 +591,11 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Warn("skill fix generation failed", "skill", s.Name(), "error", err)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
+		failedFrom := t.Status
 		t.Status = ticket.StatusFixProposed
-		_ = p.store.Update(ctx, t)
-		p.updateAlert(t)
-		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
+		if p.persistDiagnosisAndMirror(ctx, t, failedFrom) {
+			p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
+		}
 		return
 	}
 	if !fixResult.Applied {
@@ -588,10 +681,11 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Warn("patch generation failed", "error", patchErr)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+patchErr.Error())
+		failedFrom := t.Status
 		t.Status = ticket.StatusFixProposed
-		_ = p.store.Update(ctx, t)
-		p.updateAlert(t)
-		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
+		if p.persistDiagnosisAndMirror(ctx, t, failedFrom) {
+			p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
+		}
 		return
 	}
 
@@ -620,20 +714,30 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		return
 	}
 
+	fromStatus := t.Status
 	t.PRURL = prURL
 	t.PRNumber = prNumber
 	t.Status = ticket.StatusFixProposed
 	// Detached, and derived only now: the PR exists on GitHub already. If the
 	// diagnosis deadline expired during CreatePR, writing under ctx would
 	// silently drop the PR linkage and leave the ticket looking untouched
-	// while a real PR sits open against it.
-	p.persist(ctx, t)
-
-	// Sync PR info to mctl-api.
-	p.updateAlert(t)
+	// while a real PR sits open against it. The status half is guarded on
+	// fromStatus so a resolve that landed during CreatePR is not overwritten.
+	proposedPersisted := p.recordAndMirrorPR(ctx, t, fromStatus)
 
 	if prURL != "" {
-		shouldAutoMerge := p.autoMerge && !p.dryRun
+		// Never auto-merge on top of a transition that did not land. If the
+		// write failed — a transient database outage is exactly when this
+		// path is reached — merging anyway puts the change into production
+		// while both incident stores still read `analyzing`, the post-merge
+		// write is then guarded from an in-memory status the row never took,
+		// and Telegram reports a success nobody can find afterwards. The PR
+		// stays open for review instead, which is recoverable.
+		shouldAutoMerge := p.autoMerge && !p.dryRun && proposedPersisted
+		if p.autoMerge && !p.dryRun && !proposedPersisted {
+			slog.Warn("skipping auto-merge: the fix_proposed transition was not persisted",
+				"ticket", t.ID, "pr", prURL)
+		}
 		if shouldAutoMerge {
 			if am, ok := s.(skill.AutoMerger); !ok || !am.AutoMergeSafe() {
 				shouldAutoMerge = false
@@ -646,10 +750,11 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 				_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag,
 					"Auto-merge failed: "+err.Error())
 			} else {
+				mergedFrom := t.Status
 				t.Status = ticket.StatusFixApplied
-				// Same reasoning as above: the merge already happened.
-				p.persist(ctx, t)
-				p.updateAlert(t)
+				// Same reasoning as above: the merge already happened, and the
+				// mirror follows the store rather than our in-memory copy.
+				p.recordAndMirrorPR(ctx, t, mergedFrom)
 				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
 			}
 		} else {

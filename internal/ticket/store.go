@@ -251,6 +251,83 @@ func (s *Store) Update(ctx context.Context, t *Ticket) error {
 	return err
 }
 
+// SetDiagnosisFromStatus records a diagnosis outcome, and only the fields such
+// an outcome owns: status, analysis, confidence and the proposed fix. It applies while the stored row is
+// still at fromStatus, and reports whether it did.
+//
+// Deliberately NOT a guarded Update. Update rewrites every column from an
+// in-memory ticket, which is safe only while nothing else can have touched the
+// row — and the whole point of a detached write is that it lands after the
+// caller's context is gone, with plenty of room for something else to have
+// touched it. A same-status guard is not enough either: a duplicate firing
+// appends to alert_fingerprint via TouchWithFingerprint without changing
+// status, so a full-row write would pass the guard and revert the fingerprint
+// set. Reconciliation resolves a ticket only when ALL of its fingerprints are
+// absent from the active set, so losing one lets a still-firing incident be
+// closed. Narrow the columns instead of widening the guard.
+func (s *Store) SetDiagnosisFromStatus(ctx context.Context, id, fromStatus, status, analysis, confidence, proposedFix string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.rebind(`
+		UPDATE tickets SET status=?, analysis=?, confidence=?, proposed_fix=?, updated_at=?
+		WHERE id=? AND status=?`),
+		status, analysis, confidence, proposedFix, time.Now().UTC(), id, fromStatus,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// RecordPRLinkage stores the PR a fix produced and reports whether the status
+// advanced.
+//
+// Two statements, and the split is the point. The first is guarded on
+// fromStatus and carries everything this caller owns — the PR coordinates, the
+// diagnosis it just produced, and the new status — so RowsAffected answers
+// "did the transition apply" atomically, from the write itself. An
+// UPDATE-then-SELECT readback cannot: a concurrent write in the gap makes the
+// answer describe someone else's row, and a read that merely fails leaves the
+// caller believing a write that landed did not.
+//
+// When the guard misses, the row moved on and its newer state must stand — but
+// the PR still exists on GitHub, so the second statement records the
+// coordinates alone. Not the analysis: a resolution that won the race appended
+// its own reason there, and overwriting it would erase why the incident
+// actually closed.
+func (s *Store) RecordPRLinkage(ctx context.Context, t *Ticket, fromStatus string) (bool, error) {
+	t.UpdatedAt = time.Now().UTC()
+	res, err := s.db.ExecContext(ctx, s.rebind(`
+		UPDATE tickets SET
+			pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?,
+			analysis=?, proposed_fix=?, confidence=?, status=?, updated_at=?
+		WHERE id=? AND status=?`),
+		t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA,
+		t.Analysis, t.ProposedFix, t.Confidence, t.Status, t.UpdatedAt,
+		t.ID, fromStatus,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return true, nil
+	}
+
+	_, err = s.db.ExecContext(ctx, s.rebind(`
+		UPDATE tickets SET
+			pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?, updated_at=?
+		WHERE id=?`),
+		t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.UpdatedAt, t.ID,
+	)
+	return false, err
+}
+
 // Get retrieves a ticket by ID, including evidence.
 func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
 	t := &Ticket{}

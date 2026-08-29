@@ -101,9 +101,13 @@ func isImageBlockKey(trimmed string) bool {
 //
 // Known limitations (deliberately deferred — neither shape exists in
 // today's mctl-gitops; revisit if a future values file regresses):
-//   - `tag: ""` / `tag: ''` (empty quoted) is treated as no-tag.
-//     Helm sometimes uses this when defaults supply the effective tag,
-//     but rollback has nothing to roll back to in that case anyway.
+//   - An empty quoted tag is treated as no-tag, in either quoting style.
+//     The single-quoted form is described rather than shown: gofmt rewrites
+//     a bare pair of apostrophes inside a doc comment into a typographic
+//     right double quote, which mangled this line twice and was reported as
+//     a review finding both times.
+//     Helm sometimes uses an empty tag when defaults supply the effective
+//     one, but rollback has nothing to roll back to in that case anyway.
 //   - If the SHALLOWEST `image:` block has no direct `tag:` child but
 //     a deeper one does, we return -1 instead of falling back to the
 //     deeper block. A wrapped manifest with a non-chart shallow
