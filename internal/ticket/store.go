@@ -564,17 +564,30 @@ func (s *Store) TouchWithFingerprint(id, fingerprint string) error {
 	//   2. fingerprint already present (LIKE '%,fp,%' on the padded value) → leave column unchanged
 	//   3. otherwise                                                   → append ',fingerprint'
 	// LIKE-with-||-padding is supported by both SQLite and PostgreSQL.
+	// Only the LIKE operand is escaped: `%`/`_` are wildcards to the pattern
+	// but ordinary characters in the value that gets stored and appended.
 	query := `
 		UPDATE tickets
 		SET alert_fingerprint = CASE
 			WHEN alert_fingerprint = '' OR alert_fingerprint IS NULL THEN ?
-			WHEN ',' || alert_fingerprint || ',' LIKE '%,' || ? || ',%' THEN alert_fingerprint
+			WHEN ',' || alert_fingerprint || ',' LIKE '%,' || ? || ',%' ESCAPE '\' THEN alert_fingerprint
 			ELSE alert_fingerprint || ',' || ?
 		END,
 		updated_at = ?
 		WHERE id = ?`
-	_, err := s.db.Exec(s.rebind(query), fingerprint, fingerprint, fingerprint, now, id)
+	_, err := s.db.Exec(s.rebind(query), fingerprint, escapeLike(fingerprint), fingerprint, now, id)
 	return err
+}
+
+// escapeLike neutralises the LIKE metacharacters in a value that is compared
+// as data rather than as a pattern. Fingerprints reach us verbatim from the
+// AlertManager webhook body, whose bearer token is optional, so a `%` left
+// unescaped would silently widen an exact-membership test into a wildcard.
+// The backslash is escaped first, otherwise it would double-escape the
+// escapes added after it. Callers must pair this with an `ESCAPE '\'` clause.
+func escapeLike(v string) string {
+	r := strings.NewReplacer(`\`, `\\`, "%", `\%`, "_", `\_`)
+	return r.Replace(v)
 }
 
 // mergeFingerprint appends fingerprint to the comma-separated set in
@@ -686,17 +699,78 @@ func (s *Store) ResolveByIDFromStatus(id, fromStatus, reason string) (bool, erro
 // mctl-api incident `open` forever — the exact drift this propagation
 // channel was added to fix. Both modernc.org/sqlite (SQLite 3.45+) and
 // pgx support UPDATE…RETURNING with identical syntax.
-func (s *Store) ResolveByTenantService(tenant, service, ticketType string) ([]string, error) {
+// fingerprint, when non-empty, additionally requires the ticket to carry
+// that AlertManager fingerprint in its accumulated set. (tenant, service,
+// type) alone is a coarse key — several alertnames map to one ticket type —
+// so a replayed `resolved` webhook could otherwise close a DIFFERENT
+// incident that opened under the same key in the meantime. Membership, not
+// equality: a ticket that deduped several concurrent alerts holds all of
+// their fingerprints, and resolving on any one of them is the pre-existing
+// behaviour this must not change. Empty fingerprint keeps the old
+// unconditional match, for callers that have none.
+//
+// notAfter, when non-zero, additionally requires the ticket to predate that
+// instant. A fingerprint identifies an alert's LABEL SET, not one occurrence
+// of it — the same alert flapping resolved→firing→resolved carries the same
+// fingerprint every time. So fingerprint membership alone does not make a
+// replayed resolve idempotent: if the alert re-fires and opens a fresh ticket
+// before AlertManager redelivers the older batch, that redelivery matches the
+// new ticket too. Callers pass the alert's EndsAt: a ticket opened after the
+// alert already ended cannot be the occurrence that alert resolves. Clock skew
+// between AlertManager and this process biases toward leaving a ticket open,
+// which reconcileWithAlertManager then closes on its next pass — the safe
+// direction, same argument as the workload-key migration in #105.
+func (s *Store) ResolveByTenantService(tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error) {
 	now := time.Now().UTC()
 	query := `
 		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
 		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
 		RETURNING id`
-
-	rows, err := s.db.Query(s.rebind(query),
+	args := []any{
 		StatusResolved, now, now,
 		tenant, service, ticketType, StatusResolved, StatusSuppressed,
-	)
+	}
+	var conds []string
+	if fingerprint != "" {
+		// The set is stored comma-separated; wrapping both sides in commas
+		// makes this an exact element match rather than a substring one, so
+		// "abc" cannot match "abcdef". `||` is the SQL-standard
+		// concatenation operator and behaves identically in SQLite and
+		// Postgres, the two dialects NewStore supports.
+		//
+		// ESCAPE, because the fingerprint arrives verbatim in the webhook
+		// body and the webhook's bearer token is optional: an unescaped `%`
+		// would turn this membership test into a wildcard that matches every
+		// ticket under the key, handing an unauthenticated caller the ability
+		// to resolve incidents it knows nothing about.
+		//
+		// The `alert_fingerprint = ''` arm keeps pre-Phase-2 tickets
+		// resolvable. Fingerprints have not always been persisted, and an
+		// open ticket predating that carries an empty set — a predicate
+		// requiring membership would never match it again, and
+		// reconcileWithAlertManager deliberately skips exactly those rows
+		// (poller.go), so the ticket and its mctl-api incident would stay
+		// open until TTL GC. Matching them on (tenant, service, type) alone
+		// is the behaviour that shipped before this scope existed; the arm
+		// restores the status quo for that finite legacy set without
+		// loosening anything for tickets that do carry fingerprints.
+		conds = append(conds,
+			"(alert_fingerprint = '' OR (',' || alert_fingerprint || ',') LIKE ('%,' || ? || ',%') ESCAPE '\\')")
+		args = append(args, escapeLike(fingerprint))
+	}
+	if !notAfter.IsZero() {
+		conds = append(conds, "created_at <= ?")
+		args = append(args, notAfter.UTC())
+	}
+	if len(conds) > 0 {
+		query = `
+		UPDATE tickets SET status=?, resolved_at=?, updated_at=?
+		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
+		  AND ` + strings.Join(conds, "\n\t\t  AND ") + `
+		RETURNING id`
+	}
+
+	rows, err := s.db.Query(s.rebind(query), args...)
 	if err != nil {
 		return nil, err
 	}
