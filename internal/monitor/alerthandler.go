@@ -266,6 +266,22 @@ func (h *AlertHandler) processAlert(a alert) error {
 
 	// Resolved alerts → close matching tickets.
 	if a.Status == "resolved" {
+		// A resolve with no fingerprint would disable the scope below
+		// entirely and close every open ticket under (tenant, service,
+		// type) — the exact blast radius the fingerprint scope exists to
+		// prevent, reachable from an unauthenticated caller because the
+		// webhook's bearer token is optional. AlertManager always sets a
+		// fingerprint on a resolved alert, so this drops nothing real.
+		//
+		// Dropped, not failed: an error here would be a 500, and a 500 asks
+		// AlertManager to redeliver a payload that no retry can improve.
+		// Leaving the ticket open is the safe direction — it is what
+		// reconcileWithAlertManager closes on its next pass.
+		if a.Fingerprint == "" {
+			slog.Warn("resolved alert carries no fingerprint, refusing to resolve by key alone",
+				"alertname", alertName, "tenant", tenant, "service", service)
+			return nil
+		}
 		// Scoped by fingerprint AND by the alert's own end time: ServeHTTP
 		// can now ask AlertManager to replay a batch, and (tenant, service,
 		// type) is coarse enough — several alertnames map to one ticket
