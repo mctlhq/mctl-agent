@@ -345,3 +345,92 @@ func TestRecordAndMirrorPRReportsAFailedWrite(t *testing.T) {
 		t.Errorf("nothing was persisted, so nothing should have been mirrored, got %d call(s)", n)
 	}
 }
+
+// The fix_proposed writes that follow a failed fix step sit in the same
+// position as escalate: the slow step that failed is usually what spent the
+// context. They used to write under it, discard the error, and mirror to
+// mctl-api regardless — the local row kept `analyzing` while mctl-api was told
+// `fix_proposed` (agy P1 on #113).
+func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T) {
+	store, err := ticket.NewStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var mirrored int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&mirrored, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	newPipeline := func() *Pipeline {
+		return &Pipeline{
+			store:     store,
+			registry:  skill.NewRegistry(),
+			telegram:  notify.NewTelegram("", "", "", nil),
+			apiClient: mctlclient.NewClient(srv.URL, "test-token"),
+			sem:       make(chan struct{}, 1),
+		}
+	}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// The ordinary case: the write must land despite the spent context.
+	live := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), live); err != nil {
+		t.Fatal(err)
+	}
+	live.Status = ticket.StatusFixProposed
+	live.Analysis = "probe timeout shorter than startup"
+	newPipeline().persistDiagnosisAndMirror(expired, live, ticket.StatusAnalyzing)
+
+	got, err := store.Get(context.Background(), live.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusFixProposed {
+		t.Errorf("the write must survive the spent context: want %q, got %q",
+			ticket.StatusFixProposed, got.Status)
+	}
+	if n := atomic.LoadInt32(&mirrored); n != 1 {
+		t.Errorf("a persisted status must be mirrored once, got %d", n)
+	}
+
+	// The raced case: a resolution that landed first must stand, and must not
+	// be contradicted outward.
+	raced := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypeGeneric,
+		Tenant: "billing", Service: "worker", Summary: "generic",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), raced); err != nil {
+		t.Fatal(err)
+	}
+	applied, err := store.ResolveByIDFromStatus(context.Background(), raced.ID,
+		ticket.StatusAnalyzing, "resolved meanwhile")
+	if err != nil || !applied {
+		t.Fatalf("setup resolve failed: applied=%v err=%v", applied, err)
+	}
+	atomic.StoreInt32(&mirrored, 0)
+	raced.Status = ticket.StatusFixProposed
+	newPipeline().persistDiagnosisAndMirror(expired, raced, ticket.StatusAnalyzing)
+
+	got, err = store.Get(context.Background(), raced.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusResolved {
+		t.Errorf("a newer resolution must stand: want %q, got %q", ticket.StatusResolved, got.Status)
+	}
+	if n := atomic.LoadInt32(&mirrored); n != 0 {
+		t.Errorf("a status the store refused must not be mirrored, got %d call(s)", n)
+	}
+}

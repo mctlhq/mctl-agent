@@ -878,7 +878,7 @@ func TestStoreEscalateFromStatusLeavesFingerprintsAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	applied, err := store.EscalateFromStatus(ctx, tk.ID, StatusAnalyzing,
+	applied, err := store.SetDiagnosisFromStatus(ctx, tk.ID, StatusAnalyzing,
 		StatusEscalated, "escalated after timeout", ConfidenceLow)
 	if err != nil {
 		t.Fatal(err)

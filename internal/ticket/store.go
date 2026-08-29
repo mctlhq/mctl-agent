@@ -251,8 +251,8 @@ func (s *Store) Update(ctx context.Context, t *Ticket) error {
 	return err
 }
 
-// EscalateFromStatus records an escalation, and only the fields an escalation
-// owns: status, analysis and confidence. It applies while the stored row is
+// SetDiagnosisFromStatus records a diagnosis outcome, and only the fields such
+// an outcome owns: status, analysis and confidence. It applies while the stored row is
 // still at fromStatus, and reports whether it did.
 //
 // Deliberately NOT a guarded Update. Update rewrites every column from an
@@ -265,7 +265,7 @@ func (s *Store) Update(ctx context.Context, t *Ticket) error {
 // set. Reconciliation resolves a ticket only when ALL of its fingerprints are
 // absent from the active set, so losing one lets a still-firing incident be
 // closed. Narrow the columns instead of widening the guard.
-func (s *Store) EscalateFromStatus(ctx context.Context, id, fromStatus, status, analysis, confidence string) (bool, error) {
+func (s *Store) SetDiagnosisFromStatus(ctx context.Context, id, fromStatus, status, analysis, confidence string) (bool, error) {
 	res, err := s.db.ExecContext(ctx, s.rebind(`
 		UPDATE tickets SET status=?, analysis=?, confidence=?, updated_at=?
 		WHERE id=? AND status=?`),

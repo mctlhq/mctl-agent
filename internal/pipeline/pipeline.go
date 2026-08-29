@@ -185,6 +185,28 @@ func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, from
 	return advanced
 }
 
+// persistDiagnosis writes a diagnosis outcome (status, analysis, confidence)
+// and mirrors it to mctl-api only if the store took it. The three call sites it
+// serves all sit after a slow step failed, so ctx there is frequently spent
+// already — and they previously wrote under it, discarded the error, and
+// mirrored regardless, which is the same desync this PR exists to close: the
+// local row keeps analyzing while mctl-api is told fix_proposed.
+func (p *Pipeline) persistDiagnosisAndMirror(parent context.Context, t *ticket.Ticket, fromStatus string) {
+	ctx, cancel := ctxutil.DetachedWrite(parent)
+	defer cancel()
+	applied, err := p.store.SetDiagnosisFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence)
+	if err != nil {
+		slog.Error("failed to persist diagnosis outcome", "ticket", t.ID, "status", t.Status, "error", err)
+		return
+	}
+	if !applied {
+		slog.Info("diagnosis outcome not persisted: ticket moved on concurrently",
+			"ticket", t.ID, "wanted", t.Status, "from_status", fromStatus)
+		return
+	}
+	p.updateAlert(t)
+}
+
 // persistEscalation writes the escalated state only while the row is still at
 // fromStatus, and only the columns an escalation owns. Returns false when
 // something else moved it on, in which case the caller must not mirror or
@@ -192,7 +214,7 @@ func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, from
 func (p *Pipeline) persistEscalation(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
 	ctx, cancel := ctxutil.DetachedWrite(parent)
 	defer cancel()
-	applied, err := p.store.EscalateFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence)
+	applied, err := p.store.SetDiagnosisFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence)
 	if err != nil {
 		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
 		return false
@@ -482,9 +504,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			if shouldNotifyDiagnosis(t) {
 				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
 			}
+			medFrom := t.Status
 			t.Status = ticket.StatusFixProposed
-			_ = p.store.Update(ctx, t)
-			p.updateAlert(t)
+			p.persistDiagnosisAndMirror(ctx, t, medFrom)
 			p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
 			return
 		}
@@ -562,9 +584,9 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Warn("skill fix generation failed", "skill", s.Name(), "error", err)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
+		failedFrom := t.Status
 		t.Status = ticket.StatusFixProposed
-		_ = p.store.Update(ctx, t)
-		p.updateAlert(t)
+		p.persistDiagnosisAndMirror(ctx, t, failedFrom)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
@@ -635,9 +657,9 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		log.Warn("patch generation failed", "error", patchErr)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+patchErr.Error())
+		failedFrom := t.Status
 		t.Status = ticket.StatusFixProposed
-		_ = p.store.Update(ctx, t)
-		p.updateAlert(t)
+		p.persistDiagnosisAndMirror(ctx, t, failedFrom)
 		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		return
 	}
