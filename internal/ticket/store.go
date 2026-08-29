@@ -289,7 +289,7 @@ func (s *Store) ListOpen(ctx context.Context) ([]*Ticket, error) {
 
 // ListAll returns all tickets (latest first, limit 100).
 func (s *Store) ListAll(ctx context.Context) ([]*Ticket, error) {
-	return s.ListByFilters(context.Background(), "", "", "", 100)
+	return s.ListByFilters(ctx, "", "", "", 100)
 }
 
 // ListByFilters returns tickets matching the given filters, latest first.

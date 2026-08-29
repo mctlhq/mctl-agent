@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/capability"
+	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/notify"
@@ -139,6 +140,20 @@ func (p *Pipeline) publishAlert(t *ticket.Ticket) {
 		return
 	}
 	p.apiClient.PublishAlert(t)
+}
+
+// persist writes a ticket state that records an external side effect which has
+// already happened — a created or merged PR. It deliberately derives a fresh
+// detached context at the call site rather than reusing the diagnosis context:
+// that one may be seconds from its deadline by the time GitHub answers, and a
+// write cancelled there leaves the ticket claiming the opposite of what GitHub
+// now shows, with no PR linkage to find it by.
+func (p *Pipeline) persist(parent context.Context, t *ticket.Ticket) {
+	ctx, cancel := ctxutil.DetachedWrite(parent)
+	defer cancel()
+	if err := p.store.Update(ctx, t); err != nil {
+		slog.Error("failed to persist ticket state", "ticket", t.ID, "status", t.Status, "error", err)
+	}
 }
 
 func (p *Pipeline) updateAlert(t *ticket.Ticket) {
@@ -592,7 +607,11 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	t.PRURL = prURL
 	t.PRNumber = prNumber
 	t.Status = ticket.StatusFixProposed
-	_ = p.store.Update(ctx, t)
+	// Detached, and derived only now: the PR exists on GitHub already. If the
+	// diagnosis deadline expired during CreatePR, writing under ctx would
+	// silently drop the PR linkage and leave the ticket looking untouched
+	// while a real PR sits open against it.
+	p.persist(ctx, t)
 
 	// Sync PR info to mctl-api.
 	p.updateAlert(t)
@@ -612,7 +631,8 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 					"Auto-merge failed: "+err.Error())
 			} else {
 				t.Status = ticket.StatusFixApplied
-				_ = p.store.Update(ctx, t)
+				// Same reasoning as above: the merge already happened.
+				p.persist(ctx, t)
 				p.updateAlert(t)
 				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
 			}

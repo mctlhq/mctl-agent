@@ -237,8 +237,19 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 	// record an external side effect that already happened (a merged or
 	// closed PR), and a cancelled write would leave the ticket claiming the
 	// opposite of what GitHub now shows.
-	writeCtx, cancelWrite := ctxutil.DetachedWrite(ctx)
-	defer cancelWrite()
+	//
+	// persist derives its detached context per call, not once for the whole
+	// handler: the 30s ceiling has to cover the write, and a ceiling started
+	// before a slow GitHub round-trip could already be spent by the time the
+	// write runs — reintroducing the very failure detachment prevents.
+	persist := func(t *ticket.Ticket) {
+		writeCtx, cancelWrite := ctxutil.DetachedWrite(ctx)
+		defer cancelWrite()
+		if err := opts.Store.Update(writeCtx, t); err != nil {
+			slog.Error("failed to persist ticket state after command",
+				"command", cmd.Command, "ticket", t.ID, "error", err)
+		}
+	}
 
 	switch cmd.Command {
 	case "status":
@@ -272,7 +283,7 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 			return
 		}
 		t.Status = ticket.StatusFixApplied
-		_ = opts.Store.Update(writeCtx, t)
+		persist(t)
 		_ = opts.Telegram.SendText("PR #" + strings.TrimSpace(fmt.Sprint(t.PRNumber)) + " merged for " + t.Service)
 
 	case "reject":
@@ -285,7 +296,7 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 			_ = opts.GitHub.ClosePR(ctx, t.PRNumber, cmd.Reason)
 		}
 		t.Status = ticket.StatusSuppressed
-		_ = opts.Store.Update(writeCtx, t)
+		persist(t)
 		_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " rejected: " + cmd.Reason)
 
 	case "ignore":
@@ -295,7 +306,7 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 			return
 		}
 		t.Status = ticket.StatusSuppressed
-		_ = opts.Store.Update(writeCtx, t)
+		persist(t)
 		_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " suppressed")
 
 	case "pause":

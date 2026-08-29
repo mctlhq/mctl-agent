@@ -831,3 +831,27 @@ func TestStoreResolveByTenantServiceStillResolvesFingerprintlessLegacyTickets(t 
 		t.Fatalf("legacy fingerprintless ticket must still resolve: want [%s], got %v", legacy.ID, ids)
 	}
 }
+
+// Every wrapper that forwards to another Store method must forward the
+// context too. ListAll shipped in this refactor's first commit taking a ctx
+// and then calling ListByFilters(context.Background(), ...) — the parameter
+// was accepted and silently dropped, so its one caller could never cancel the
+// query it had asked to be cancellable.
+func TestStoreListAllHonoursItsContext(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := store.ListAll(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ListAll must use the context it is given: want context.Canceled, got %v", err)
+	}
+}

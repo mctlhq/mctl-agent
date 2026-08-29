@@ -34,9 +34,9 @@ type testSkill struct {
 	caps        []CapabilityID
 }
 
-func (s *testSkill) Name() string        { return s.name }
-func (s *testSkill) Version() string      { return s.version }
-func (s *testSkill) Description() string  { return s.desc }
+func (s *testSkill) Name() string                         { return s.name }
+func (s *testSkill) Version() string                      { return s.version }
+func (s *testSkill) Description() string                  { return s.desc }
 func (s *testSkill) RequiredCapabilities() []CapabilityID { return s.caps }
 
 func (s *testSkill) Match(_ context.Context, _ *ticket.Ticket, _ EvidenceSet) MatchResult {

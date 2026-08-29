@@ -29,9 +29,9 @@ type mockSkill struct {
 	caps []skill.CapabilityID
 }
 
-func (s *mockSkill) Name() string        { return s.name }
-func (s *mockSkill) Version() string      { return "1.0" }
-func (s *mockSkill) Description() string  { return "test" }
+func (s *mockSkill) Name() string                               { return s.name }
+func (s *mockSkill) Version() string                            { return "1.0" }
+func (s *mockSkill) Description() string                        { return "test" }
 func (s *mockSkill) RequiredCapabilities() []skill.CapabilityID { return s.caps }
 func (s *mockSkill) Match(_ context.Context, _ *ticket.Ticket, _ skill.EvidenceSet) skill.MatchResult {
 	return skill.MatchResult{}
