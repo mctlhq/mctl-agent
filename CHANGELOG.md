@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.0.0](https://github.com/mctlhq/mctl-agent/compare/1.17.1...2.0.0) (2026-08-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* **agents:** remote skills previously registered with an http:// endpoint or a private/loopback/CGNAT-range host will fail outbound calls once this ships (the dial guard applies to already-registered skills, not just new registrations). Re-register them over https:// with a public/allowed host.
+
+### Features
+
+* **agents:** issue-99-path-allowlist-for-gitops-writes-remote ([01adb82](https://github.com/mctlhq/mctl-agent/commit/01adb82497e77dfb9502a7b244cd876f14ff8c3c))
+
+
+### Bug Fixes
+
+* **remote:** close DNS-rebinding TOCTOU in dial guard; bound registration DNS lookup ([c9d8a4b](https://github.com/mctlhq/mctl-agent/commit/c9d8a4b8b8c0c05297a1f8b449915acdbbc3195b))
+
 ## [1.17.1](https://github.com/mctlhq/mctl-agent/compare/1.17.0...1.17.1) (2026-08-29)
 
 
