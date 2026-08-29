@@ -281,42 +281,51 @@ func (s *Store) EscalateFromStatus(ctx context.Context, id, fromStatus, status, 
 	return n > 0, nil
 }
 
-// RecordPRLinkage stores the PR a fix produced, and advances the status only
-// while the row is still at fromStatus.
+// RecordPRLinkage stores the PR a fix produced and reports whether the status
+// advanced.
 //
-// The asymmetry is deliberate. The PR exists on GitHub whatever the ticket now
-// says, so its coordinates must be recorded unconditionally — losing them
-// leaves an open PR nothing points at. The status is a different matter: if an
-// AlertManager resolve landed while CreatePR was running, that resolution is
-// newer than anything this caller knows, and overwriting it would reopen a
-// closed incident. Columns this caller does not own (alert_fingerprint,
-// resolved_at, analysis) are left alone for the same reason as in
-// EscalateFromStatus.
-// Returns whether the status actually advanced, so the caller can tell an
-// applied transition from a suppressed one: mirroring a status the store
-// refused to take would put the stale value into mctl-api and reopen there
-// what is closed here.
+// Two statements, and the split is the point. The first is guarded on
+// fromStatus and carries everything this caller owns — the PR coordinates, the
+// diagnosis it just produced, and the new status — so RowsAffected answers
+// "did the transition apply" atomically, from the write itself. An
+// UPDATE-then-SELECT readback cannot: a concurrent write in the gap makes the
+// answer describe someone else's row, and a read that merely fails leaves the
+// caller believing a write that landed did not.
+//
+// When the guard misses, the row moved on and its newer state must stand — but
+// the PR still exists on GitHub, so the second statement records the
+// coordinates alone. Not the analysis: a resolution that won the race appended
+// its own reason there, and overwriting it would erase why the incident
+// actually closed.
 func (s *Store) RecordPRLinkage(ctx context.Context, t *Ticket, fromStatus string) (bool, error) {
 	t.UpdatedAt = time.Now().UTC()
-	_, err := s.db.ExecContext(ctx, s.rebind(`
+	res, err := s.db.ExecContext(ctx, s.rebind(`
 		UPDATE tickets SET
 			pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?,
-			status = CASE WHEN status=? THEN ? ELSE status END,
-			updated_at=?
-		WHERE id=?`),
+			analysis=?, proposed_fix=?, confidence=?, status=?, updated_at=?
+		WHERE id=? AND status=?`),
 		t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA,
-		fromStatus, t.Status, t.UpdatedAt, t.ID,
+		t.Analysis, t.ProposedFix, t.Confidence, t.Status, t.UpdatedAt,
+		t.ID, fromStatus,
 	)
 	if err != nil {
 		return false, err
 	}
-	// RowsAffected counts the row, not the CASE: the UPDATE always matches by
-	// id, so it cannot say whether the status moved. Read it back instead.
-	var current string
-	if err := s.db.QueryRowContext(ctx, s.rebind(`SELECT status FROM tickets WHERE id=?`), t.ID).Scan(&current); err != nil {
+	n, err := res.RowsAffected()
+	if err != nil {
 		return false, err
 	}
-	return current == t.Status, nil
+	if n > 0 {
+		return true, nil
+	}
+
+	_, err = s.db.ExecContext(ctx, s.rebind(`
+		UPDATE tickets SET
+			pr_url=?, pr_number=?, pr_repo=?, pr_branch=?, pr_commit_sha=?, updated_at=?
+		WHERE id=?`),
+		t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA, t.UpdatedAt, t.ID,
+	)
+	return false, err
 }
 
 // Get retrieves a ticket by ID, including evidence.

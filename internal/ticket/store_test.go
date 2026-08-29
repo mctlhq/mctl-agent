@@ -922,6 +922,7 @@ func TestStoreRecordPRLinkageKeepsANewerResolution(t *testing.T) {
 	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/1"
 	tk.PRNumber = 1
 	tk.Status = StatusFixProposed
+	tk.Analysis = "diagnosis produced after the resolve won the race"
 	advanced, err := store.RecordPRLinkage(ctx, tk, StatusAnalyzing)
 	if err != nil {
 		t.Fatal(err)
@@ -942,5 +943,60 @@ func TestStoreRecordPRLinkageKeepsANewerResolution(t *testing.T) {
 	}
 	if got.PRURL != tk.PRURL || got.PRNumber != 1 {
 		t.Errorf("the PR coordinates must be recorded regardless: got %q #%d", got.PRURL, got.PRNumber)
+	}
+	// The resolve that won the race appended its own reason to analysis;
+	// overwriting it would erase why the incident actually closed.
+	if !strings.Contains(got.Analysis, "resolved meanwhile") {
+		t.Errorf("the winning resolution's analysis must survive, got %q", got.Analysis)
+	}
+}
+
+// On the ordinary path the guard applies, and the diagnosis this caller just
+// produced has to land with the PR: nothing else writes analysis, confidence
+// or proposed_fix for a ticket that reaches fix_proposed, so narrowing the
+// columns too far left the local row permanently blank while mctl-api had the
+// text (claude P2 on #113).
+func TestStoreRecordPRLinkagePersistsTheDiagnosis(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: "alertmanager", Type: TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: StatusAnalyzing,
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/2"
+	tk.PRNumber = 2
+	tk.Status = StatusFixProposed
+	tk.Analysis = "the probe timeout is shorter than the startup time"
+	tk.ProposedFix = "raise initialDelaySeconds to 30"
+	tk.Confidence = ConfidenceHigh
+
+	advanced, err := store.RecordPRLinkage(ctx, tk, StatusAnalyzing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !advanced {
+		t.Fatal("the guard should have applied: nothing else touched the row")
+	}
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Analysis != tk.Analysis {
+		t.Errorf("analysis: want %q, got %q", tk.Analysis, got.Analysis)
+	}
+	if got.ProposedFix != tk.ProposedFix {
+		t.Errorf("proposed_fix: want %q, got %q", tk.ProposedFix, got.ProposedFix)
+	}
+	if got.Confidence != tk.Confidence {
+		t.Errorf("confidence: want %q, got %q", tk.Confidence, got.Confidence)
+	}
+	if got.Status != StatusFixProposed {
+		t.Errorf("status: want %q, got %q", StatusFixProposed, got.Status)
 	}
 }

@@ -292,3 +292,56 @@ func TestRecordAndMirrorPRDoesNotMirrorASuppressedStatus(t *testing.T) {
 		t.Errorf("the PR coordinates must still be recorded: got %q", got.PRURL)
 	}
 }
+
+// The auto-merge gate hangs on this return value: merging a production change
+// on top of a transition that never landed leaves both incident stores reading
+// `analyzing`, makes the post-merge write guard against a status the row never
+// took, and has Telegram report a success nobody can find afterwards
+// (codex P1 on #113). A failed write must therefore report false, not just log.
+func TestRecordAndMirrorPRReportsAFailedWrite(t *testing.T) {
+	store, err := ticket.NewStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mirrored int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&mirrored, 1)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := &Pipeline{
+		store:     store,
+		registry:  skill.NewRegistry(),
+		telegram:  notify.NewTelegram("", "", "", nil),
+		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
+		sem:       make(chan struct{}, 1),
+	}
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for the transient database outage this path is reached during.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/3"
+	tk.PRNumber = 3
+	tk.Status = ticket.StatusFixProposed
+
+	if p.recordAndMirrorPR(context.Background(), tk, ticket.StatusAnalyzing) {
+		t.Error("a write that failed must not be reported as a persisted transition")
+	}
+	if n := atomic.LoadInt32(&mirrored); n != 0 {
+		t.Errorf("nothing was persisted, so nothing should have been mirrored, got %d call(s)", n)
+	}
+}

@@ -175,10 +175,14 @@ func (p *Pipeline) recordPRLinkage(parent context.Context, t *ticket.Ticket, fro
 // unconditionally would push fix_proposed or fix_applied over a resolution
 // that landed while GitHub was answering, reopening on the dashboard and in
 // MCP what the guard in RecordPRLinkage correctly refused to reopen locally.
-func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, fromStatus string) {
-	if p.recordPRLinkage(ctx, t, fromStatus) {
+// Returns whether the transition was persisted, which callers must respect
+// before taking further irreversible action on the PR.
+func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, fromStatus string) bool {
+	advanced := p.recordPRLinkage(ctx, t, fromStatus)
+	if advanced {
 		p.updateAlert(t)
 	}
+	return advanced
 }
 
 // persistEscalation writes the escalated state only while the row is still at
@@ -672,10 +676,21 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	// silently drop the PR linkage and leave the ticket looking untouched
 	// while a real PR sits open against it. The status half is guarded on
 	// fromStatus so a resolve that landed during CreatePR is not overwritten.
-	p.recordAndMirrorPR(ctx, t, fromStatus)
+	proposedPersisted := p.recordAndMirrorPR(ctx, t, fromStatus)
 
 	if prURL != "" {
-		shouldAutoMerge := p.autoMerge && !p.dryRun
+		// Never auto-merge on top of a transition that did not land. If the
+		// write failed — a transient database outage is exactly when this
+		// path is reached — merging anyway puts the change into production
+		// while both incident stores still read `analyzing`, the post-merge
+		// write is then guarded from an in-memory status the row never took,
+		// and Telegram reports a success nobody can find afterwards. The PR
+		// stays open for review instead, which is recoverable.
+		shouldAutoMerge := p.autoMerge && !p.dryRun && proposedPersisted
+		if p.autoMerge && !p.dryRun && !proposedPersisted {
+			slog.Warn("skipping auto-merge: the fix_proposed transition was not persisted",
+				"ticket", t.ID, "pr", prURL)
+		}
 		if shouldAutoMerge {
 			if am, ok := s.(skill.AutoMerger); !ok || !am.AutoMergeSafe() {
 				shouldAutoMerge = false
