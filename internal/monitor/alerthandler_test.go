@@ -428,7 +428,8 @@ func TestAlertHandlerResolvedAlert(t *testing.T) {
 	fire := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "firing",
+				Status:      "firing",
+				Fingerprint: "fp-podcrash-1111",
 				Labels: map[string]string{
 					"alertname": "PodCrashLooping",
 					"namespace": "billing",
@@ -451,7 +452,8 @@ func TestAlertHandlerResolvedAlert(t *testing.T) {
 	resolve := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "resolved",
+				Status:      "resolved",
+				Fingerprint: "fp-podcrash-1111",
 				Labels: map[string]string{
 					"alertname": "PodCrashLooping",
 					"namespace": "billing",
@@ -494,7 +496,8 @@ func TestAlertHandlerResolveFiresOnResolve(t *testing.T) {
 	resolve := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "resolved",
+				Status:      "resolved",
+				Fingerprint: "fp-podcrash-1111",
 				Labels: map[string]string{
 					"alertname": "PodCrashLooping",
 					"namespace": "billing",
@@ -594,7 +597,8 @@ func TestAlertHandlerFlapCooldown(t *testing.T) {
 	fire := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "firing",
+				Status:      "firing",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
@@ -609,7 +613,8 @@ func TestAlertHandlerFlapCooldown(t *testing.T) {
 	resolve := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "resolved",
+				Status:      "resolved",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
@@ -647,7 +652,8 @@ func TestAlertHandlerFlapCooldownKeyedByAlertName(t *testing.T) {
 	fireThrottling := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "firing",
+				Status:      "firing",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
@@ -659,7 +665,8 @@ func TestAlertHandlerFlapCooldownKeyedByAlertName(t *testing.T) {
 	resolveThrottling := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "resolved",
+				Status:      "resolved",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
@@ -671,7 +678,8 @@ func TestAlertHandlerFlapCooldownKeyedByAlertName(t *testing.T) {
 	fireQuota := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "firing",
+				Status:      "firing",
+				Fingerprint: "fp-tenant-quota-3333",
 				Labels: map[string]string{
 					"alertname": "TenantCPUQuotaHigh",
 					"namespace": "platform-db",
@@ -705,7 +713,8 @@ func TestAlertHandlerFlapCooldownDisabled(t *testing.T) {
 	fire := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "firing",
+				Status:      "firing",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
@@ -717,7 +726,8 @@ func TestAlertHandlerFlapCooldownDisabled(t *testing.T) {
 	resolve := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "resolved",
+				Status:      "resolved",
+				Fingerprint: "fp-cpu-throttle-2222",
 				Labels: map[string]string{
 					"alertname": "CPUThrottlingHigh",
 					"namespace": "platform-db",
@@ -844,7 +854,8 @@ func TestAlertHandlerIgnoreFilterSkipsResolve(t *testing.T) {
 	resolve := alertManagerPayload{
 		Alerts: []alert{
 			{
-				Status: "resolved",
+				Status:      "resolved",
+				Fingerprint: "fp-podcrash-1111",
 				Labels: map[string]string{
 					"alertname": "PodCrashLooping",
 					"namespace": "labs",
@@ -1457,5 +1468,58 @@ func TestAlertHandlerMixedBatchProcessesLaterAlertsAfterAStoreError(t *testing.T
 	}
 	if len(created) != 1 {
 		t.Errorf("onTicket must fire for the alert that succeeded: want 1 call, got %d", len(created))
+	}
+}
+
+func TestAlertHandlerRefusesToResolveWithoutAFingerprint(t *testing.T) {
+	// An empty fingerprint used to disable the scope entirely, so a single
+	// resolved webhook closed every open ticket under (tenant, service,
+	// type). The webhook's bearer token is optional, which put that blast
+	// radius within reach of an unauthenticated caller (mctl-agent#107).
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(*ticket.Ticket) {})
+	var resolved []string
+	handler.OnResolve = func(ids []string) { resolved = append(resolved, ids...) }
+
+	for _, fp := range []string{"aaaa1111", "bbbb2222"} {
+		tk := &ticket.Ticket{
+			Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+			Tenant: "billing", Service: "api", Summary: "crashloop",
+			AlertFingerprint: fp,
+		}
+		if err := store.Create(tk); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	body, _ := json.Marshal(alertManagerPayload{
+		Status: "resolved",
+		Alerts: []alert{{
+			Status:      "resolved",
+			Fingerprint: "",
+			Labels: map[string]string{
+				"alertname": "PodCrashLooping",
+				"namespace": "billing",
+				"pod":       "api-6d4b5c7f8-abc12",
+			},
+		}},
+	})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+
+	// Dropped, not failed: a 500 would make AlertManager redeliver a
+	// payload that no retry can improve.
+	if rec.Code != http.StatusOK {
+		t.Errorf("a fingerprintless resolve must be dropped, not retried: want 200, got %d", rec.Code)
+	}
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("ListOpen: %v", err)
+	}
+	if len(open) != 2 {
+		t.Errorf("a fingerprintless resolve must close nothing: want 2 tickets still open, got %d", len(open))
+	}
+	if len(resolved) != 0 {
+		t.Errorf("OnResolve must not fan out for a dropped resolve, got %v", resolved)
 	}
 }
