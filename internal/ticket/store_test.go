@@ -922,8 +922,12 @@ func TestStoreRecordPRLinkageKeepsANewerResolution(t *testing.T) {
 	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/1"
 	tk.PRNumber = 1
 	tk.Status = StatusFixProposed
-	if err := store.RecordPRLinkage(ctx, tk, StatusAnalyzing); err != nil {
+	advanced, err := store.RecordPRLinkage(ctx, tk, StatusAnalyzing)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if advanced {
+		t.Error("the status did not advance, and saying otherwise would let the caller mirror the stale value to mctl-api")
 	}
 
 	got, err := store.Get(ctx, tk.ID)

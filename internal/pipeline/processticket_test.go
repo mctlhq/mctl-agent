@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -226,5 +227,68 @@ func TestEscalateDoesNotClobberAConcurrentResolution(t *testing.T) {
 	}
 	if got.ResolvedAt == nil {
 		t.Error("resolved_at was cleared by the stale escalation write")
+	}
+}
+
+// The local guard alone is not enough: RecordPRLinkage correctly refuses to
+// pull a resolved row back to fix_proposed, but mirroring the in-memory ticket
+// regardless would push that stale status into mctl-api and reopen the
+// incident on the dashboard and in MCP (claude P2 on #113).
+func TestRecordAndMirrorPRDoesNotMirrorASuppressedStatus(t *testing.T) {
+	store, err := ticket.NewStore(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	var mirrored int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPatch || r.Method == http.MethodPut || r.Method == http.MethodPost {
+			atomic.AddInt32(&mirrored, 1)
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	p := &Pipeline{
+		store:     store,
+		registry:  skill.NewRegistry(),
+		telegram:  notify.NewTelegram("", "", "", nil),
+		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
+		sem:       make(chan struct{}, 1),
+	}
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop,
+		Tenant: "billing", Service: "api", Summary: "crashloop",
+		Status: ticket.StatusAnalyzing,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+	// The alert resolves while CreatePR is still running.
+	applied, err := store.ResolveByIDFromStatus(context.Background(), tk.ID,
+		ticket.StatusAnalyzing, "resolved meanwhile")
+	if err != nil || !applied {
+		t.Fatalf("setup resolve failed: applied=%v err=%v", applied, err)
+	}
+
+	fromStatus := ticket.StatusAnalyzing
+	tk.PRURL = "https://github.com/mctlhq/mctl-gitops/pull/1"
+	tk.PRNumber = 1
+	tk.Status = ticket.StatusFixProposed
+	p.recordAndMirrorPR(context.Background(), tk, fromStatus)
+
+	if n := atomic.LoadInt32(&mirrored); n != 0 {
+		t.Errorf("a status the store refused to take must not be mirrored to mctl-api, got %d call(s)", n)
+	}
+
+	got, err := store.Get(context.Background(), tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL != tk.PRURL {
+		t.Errorf("the PR coordinates must still be recorded: got %q", got.PRURL)
 	}
 }

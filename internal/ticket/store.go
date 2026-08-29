@@ -292,7 +292,11 @@ func (s *Store) EscalateFromStatus(ctx context.Context, id, fromStatus, status, 
 // closed incident. Columns this caller does not own (alert_fingerprint,
 // resolved_at, analysis) are left alone for the same reason as in
 // EscalateFromStatus.
-func (s *Store) RecordPRLinkage(ctx context.Context, t *Ticket, fromStatus string) error {
+// Returns whether the status actually advanced, so the caller can tell an
+// applied transition from a suppressed one: mirroring a status the store
+// refused to take would put the stale value into mctl-api and reopen there
+// what is closed here.
+func (s *Store) RecordPRLinkage(ctx context.Context, t *Ticket, fromStatus string) (bool, error) {
 	t.UpdatedAt = time.Now().UTC()
 	_, err := s.db.ExecContext(ctx, s.rebind(`
 		UPDATE tickets SET
@@ -303,7 +307,16 @@ func (s *Store) RecordPRLinkage(ctx context.Context, t *Ticket, fromStatus strin
 		t.PRURL, t.PRNumber, t.PRRepo, t.PRBranch, t.PRCommitSHA,
 		fromStatus, t.Status, t.UpdatedAt, t.ID,
 	)
-	return err
+	if err != nil {
+		return false, err
+	}
+	// RowsAffected counts the row, not the CASE: the UPDATE always matches by
+	// id, so it cannot say whether the status moved. Read it back instead.
+	var current string
+	if err := s.db.QueryRowContext(ctx, s.rebind(`SELECT status FROM tickets WHERE id=?`), t.ID).Scan(&current); err != nil {
+		return false, err
+	}
+	return current == t.Status, nil
 }
 
 // Get retrieves a ticket by ID, including evidence.

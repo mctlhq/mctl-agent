@@ -1636,3 +1636,74 @@ func TestAlertHandlerGivesEachAlertItsOwnDeadline(t *testing.T) {
 		t.Error("both alerts shared one deadline; each must get its own ceiling so a slow batch cannot starve its tail")
 	}
 }
+
+// blockingStore burns the batch budget on the first alert and counts how many
+// alerts were attempted at all.
+//
+// The counter lives on FindDuplicate, not Create: FindDuplicate is the first
+// store call processAlert makes, so with an expired context an alert fails
+// there and never reaches Create. Counting creates therefore cannot tell the
+// early exit from the loop running on and failing every remaining alert — a
+// first version of this test did exactly that and passed against both.
+type blockingStore struct {
+	alertStore
+	block    time.Duration
+	attempts int
+}
+
+func (s *blockingStore) FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*ticket.Ticket, error) {
+	s.attempts++
+	return s.alertStore.FindDuplicate(ctx, tenant, service, ticketType)
+}
+
+func (s *blockingStore) Create(ctx context.Context, t *ticket.Ticket) error {
+	select {
+	case <-time.After(s.block):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return s.alertStore.Create(ctx, t)
+}
+
+func TestAlertHandlerStopsWhenTheBatchBudgetIsGone(t *testing.T) {
+	// Once the budget is spent, continuing would issue store calls that
+	// cannot succeed against the database that is already the reason they are
+	// slow. The loop breaks and answers 500 so AlertManager redelivers
+	// (codex P2 / claude P3 on #113).
+	store := newTestStore(t)
+	handler := NewAlertHandler(store, func(*ticket.Ticket) {})
+	blocking := &blockingStore{alertStore: store, block: 200 * time.Millisecond}
+	handler.store = blocking
+	handler.BatchBudget = 50 * time.Millisecond
+
+	mkAlert := func(fp, pod string) alert {
+		return alert{
+			Status:      "firing",
+			Fingerprint: fp,
+			Labels: map[string]string{
+				"alertname": "PodCrashLooping",
+				"namespace": "admins",
+				"pod":       pod,
+			},
+			Annotations: map[string]string{"summary": "PodCrashLooping"},
+		}
+	}
+	body, _ := json.Marshal(alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			mkAlert("aaaa1111", "admins-first-service-6d4b5c7f8-abc12"),
+			mkAlert("bbbb2222", "admins-second-service-6d4b5c7f8-def34"),
+			mkAlert("cccc3333", "admins-third-service-6d4b5c7f8-ghi56"),
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("an exhausted batch must ask for redelivery: want 500, got %d", rec.Code)
+	}
+	if blocking.attempts != 1 {
+		t.Errorf("the loop must stop once the budget is gone, not keep issuing calls that cannot succeed: want 1 attempt, got %d", blocking.attempts)
+	}
+}

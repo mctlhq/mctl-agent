@@ -64,6 +64,11 @@ type AlertHandler struct {
 	// counterpart resolve channel was the root cause of the 198 stale
 	// incidents accumulated by 2026-05-12.
 	OnResolve func(ids []string)
+	// BatchBudget overrides the ceiling on total detached store work one
+	// delivery may cause. Zero uses ctxutil.DetachedBatch's own budget, which
+	// is what production runs. Tests set it to make the exhaustion path
+	// reachable without waiting minutes for the real one.
+	BatchBudget time.Duration
 }
 
 // NewAlertHandler creates a new AlertManager webhook handler.
@@ -122,6 +127,10 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// gets its own ceiling underneath it so a slow early alert cannot spend
 	// the whole budget and starve the tail on every redelivery.
 	batchCtx, batchCancel := ctxutil.DetachedBatch(r.Context(), len(payload.Alerts))
+	if h.BatchBudget > 0 {
+		batchCancel()
+		batchCtx, batchCancel = context.WithTimeout(context.WithoutCancel(r.Context()), h.BatchBudget)
+	}
 	defer batchCancel()
 
 	var firstErr error

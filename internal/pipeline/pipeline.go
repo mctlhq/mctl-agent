@@ -151,11 +151,33 @@ func (p *Pipeline) publishAlert(t *ticket.Ticket) {
 // written unconditionally — the PR exists whatever the ticket now says — while
 // the status advances only if nothing else moved the row on; see
 // Store.RecordPRLinkage.
-func (p *Pipeline) recordPRLinkage(parent context.Context, t *ticket.Ticket, fromStatus string) {
+// Returns whether the status advanced. It did not when something else moved
+// the row on first, and the caller must then not mirror the status it wanted:
+// the local store correctly kept the newer state, and pushing the stale one to
+// mctl-api would reopen there what is closed here.
+func (p *Pipeline) recordPRLinkage(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
 	ctx, cancel := ctxutil.DetachedWrite(parent)
 	defer cancel()
-	if err := p.store.RecordPRLinkage(ctx, t, fromStatus); err != nil {
+	advanced, err := p.store.RecordPRLinkage(ctx, t, fromStatus)
+	if err != nil {
 		slog.Error("failed to record PR linkage", "ticket", t.ID, "pr", t.PRURL, "error", err)
+		return false
+	}
+	if !advanced {
+		slog.Info("PR recorded but status not advanced: ticket moved on concurrently",
+			"ticket", t.ID, "pr", t.PRURL, "wanted", t.Status, "from_status", fromStatus)
+	}
+	return advanced
+}
+
+// recordAndMirrorPR records the PR a fix produced and mirrors the result to
+// mctl-api — but only the status the store actually took. Mirroring
+// unconditionally would push fix_proposed or fix_applied over a resolution
+// that landed while GitHub was answering, reopening on the dashboard and in
+// MCP what the guard in RecordPRLinkage correctly refused to reopen locally.
+func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, fromStatus string) {
+	if p.recordPRLinkage(ctx, t, fromStatus) {
+		p.updateAlert(t)
 	}
 }
 
@@ -650,10 +672,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	// silently drop the PR linkage and leave the ticket looking untouched
 	// while a real PR sits open against it. The status half is guarded on
 	// fromStatus so a resolve that landed during CreatePR is not overwritten.
-	p.recordPRLinkage(ctx, t, fromStatus)
-
-	// Sync PR info to mctl-api.
-	p.updateAlert(t)
+	p.recordAndMirrorPR(ctx, t, fromStatus)
 
 	if prURL != "" {
 		shouldAutoMerge := p.autoMerge && !p.dryRun
@@ -671,9 +690,9 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			} else {
 				mergedFrom := t.Status
 				t.Status = ticket.StatusFixApplied
-				// Same reasoning as above: the merge already happened.
-				p.recordPRLinkage(ctx, t, mergedFrom)
-				p.updateAlert(t)
+				// Same reasoning as above: the merge already happened, and the
+				// mirror follows the store rather than our in-memory copy.
+				p.recordAndMirrorPR(ctx, t, mergedFrom)
 				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
 			}
 		} else {
