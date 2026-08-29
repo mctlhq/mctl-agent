@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/skill"
 )
@@ -89,7 +90,12 @@ func ValidateRegistration(reg Registration) error {
 		return fmt.Errorf("endpoint must have a host")
 	}
 
-	ips, err := resolveHost(context.Background(), host)
+	// Bounded lookup: Register is reached from an HTTP handler, and an
+	// endpoint pointed at a tarpit DNS server must not be able to pin the
+	// handler goroutine indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	ips, err := resolveHost(ctx, host)
 	if err != nil {
 		return fmt.Errorf("resolving endpoint host %q: %w", host, err)
 	}

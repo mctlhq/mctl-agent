@@ -72,6 +72,10 @@ func (a Allowlist) Validate(candidate string) error {
 	}
 
 	cleaned := path.Clean(candidate)
+	// The ".."/"../" arms are unreachable today (any ".." substring is
+	// already rejected above) — kept deliberately as defense in depth so
+	// this line stays correct even if the substring check above is ever
+	// relaxed to allow ".." inside a filename.
 	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || path.IsAbs(cleaned) {
 		return fmt.Errorf("gitops path %q resolves outside the repository", candidate)
 	}

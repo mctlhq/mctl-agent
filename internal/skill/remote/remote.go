@@ -147,7 +147,7 @@ func New(reg Registration) *Skill {
 // This covers both the initial request and any redirect the endpoint issues,
 // since http.Transport re-invokes DialContext for each connection it opens.
 func guardedDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, _, err := net.SplitHostPort(addr)
+	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
 		return nil, err
 	}
@@ -160,8 +160,25 @@ func guardedDialContext(ctx context.Context, network, addr string) (net.Conn, er
 			return nil, fmt.Errorf("refusing to dial %s: resolved address %s is disallowed", addr, ip)
 		}
 	}
+	// Dial the addresses we just validated, never the hostname: handing
+	// addr back to the dialer would trigger a second DNS resolution, and a
+	// rebinding attacker could serve a clean IP to the check above and a
+	// denied one to that second lookup (TOCTOU). TLS is unaffected — the
+	// handshake's ServerName comes from the request URL, not the dial
+	// address.
 	var dialer net.Dialer
-	return dialer.DialContext(ctx, network, addr)
+	var lastErr error
+	for _, ip := range ips {
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no addresses to dial for %s", addr)
+	}
+	return nil, lastErr
 }
 
 func (s *Skill) Name() string        { return s.reg.Name }
