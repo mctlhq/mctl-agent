@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mctlhq/mctl-agent/internal/gitopspath"
 )
 
 type Config struct {
@@ -64,6 +66,11 @@ type Config struct {
 	// measured from CreatedAt (not reset by flapping alert heartbeats).
 	// Zero disables the cap. Env: MAX_ANALYZING_AGE (e.g. "120h").
 	MaxAnalyzingAge time.Duration
+	// GitOpsPathAllowlist bounds every gitops read/write path mctl-agent
+	// will act on, in mctl-gitops. Env: GITOPS_PATH_ALLOWLIST
+	// (comma-separated prefixes). Defaults to the prefixes already used by
+	// fixer.DetectFilePath and the workflow-related builtin skills.
+	GitOpsPathAllowlist []string
 }
 
 func Load() Config {
@@ -196,6 +203,20 @@ func Load() Config {
 		}
 	}
 
+	gitOpsPathAllowlist := gitopspath.DefaultPrefixes
+	if v := os.Getenv("GITOPS_PATH_ALLOWLIST"); v != "" {
+		var prefixes []string
+		for _, p := range strings.Split(v, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				prefixes = append(prefixes, p)
+			}
+		}
+		if len(prefixes) > 0 {
+			gitOpsPathAllowlist = prefixes
+		}
+	}
+
 	// Priority: DATABASE_URL > DB_PATH > default
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
@@ -265,6 +286,7 @@ func Load() Config {
 		AMReconcileTimeout:          amReconcileTimeout,
 		AMReconcileMinAge:           amReconcileMinAge,
 		MaxAnalyzingAge:             maxAnalyzingAge,
+		GitOpsPathAllowlist:         gitOpsPathAllowlist,
 	}
 }
 

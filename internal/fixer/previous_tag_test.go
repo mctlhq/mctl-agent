@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-github/v68/github"
+	"github.com/mctlhq/mctl-agent/internal/gitopspath"
 )
 
 func TestExtractImageTag(t *testing.T) {
@@ -183,9 +184,10 @@ func fakeGH(t *testing.T, h http.HandlerFunc) (*GitHubFixer, func()) {
 	client.BaseURL = base
 	client.UploadURL = base
 	return &GitHubFixer{
-		client: client,
-		owner:  "mctlhq",
-		repo:   "mctl-gitops",
+		client:    client,
+		owner:     "mctlhq",
+		repo:      "mctl-gitops",
+		allowlist: gitopspath.DefaultAllowlist(),
 	}, srv.Close
 }
 

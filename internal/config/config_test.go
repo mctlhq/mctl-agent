@@ -194,3 +194,37 @@ func TestLoadAlertIgnoreServiceRegexDefaultAndEmpty(t *testing.T) {
 		t.Errorf("custom pattern not honored: %q", cfg.AlertIgnoreServiceRegex)
 	}
 }
+
+func TestLoadGitOpsPathAllowlistDefault(t *testing.T) {
+	t.Setenv("GITOPS_PATH_ALLOWLIST", "")
+	cfg := Load()
+
+	want := []string{
+		"platform-gitops/services/",
+		"platform-gitops/apps/templates/",
+		"platform-gitops/argo-workflows/workflow-templates/",
+	}
+	if len(cfg.GitOpsPathAllowlist) != len(want) {
+		t.Fatalf("GitOpsPathAllowlist = %v, want %v", cfg.GitOpsPathAllowlist, want)
+	}
+	for i, p := range want {
+		if cfg.GitOpsPathAllowlist[i] != p {
+			t.Errorf("GitOpsPathAllowlist[%d] = %q, want %q", i, cfg.GitOpsPathAllowlist[i], p)
+		}
+	}
+}
+
+func TestLoadGitOpsPathAllowlistOverride(t *testing.T) {
+	t.Setenv("GITOPS_PATH_ALLOWLIST", " custom/prefix/ , other/prefix/ ")
+	cfg := Load()
+
+	want := []string{"custom/prefix/", "other/prefix/"}
+	if len(cfg.GitOpsPathAllowlist) != len(want) {
+		t.Fatalf("GitOpsPathAllowlist = %v, want %v", cfg.GitOpsPathAllowlist, want)
+	}
+	for i, p := range want {
+		if cfg.GitOpsPathAllowlist[i] != p {
+			t.Errorf("GitOpsPathAllowlist[%d] = %q, want %q", i, cfg.GitOpsPathAllowlist[i], p)
+		}
+	}
+}

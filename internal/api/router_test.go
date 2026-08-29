@@ -258,7 +258,7 @@ func TestRemoteSkillEndpoints(t *testing.T) {
 	regPayload := remote.Registration{
 		Name:     "test-remote",
 		Version:  "1.0",
-		Endpoint: "http://example.com",
+		Endpoint: "https://8.8.8.8", // literal public IP: avoids live DNS in tests
 	}
 	body, _ := json.Marshal(regPayload)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/register", bytes.NewReader(body))
@@ -303,6 +303,56 @@ func TestRemoteSkillEndpoints(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("double unregister: status = %d, want 404", w.Code)
+	}
+}
+
+// TestRemoteSkillRegisterValidatesEndpoint covers the accept/reject matrix
+// for POST /api/v1/skills/register at the HTTP layer: an http:// endpoint
+// and a private-range endpoint must both 400, while a valid https://
+// endpoint with a literal public IP host still 201s (avoiding live DNS).
+func TestRemoteSkillRegisterValidatesEndpoint(t *testing.T) {
+	tests := []struct {
+		name       string
+		endpoint   string
+		wantStatus int
+	}{
+		{"http scheme rejected", "http://8.8.8.8", http.StatusBadRequest},
+		{"private range rejected", "https://10.0.0.5", http.StatusBadRequest},
+		{"valid https endpoint accepted", "https://8.8.8.8", http.StatusCreated},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			pipe := newTestPipeline(t, store)
+			reg := skill.NewRegistry()
+			remoteMgr := remote.NewManager(reg)
+
+			router := NewRouter(Options{
+				Store:         store,
+				Pipeline:      pipe,
+				RemoteManager: remoteMgr,
+				APIToken:      "test-token",
+				OnAlert: func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+				},
+			})
+
+			regPayload := remote.Registration{
+				Name:     "endpoint-test",
+				Version:  "1.0",
+				Endpoint: tt.endpoint,
+			}
+			body, _ := json.Marshal(regPayload)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/skills/register", bytes.NewReader(body))
+			req.Header.Set("Authorization", "Bearer test-token")
+			w := httptest.NewRecorder()
+			router.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d. Body: %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
 	}
 }
 

@@ -37,6 +37,25 @@ const (
 	CapExecWorkflow  CapabilityID = "exec_workflow"
 )
 
+// AllCapabilityIDs returns every known CapabilityID. It is the single source
+// of truth callers (e.g. remote skill registration validation) use to check
+// whether a capability string names a real capability.
+func AllCapabilityIDs() []CapabilityID {
+	return []CapabilityID{
+		CapReadLogs,
+		CapReadConfig,
+		CapReadStatus,
+		CapReadResources,
+		CapReadAudit,
+		CapModifyGitOps,
+		CapCreatePR,
+		CapMergePR,
+		CapSendNotify,
+		CapCallLLM,
+		CapExecWorkflow,
+	}
+}
+
 // Skill is the core abstraction — a modular, self-contained unit of agent behavior
 // that can detect, diagnose, and optionally fix a specific class of problems.
 type Skill interface {

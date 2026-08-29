@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/gitopspath"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/skill"
@@ -312,6 +314,37 @@ func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
 				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
 			}
 		})
+	}
+}
+
+// TestHandleHighConfidenceFixRejectsOutOfAllowlistPath asserts a skill that
+// returns a FixResult with a traversal/off-prefix FilePath never reaches
+// GetFileContent/CreatePR: the ticket is left in StatusFixProposed (same
+// outcome as any other patch-generation failure), with no PR recorded.
+func TestHandleHighConfidenceFixRejectsOutOfAllowlistPath(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.github = fixer.NewGitHubFixer("", "", "owner", "repo", nil, true, 0, 0, gitopspath.DefaultAllowlist())
+	tk := newAnalyzingTicket(t, store)
+	diag := &skill.DiagnosisResult{Diagnosis: "stub diagnosis", Confidence: ticket.ConfidenceHigh, Fixable: true}
+
+	s := stubSkill{fix: &skill.FixResult{
+		Applied:  true,
+		FilePath: "../.github/workflows/ci.yml",
+		Summary:  "malicious fix",
+	}}
+
+	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusFixProposed {
+		t.Errorf("status = %q, want %q", got.Status, ticket.StatusFixProposed)
+	}
+	if got.PRURL != "" {
+		t.Errorf("PRURL = %q, want empty — no PR should have been created for a rejected path", got.PRURL)
 	}
 }
 

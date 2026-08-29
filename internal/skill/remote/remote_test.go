@@ -60,6 +60,11 @@ func TestRemoteSkillMatchAndDiagnose(t *testing.T) {
 		Description: "Test remote skill",
 		Endpoint:    srv.URL,
 	})
+	// New's transport refuses loopback connections (SSRF guard); this test
+	// exercises Match/Diagnose/Fix against a local httptest server, not the
+	// guard itself, so swap in the server's own unguarded client. See
+	// TestGuardedDialContextRefusesLoopback for the dedicated guard test.
+	s.client = srv.Client()
 
 	ctx := context.Background()
 	tk := &ticket.Ticket{ID: "t1", Type: "pod_crashloop", Tenant: "billing", Service: "api"}
@@ -128,6 +133,7 @@ func TestRemoteSkillFixAppliedFalse(t *testing.T) {
 		Version:  "1.0",
 		Endpoint: srv.URL,
 	})
+	s.client = srv.Client() // see comment in TestRemoteSkillMatchAndDiagnose
 
 	ctx := context.Background()
 	tk := &ticket.Ticket{ID: "t2", Type: "pod_crashloop", Tenant: "billing", Service: "api"}
@@ -162,6 +168,7 @@ func TestRemoteSkillAlertTypeFilter(t *testing.T) {
 		Endpoint:   srv.URL,
 		AlertTypes: []string{"pod_crashloop"},
 	})
+	s.client = srv.Client() // see comment in TestRemoteSkillMatchAndDiagnose
 
 	ctx := context.Background()
 	ev := skill.NewEvidenceSet(nil)
@@ -189,6 +196,7 @@ func TestRemoteSkillServerError(t *testing.T) {
 	defer srv.Close()
 
 	s := New(Registration{Name: "failing", Version: "1.0", Endpoint: srv.URL})
+	s.client = srv.Client() // see comment in TestRemoteSkillMatchAndDiagnose
 	ctx := context.Background()
 	tk := &ticket.Ticket{Type: "pod_crashloop"}
 	ev := skill.NewEvidenceSet(nil)
@@ -213,7 +221,7 @@ func TestManagerRegisterAndList(t *testing.T) {
 	err := mgr.Register(Registration{
 		Name:     "ext-skill",
 		Version:  "2.0",
-		Endpoint: "http://example.com",
+		Endpoint: "https://8.8.8.8", // literal public IP: avoids live DNS in tests
 	})
 	if err != nil {
 		t.Fatal(err)
