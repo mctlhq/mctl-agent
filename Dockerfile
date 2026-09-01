@@ -1,4 +1,7 @@
-FROM golang:1.26-alpine AS builder
+# Digest resolved 2026-09-01 via Docker Registry HTTP API v2 manifest list
+# lookup against registry-1.docker.io for golang:1.26.6-alpine (matches the
+# go 1.26.6 directive in go.mod).
+FROM golang:1.26.6-alpine@sha256:3889b425f035be855a72fb4755265311293b6d414521f0a519d819df32222d83 AS builder
 
 WORKDIR /app
 
