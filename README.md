@@ -34,8 +34,8 @@ Skills are resolved in three tiers:
 
 | Category | Details |
 |----------|---------|
-| Language | Go 1.24 |
-| Router | go-chi/chi v5.2.1 |
+| Language | Go 1.26.6 |
+| Router | go-chi/chi v5.3.1 |
 | GitHub client | google/go-github v68 |
 | Database | SQLite via modernc.org/sqlite (pure Go, CGO-free) |
 | AI | Anthropic Claude API |
@@ -76,7 +76,7 @@ mctl-agent/
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.26+
 - An Anthropic API key (Claude)
 - A GitHub token with repo scope
 - (Optional) Telegram bot token and chat ID
@@ -157,7 +157,7 @@ go test ./...
 GitHub Actions workflow (`.github/workflows/build.yml`):
 
 - **Triggers:** semver tags (`v*.*.*`) and PRs to `main`
-- **Steps:** checkout → Go 1.24 → golangci-lint → build + test → Docker buildx → GHCR push → Trivy scan → GitOps auto-update → Telegram notify on failure
+- **Steps:** checkout → Go 1.26 → golangci-lint → build + test → Docker buildx → GHCR push → Trivy scan → GitOps auto-update → Telegram notify on failure
 - **Registry:** `ghcr.io/mctlhq/mctl-agent`
 
 ## Deployment

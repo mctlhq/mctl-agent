@@ -19,18 +19,20 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      # setup-go v7 pins GOTOOLCHAIN=local, so `go install ...@latest` can no
-      # longer pull a newer toolchain than the `go` directive in go.mod —
+      # setup-go v7 pins GOTOOLCHAIN=local, so `go install ...@<version>` can
+      # no longer pull a newer toolchain than the `go` directive in go.mod —
       # x/vuln v1.7.0 requires >= 1.25.0 and the install step hard-fails.
-      # (The scan step below is continue-on-error; this one is not.)
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      # (The scan step below is fail-closed; this one is not.)
+      # Pinned to v1.7.0 (not @latest) for reproducibility now that the scan
+      # step is fail-closed. The vulnerability DB itself still floats since
+      # govulncheck fetches it at runtime — only the tool version is pinned.
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
         env:
           GOTOOLCHAIN: auto
       - name: govulncheck
-        # Report-only: current Go 1.24 patch line still flags stdlib findings
-        # that need a toolchain bump, which is out of scope for this
-        # scan-bootstrap. Trivy remains fail-closed on unfixed CRITICAL.
-        continue-on-error: true
+        # Fail-closed as of the Go 1.26.6 bump: the stdlib findings that
+        # previously required continue-on-error are resolved by the
+        # toolchain bump. Trivy remains fail-closed on unfixed CRITICAL.
         run: govulncheck ./...
 
   trivy:
