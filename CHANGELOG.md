@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/mctlhq/mctl-agent/compare/2.0.1...2.1.0) (2026-09-03)
+
+
+### Features
+
+* **agents:** issue-101-go-1-25-13-bump-dockerfile-go-mod-toolch ([5e6649b](https://github.com/mctlhq/mctl-agent/commit/5e6649bf505314358ea891b5afd627c741728b56))
+
 ## [2.0.1](https://github.com/mctlhq/mctl-agent/compare/2.0.0...2.0.1) (2026-08-29)
 
 
