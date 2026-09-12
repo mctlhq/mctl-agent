@@ -45,6 +45,11 @@ func TestClassifyAlert(t *testing.T) {
 		{"TenantCPUQuotaHigh", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"TenantMemoryQuotaHigh", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"CPUThrottlingHigh", ticket.TypeResourceLimit, ticket.SeverityWarning},
+		// mctl-gitops#1220. Pod-level OOMKill: unlike the Node* entries
+		// below it carries namespace/pod, so falling through to the
+		// default would not have changed routing — only the ticket type,
+		// and with it which remediations are eligible to match.
+		{"ContainerOOMKilled", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"ArgoWorkflowFailed", ticket.TypeWorkflowFailed, ticket.SeverityWarning},
 		{"KubeJobNotCompleted", ticket.TypeWorkflowFailed, ticket.SeverityWarning},
 		{"KubePersistentVolumeFillingUp", ticket.TypeGeneric, ticket.SeverityWarning},
