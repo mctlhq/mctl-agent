@@ -305,9 +305,10 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// service (e.g. ScrapePoolHasNoTargets, which has namespace set but no
 	// pod — untouched since namespace != "" here).
 	//
-	// Excluded: TypeResourceLimit. NodeHighCPU/NodeHighMemory/
-	// NodeDiskPressure/VaultSealed are node- or cluster-level alerts with
-	// no namespace/pod either, but isInfraAlert() (pipeline.go) treats
+	// Excluded: TypeResourceLimit. NodeHighCPU/NodeMemoryHeadroomLow/
+	// NodeHighMemory/NodeDiskPressure/VaultSealed are node- or
+	// cluster-level alerts with no namespace/pod either, but
+	// isInfraAlert() (pipeline.go) treats
 	// "TypeResourceLimit + empty Service" as its signal to route the
 	// ticket manual-only instead of auto-fixing it. Giving them a
 	// non-empty service here would silently opt them into cpu_throttle's
@@ -469,7 +470,7 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 		return ticket.TypeWorkflowFailed, ticket.SeverityWarning
 	case "KubePersistentVolumeFillingUp", "KubeStatefulSetReplicasMismatch":
 		return ticket.TypeGeneric, ticket.SeverityWarning
-	case "NodeHighCPU", "NodeHighMemory", "NodeDiskPressure":
+	case "NodeHighCPU", "NodeMemoryHeadroomLow", "NodeHighMemory", "NodeDiskPressure":
 		return ticket.TypeResourceLimit, ticket.SeverityWarning
 	case "VaultSealed":
 		return ticket.TypeResourceLimit, ticket.SeverityCritical
