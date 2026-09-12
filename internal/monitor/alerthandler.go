@@ -464,7 +464,15 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 		return ticket.TypePodCrashloop, ticket.SeverityCritical
 	case "KubePodNotReady", "PodNotReady":
 		return ticket.TypePodCrashloop, ticket.SeverityWarning
-	case "TenantCPUQuotaHigh", "TenantMemoryQuotaHigh", "CPUThrottlingHigh":
+	case "TenantCPUQuotaHigh", "TenantMemoryQuotaHigh", "CPUThrottlingHigh",
+		// Pod-level, not node-level: the container hit its own memory
+		// limit. It carries namespace and pod, so extractService gives a
+		// real service name and the "TypeResourceLimit + empty Service"
+		// manual-only gate below correctly does not apply — unlike the
+		// Node* alerts further down. Paired with mctl-gitops#1220, which
+		// adds the alert. Its summary deliberately contains no "cpu", so
+		// it cannot match cpu_throttle's Match().
+		"ContainerOOMKilled":
 		return ticket.TypeResourceLimit, ticket.SeverityWarning
 	case "ArgoWorkflowFailed", "ArgoWorkflowHighFailureRate", "KubeJobNotCompleted":
 		return ticket.TypeWorkflowFailed, ticket.SeverityWarning
