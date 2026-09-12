@@ -51,6 +51,12 @@ func TestClassifyAlert(t *testing.T) {
 		{"KubeStatefulSetReplicasMismatch", ticket.TypeGeneric, ticket.SeverityWarning},
 		{"VaultSealed", ticket.TypeResourceLimit, ticket.SeverityCritical},
 		{"NodeHighCPU", ticket.TypeResourceLimit, ticket.SeverityWarning},
+		// mctl-gitops#1196. Before it was listed, this fell through to the
+		// default (TypeGeneric), which also changes routing: TypeGeneric with
+		// no namespace/pod gets service=alertName from the fallback above, so
+		// it would miss isInfraAlert's "TypeResourceLimit + empty Service"
+		// manual-only gate that every other node alert relies on.
+		{"NodeMemoryHeadroomLow", ticket.TypeResourceLimit, ticket.SeverityWarning},
 		{"ArgoCDApplicationDegraded", ticket.TypeArgoCDDegraded, ticket.SeverityWarning},
 		{"ArgoCDApplicationOutOfSyncLong", ticket.TypeArgoCDDegraded, ticket.SeverityWarning},
 		{"ArgoCDApplicationSyncFailed", ticket.TypeArgoCDDegraded, ticket.SeverityWarning}, // legacy name pre-rename
