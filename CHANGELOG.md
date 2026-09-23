@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.2.0](https://github.com/mctlhq/mctl-agent/compare/2.1.0...2.2.0) (2026-09-23)
+
+
+### Features
+
+* **monitor:** classify ContainerOOMKilled as a resource-limit alert ([3f4549b](https://github.com/mctlhq/mctl-agent/commit/3f4549b9f1410074f2dbb6118d7c496119083158))
+* **monitor:** classify ContainerOOMKilled as a resource-limit alert ([5171d37](https://github.com/mctlhq/mctl-agent/commit/5171d37f70bc5cae02181be9ee6179fe9475264b))
+* **monitor:** classify NodeMemoryHeadroomLow as a resource-limit alert ([301599b](https://github.com/mctlhq/mctl-agent/commit/301599b8052d177fed7447924f53cadf0e9ffcdb))
+* **monitor:** classify NodeMemoryHeadroomLow as a resource-limit alert ([ffedcbe](https://github.com/mctlhq/mctl-agent/commit/ffedcbe5315ee1199d697532955c36d1a3ed4a3f))
+* **telemetry:** trace ticket processing over OTLP and count LLM tokens ([29bb65e](https://github.com/mctlhq/mctl-agent/commit/29bb65e507ef3880e306fc1edac4c8b2137076bc))
+* **telemetry:** trace ticket processing over OTLP and count LLM tokens ([0c9e8f2](https://github.com/mctlhq/mctl-agent/commit/0c9e8f2285363fc15505b14fffeec5646a006b58))
+
+
+### Bug Fixes
+
+* **telemetry:** address review — request outcome, fix span semantics ([5052029](https://github.com/mctlhq/mctl-agent/commit/5052029c9284ecb731fe1046f81b25038aa58b80))
+* **telemetry:** follow the OTLP protocol variable; survive a failed reload ([d8c9f83](https://github.com/mctlhq/mctl-agent/commit/d8c9f8349a7e55bc082a94bfcd0125f2a33dce64))
+
 ## [2.1.0](https://github.com/mctlhq/mctl-agent/compare/2.0.1...2.1.0) (2026-09-03)
 
 
