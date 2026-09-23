@@ -19,6 +19,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/google/go-github/v68/github"
@@ -201,6 +203,20 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 // RepoFullName is the GitOps repository as owner/repo, the form the
 // telemetry catalog's mctl.repository.name takes.
 func (f *GitHubFixer) RepoFullName() string { return f.owner + "/" + f.repo }
+
+// SetBaseURL points the GitHub API client at another base URL, such as a
+// GitHub Enterprise host or a test stub. It must end in a slash.
+func (f *GitHubFixer) SetBaseURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	if !strings.HasSuffix(u.Path, "/") {
+		return fmt.Errorf("base URL %q must end in a slash", raw)
+	}
+	f.client.BaseURL = u
+	return nil
+}
 
 // MergePR merges a PR by number.
 func (f *GitHubFixer) MergePR(ctx context.Context, prNumber int) error {

@@ -27,6 +27,7 @@ import (
 
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/gitopspath"
@@ -55,10 +56,22 @@ func (mediumSkill) Fix(context.Context, *ticket.Ticket, *skill.DiagnosisResult) 
 }
 func (mediumSkill) RequiredCapabilities() []skill.CapabilityID { return nil }
 
-func spansByName(spans []sdktrace.ReadOnlySpan) map[string]sdktrace.ReadOnlySpan {
+// ticketSpans returns, by name, the spans of the one trace whose root is
+// ticketID's. The recorder is process-global, so it also sees spans from
+// pipeline goroutines that earlier tests left running; selecting by the
+// ticket's own trace keeps those out.
+func ticketSpans(spans []sdktrace.ReadOnlySpan, ticketID string) map[string]sdktrace.ReadOnlySpan {
+	var tid trace.TraceID
+	for _, s := range spans {
+		if s.Name() == "mctl_agent.process_ticket" && telemetrytest.SpanAttrs(s)[telemetry.TicketID].AsString() == ticketID {
+			tid = s.SpanContext().TraceID()
+		}
+	}
 	out := map[string]sdktrace.ReadOnlySpan{}
 	for _, s := range spans {
-		out[s.Name()] = s
+		if tid.IsValid() && s.SpanContext().TraceID() == tid {
+			out[s.Name()] = s
+		}
 	}
 	return out
 }
@@ -71,7 +84,7 @@ func processTraced(t *testing.T, p *Pipeline, store *ticket.Store) (map[string]s
 		t.Fatal(err)
 	}
 	p.processTicketSync(context.Background(), tk)
-	return spansByName(rec.Ended()), tk
+	return ticketSpans(rec.Ended(), tk.ID), tk
 }
 
 // Every stage span must hang off the one root span for the ticket, and the
@@ -178,7 +191,7 @@ func TestProcessTicketSpanSurvivesAFailedReload(t *testing.T) {
 
 	p.processTicketSync(context.Background(), tk)
 
-	root, ok := spansByName(rec.Ended())["mctl_agent.process_ticket"]
+	root, ok := ticketSpans(rec.Ended(), tk.ID)["mctl_agent.process_ticket"]
 	if !ok {
 		t.Fatal("no root span")
 	}
@@ -190,23 +203,8 @@ func TestProcessTicketSpanSurvivesAFailedReload(t *testing.T) {
 	}
 }
 
-// redirectTransport sends every request to a stub server, whatever host the
-// client addressed.
-type redirectTransport struct {
-	to   string
-	base http.RoundTripper
-}
-
-func (rt redirectTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.URL.Scheme, r.URL.Host = "http", rt.to
-	return rt.base.RoundTrip(r)
-}
-
 // stubGitHubFixer is a GitHubFixer whose API calls land on a stub that
-// serves one file and opens PR #42. NewGitHubFixer wraps
-// http.DefaultTransport at construction, so it is swapped only for that
-// call; nothing else in the process sees the redirect.
+// serves one file and opens PR #42.
 func stubGitHubFixer(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
 	t.Helper()
 	file := map[string]any{"type": "file", "encoding": "base64", "sha": "f1", "content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n"))}
@@ -234,10 +232,10 @@ func stubGitHubFixer(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
 	}))
 	t.Cleanup(srv.Close)
 
-	prev := http.DefaultTransport
-	http.DefaultTransport = redirectTransport{to: strings.TrimPrefix(srv.URL, "http://"), base: prev}
 	f := fixer.NewGitHubFixer("test-token", "", "owner", "repo", store, false, 10, 10, gitopspath.DefaultAllowlist())
-	http.DefaultTransport = prev
+	if err := f.SetBaseURL(srv.URL + "/"); err != nil {
+		t.Fatal(err)
+	}
 	return f
 }
 

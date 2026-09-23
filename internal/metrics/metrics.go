@@ -119,4 +119,12 @@ func init() {
 	for _, outcome := range []string{"success", "http_error", "decode_error", "transport_error"} {
 		AMRequestDuration.WithLabelValues(outcome).Observe(0)
 	}
+
+	// Pre-populate LLMRequests so an error-rate rule has a zero series to
+	// evaluate on a healthy agent. Keep in sync with the model and skill
+	// name in internal/skill/builtin/llm_diagnosis.go. LLMTokens is left
+	// lazy: with ticket_type in its labels the cross-product is not worth it.
+	for _, outcome := range []string{"ok", "error"} {
+		LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", outcome)
+	}
 }
