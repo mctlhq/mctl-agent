@@ -22,7 +22,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -440,7 +439,6 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	// Match skills.
 	mCtx, mSpan := telemetry.Tracer().Start(ctx, "mctl_agent.match_skills")
 	ranked := p.registry.Match(mCtx, t, ev)
-	mSpan.SetAttributes(attribute.Int("mctl_agent.matched_skills.count", len(ranked)))
 	mSpan.End()
 	if len(ranked) == 0 {
 		log.Info("no skills matched ticket")

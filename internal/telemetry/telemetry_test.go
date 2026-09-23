@@ -67,8 +67,8 @@ func TestSetupWithoutEndpointInstallsNothing(t *testing.T) {
 	}
 }
 
-// With an endpoint a real provider is installed and shuts down cleanly. The
-// gRPC exporter connects lazily, so no collector is needed here.
+// With an endpoint a real provider is installed and shuts down cleanly.
+// Neither OTLP exporter dials in New, so no collector is needed here.
 func TestSetupWithEndpointInstallsAProvider(t *testing.T) {
 	clearOTelEnv(t)
 	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")

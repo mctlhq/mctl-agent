@@ -108,9 +108,6 @@ func TestProcessTicketEmitsOneTraceWithOutcome(t *testing.T) {
 			t.Errorf("%s is not a child of the root span", name)
 		}
 	}
-	if n := telemetrytest.SpanAttrs(spans["mctl_agent.match_skills"])[attribute.Key("mctl_agent.matched_skills.count")]; n.AsInt64() != 0 {
-		t.Errorf("matched_skills.count = %d, want 0", n.AsInt64())
-	}
 }
 
 // Mutation check: remove the confidence/fixable attributes from the
