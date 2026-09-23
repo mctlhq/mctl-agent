@@ -25,6 +25,7 @@ package telemetry
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"runtime/debug"
@@ -33,6 +34,7 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -99,11 +101,20 @@ func Enabled() bool {
 // no-op: the agent must run unchanged without a collector.
 func Setup(ctx context.Context) (func(context.Context) error, error) {
 	noop := func(context.Context) error { return nil }
+	var err error
 	if !Enabled() {
 		slog.Info("tracing disabled: no OTLP endpoint configured")
 		return noop, nil
 	}
-	exp, err := otlptracegrpc.New(ctx)
+	var exp sdktrace.SpanExporter
+	switch p := protocol(); p {
+	case "http/protobuf":
+		exp, err = otlptracehttp.New(ctx)
+	case "grpc":
+		exp, err = otlptracegrpc.New(ctx)
+	default:
+		err = fmt.Errorf("unsupported OTLP traces protocol %q (want http/protobuf or grpc)", p)
+	}
 	if err != nil {
 		return noop, err
 	}
@@ -122,6 +133,21 @@ func Setup(ctx context.Context) (func(context.Context) error, error) {
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{}))
 	slog.Info("tracing enabled", "exporter", "otlp")
 	return tp.Shutdown, nil
+}
+
+// protocol is the OTLP transport for traces, from the standard variables.
+// The Go exporters do not read OTEL_EXPORTER_OTLP_PROTOCOL themselves, so it
+// is resolved here. The default is the spec's, http/protobuf, which is also
+// what the platform chart renders (base-service otel.enabled, collector port
+// 4318); grpc is opt-in.
+func protocol() string {
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"); v != "" {
+		return v
+	}
+	if v := os.Getenv("OTEL_EXPORTER_OTLP_PROTOCOL"); v != "" {
+		return v
+	}
+	return "http/protobuf"
 }
 
 // buildRevision is the VCS revision the binary was built from, or "" when

@@ -887,8 +887,12 @@ func currentImageTag(content string) string {
 // ticketOutcome maps where processing left the ticket onto the bounded
 // mctl.ticket.outcome vocabulary. A pull request, merged or not, is
 // pr_created; a ticket still analyzing never reached a terminal state.
+// t is nil when the post-evidence reload failed: processTicketSync
+// reassigns it from store.Get, and that path is a failure too.
 func ticketOutcome(t *ticket.Ticket) string {
 	switch {
+	case t == nil:
+		return telemetry.OutcomeFailed
 	case t.PRNumber > 0:
 		return telemetry.OutcomePRCreated
 	case t.Status == ticket.StatusFixProposed || t.Status == ticket.StatusFixApplied:

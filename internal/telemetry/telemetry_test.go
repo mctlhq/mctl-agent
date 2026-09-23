@@ -23,7 +23,7 @@ import (
 )
 
 func clearOTelEnv(t *testing.T) {
-	for _, k := range []string{"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"} {
+	for _, k := range []string{"OTEL_SDK_DISABLED", "OTEL_TRACES_EXPORTER", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL"} {
 		t.Setenv(k, "")
 	}
 }
@@ -85,4 +85,48 @@ func TestSetupWithEndpointInstallsAProvider(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // nothing to flush; an unreachable collector must not hang shutdown
 	_ = shutdown(ctx)
+}
+
+// The platform chart renders OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf with
+// the collector's 4318 endpoint; a gRPC exporter there fails on every export
+// and only says so in a log line.
+//
+// Mutation check: default protocol() to "grpc", or let the generic variable
+// win over the traces-specific one, and this fails.
+func TestProtocolFollowsTheStandardVariables(t *testing.T) {
+	for name, tc := range map[string]struct {
+		env  map[string]string
+		want string
+	}{
+		"spec default": {nil, "http/protobuf"},
+		"generic":      {map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}, "grpc"},
+		"traces wins":  {map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf"}, "http/protobuf"},
+		"traces only":  {map[string]string{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc"}, "grpc"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			clearOTelEnv(t)
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if got := protocol(); got != tc.want {
+				t.Fatalf("protocol() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// An unsupported protocol must fail Setup loudly rather than install an
+// exporter that can never deliver.
+func TestSetupRejectsAnUnsupportedProtocol(t *testing.T) {
+	clearOTelEnv(t)
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://127.0.0.1:1")
+	t.Setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/json")
+	prev := otel.GetTracerProvider()
+	t.Cleanup(func() { otel.SetTracerProvider(prev) })
+	if _, err := Setup(context.Background()); err == nil {
+		t.Fatal("Setup accepted http/json, which no exporter here speaks")
+	}
+	if _, isSDK := otel.GetTracerProvider().(*sdktrace.TracerProvider); isSDK {
+		t.Fatal("a provider was installed despite the error")
+	}
 }

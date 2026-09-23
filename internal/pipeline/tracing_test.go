@@ -16,12 +16,16 @@ package pipeline
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/telemetry"
 	"github.com/mctlhq/mctl-agent/internal/telemetry/telemetrytest"
@@ -142,6 +146,45 @@ func TestTicketOutcomeMapping(t *testing.T) {
 		if got := ticketOutcome(&tc.tk); got != tc.want {
 			t.Errorf("ticketOutcome(status=%s pr=%d) = %q, want %q", tc.tk.Status, tc.tk.PRNumber, got, tc.want)
 		}
+	}
+}
+
+// processTicketSync reassigns t from the post-evidence reload, which is nil
+// when that read fails. The deferred outcome must survive it: the defer
+// runs on the ticket goroutine, where a panic takes the whole agent down.
+//
+// Mutation check: drop the nil case from ticketOutcome and this test panics.
+func TestProcessTicketSpanSurvivesAFailedReload(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+	// Close the store from inside evidence collection (the first GET to
+	// mctl-api), so the status update before it succeeds and only the
+	// reload after it fails.
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			once.Do(func() { _ = store.Close() })
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	t.Cleanup(srv.Close)
+	p.apiClient = mctlclient.NewClient(srv.URL, "test-token")
+	rec := telemetrytest.RecordSpans(t)
+	tk := &ticket.Ticket{Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop, Tenant: "billing", Service: "api", Summary: "crashloop", Status: ticket.StatusAnalyzing}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+
+	p.processTicketSync(context.Background(), tk)
+
+	root, ok := spansByName(rec.Ended())["mctl_agent.process_ticket"]
+	if !ok {
+		t.Fatal("no root span")
+	}
+	if got := telemetrytest.SpanAttrs(root)[telemetry.TicketOutcome].AsString(); got != telemetry.OutcomeFailed {
+		t.Errorf("outcome = %q, want %q", got, telemetry.OutcomeFailed)
+	}
+	if root.Status().Code != codes.Error {
+		t.Error("a failed reload must leave the root span in error")
 	}
 }
 
