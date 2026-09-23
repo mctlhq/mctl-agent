@@ -135,6 +135,33 @@ func TestLLMDiagnosisFailureSetsErrorTypeWithoutBody(t *testing.T) {
 	assertNoMarker(t, sp)
 }
 
+// A 200 with no text block is a failed call: counted as an error, never ok,
+// so the counter and the span agree.
+//
+// Mutation check: increment the ok counter before the text check again, or
+// return without fail(), and this fails.
+func TestLLMDiagnosisNoTextCountsAsError(t *testing.T) {
+	rec := telemetrytest.RecordSpans(t)
+	s := stubLLM(t, http.StatusOK, `{"content":[{"type":"thinking","thinking":"hm"}],"usage":{"input_tokens":10,"output_tokens":3}}`)
+	ok := metrics.LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", "ok")
+	errs := metrics.LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", "error")
+	ok0, e0 := testutil.ToFloat64(ok), testutil.ToFloat64(errs)
+
+	if _, err := s.Diagnose(context.Background(), llmTicket(), skill.NewEvidenceSet(nil)); err == nil {
+		t.Fatal("expected an error for a response with no text block")
+	}
+	if d := testutil.ToFloat64(ok) - ok0; d != 0 {
+		t.Errorf("ok counter delta = %v, want 0", d)
+	}
+	if d := testutil.ToFloat64(errs) - e0; d != 1 {
+		t.Errorf("error counter delta = %v, want 1", d)
+	}
+	sp := rec.Ended()[0]
+	if sp.Status().Code != codes.Error || telemetrytest.SpanAttrs(sp)[attribute.Key("error.type")].AsString() != "no_text" {
+		t.Errorf("span status %v, error.type %q", sp.Status().Code, telemetrytest.SpanAttrs(sp)[attribute.Key("error.type")].AsString())
+	}
+}
+
 // assertNoMarker fails if the prompt or the provider's body leaked into the
 // span through an attribute, the status description or an event.
 func assertNoMarker(t *testing.T, sp sdktrace.ReadOnlySpan) {

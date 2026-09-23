@@ -619,16 +619,15 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		telemetry.SkillName.String(s.Name()),
 	))
 	defer func() {
-		if p.github != nil {
-			span.SetAttributes(telemetry.RepositoryName.String(p.github.RepoFullName()))
-		}
 		if t.PRNumber > 0 {
 			span.SetAttributes(telemetry.PRNumber.Int(t.PRNumber))
-		} else {
-			span.SetStatus(codes.Error, "no pull request was created")
 		}
 		span.End()
 	}()
+	// failed marks the fix span as an error. Only real failures do: a skill
+	// declining to apply its fix, or a dry run, ends without a PR but is a
+	// decision, as an escalation is on the root span.
+	failed := func(reason string) { span.SetStatus(codes.Error, reason) }
 
 	fixStart := time.Now()
 	fixResult, err := s.Fix(ctx, t, diag)
@@ -642,6 +641,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			p.metrics.RecordFix(s.Name(), t.ID, false, fixDur, detail)
 		}
 		log.Warn("skill fix generation failed", "skill", s.Name(), "error", err)
+		failed("fix generation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		failedFrom := t.Status
@@ -679,6 +679,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	// fix-generation errors, rather than the read-failure escalation below.
 	if err := p.github.ValidatePath(filePath); err != nil {
 		log.Warn("rejected gitops path", "skill", s.Name(), "ticket", t.ID, "path", filePath, "error", err)
+		failed("gitops path rejected")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+err.Error())
 		t.Status = ticket.StatusFixProposed
@@ -692,6 +693,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	content, err := p.github.GetFileContent(ctx, filePath, "main")
 	if err != nil {
 		log.Error("failed to get file content", "path", filePath, "error", err)
+		failed("reading the gitops file failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			fmt.Sprintf("Could not read %s: %v", filePath, err))
 		p.escalate(ctx, t, fmt.Sprintf(
@@ -700,6 +702,8 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			filePath, err), diag)
 		return
 	}
+	// Set only now: the repository was actually read.
+	span.SetAttributes(telemetry.RepositoryName.String(p.github.RepoFullName()))
 
 	// Generate the actual patch based on fix type.
 	var newContent, summary string
@@ -732,6 +736,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 
 	if patchErr != nil {
 		log.Warn("patch generation failed", "error", patchErr)
+		failed("patch generation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+patchErr.Error())
 		failedFrom := t.Status
@@ -755,6 +760,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	})
 	if err != nil {
 		log.Error("failed to create PR", "error", err)
+		failed("pull request creation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"PR creation failed: "+err.Error())
 		// FixFailed first, while the ticket still reads as it did when the fix

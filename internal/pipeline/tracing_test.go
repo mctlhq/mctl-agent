@@ -16,8 +16,12 @@ package pipeline
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -25,6 +29,8 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/gitopspath"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/telemetry"
@@ -185,6 +191,132 @@ func TestProcessTicketSpanSurvivesAFailedReload(t *testing.T) {
 	}
 	if root.Status().Code != codes.Error {
 		t.Error("a failed reload must leave the root span in error")
+	}
+}
+
+// redirectTransport sends every request to a stub server, whatever host the
+// client addressed.
+type redirectTransport struct {
+	to   string
+	base http.RoundTripper
+}
+
+func (rt redirectTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.URL.Scheme, r.URL.Host = "http", rt.to
+	return rt.base.RoundTrip(r)
+}
+
+// stubGitHubFixer is a GitHubFixer whose API calls land on a stub that
+// serves one file and opens PR #42. NewGitHubFixer wraps
+// http.DefaultTransport at construction, so it is swapped only for that
+// call; nothing else in the process sees the redirect.
+func stubGitHubFixer(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
+	t.Helper()
+	file := map[string]any{"type": "file", "encoding": "base64", "sha": "f1", "content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n"))}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		var body any
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			body = file
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/"):
+			body = map[string]any{"ref": "refs/heads/main", "object": map[string]any{"sha": "m1"}}
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			w.WriteHeader(http.StatusCreated)
+			body = map[string]any{"ref": "refs/heads/x"}
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			body = map[string]any{}
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusCreated)
+			body = map[string]any{"number": 42, "html_url": "https://github.com/owner/repo/pull/42"}
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	t.Cleanup(srv.Close)
+
+	prev := http.DefaultTransport
+	http.DefaultTransport = redirectTransport{to: strings.TrimPrefix(srv.URL, "http://"), base: prev}
+	f := fixer.NewGitHubFixer("test-token", "", "owner", "repo", store, false, 10, 10, gitopspath.DefaultAllowlist())
+	http.DefaultTransport = prev
+	return f
+}
+
+// fixTrace runs one ticket through a HIGH-confidence fixable stub skill and
+// returns the spans it produced.
+func fixTrace(t *testing.T, s stubSkill, withGitHub bool) map[string]sdktrace.ReadOnlySpan {
+	t.Helper()
+	p, store := newAsyncTestPipeline(t, 1)
+	if withGitHub {
+		p.github = stubGitHubFixer(t, store)
+	}
+	p.registry.Register(s)
+	spans, _ := processTraced(t, p, store)
+	return spans
+}
+
+// The PR path: the fix span hangs off the root, names the repository it
+// read and the PR it opened, and the ticket's outcome is pr_created.
+//
+// Mutation check: drop the PR-number or repository attribute, or mark the
+// span failed unconditionally, and this fails.
+func TestFixSpanOnTheOpenedPR(t *testing.T) {
+	spans := fixTrace(t, stubSkill{fix: &skill.FixResult{
+		Applied: true, FilePath: "platform-gitops/services/billing/api/values.yaml",
+		NewContent: "replicas: 2\n", Summary: "scale",
+	}}, true)
+
+	fix, ok := spans["mctl_agent.fix"]
+	if !ok {
+		t.Fatalf("no fix span; got %v", keys(spans))
+	}
+	root := spans["mctl_agent.process_ticket"]
+	if fix.Parent().SpanID() != root.SpanContext().SpanID() {
+		t.Error("fix span is not a child of the root span")
+	}
+	fa := telemetrytest.SpanAttrs(fix)
+	if fa[telemetry.SkillName].AsString() != "stub" || fa[telemetry.RepositoryName].AsString() != "owner/repo" || fa[telemetry.PRNumber].AsInt64() != 42 {
+		t.Errorf("fix attributes = %v", fa)
+	}
+	if fix.Status().Code == codes.Error {
+		t.Errorf("fix span failed on the success path: %q", fix.Status().Description)
+	}
+	if got := telemetrytest.SpanAttrs(root)[telemetry.TicketOutcome].AsString(); got != telemetry.OutcomePRCreated {
+		t.Errorf("outcome = %q, want %q", got, telemetry.OutcomePRCreated)
+	}
+}
+
+// A skill declining its own fix is a decision, not a failure, and it never
+// touched the repository.
+//
+// Mutation check: mark the span failed whenever no PR exists, or set the
+// repository name before the file is read, and this fails.
+func TestFixSpanOnADeclinedFix(t *testing.T) {
+	spans := fixTrace(t, stubSkill{fix: &skill.FixResult{Applied: false, Summary: "declined"}}, true)
+	fix, ok := spans["mctl_agent.fix"]
+	if !ok {
+		t.Fatalf("no fix span; got %v", keys(spans))
+	}
+	if fix.Status().Code == codes.Error {
+		t.Errorf("a declined fix marked the span failed: %q", fix.Status().Description)
+	}
+	if _, set := telemetrytest.SpanAttrs(fix)[telemetry.RepositoryName]; set {
+		t.Error("repository name set although the repository was never read")
+	}
+}
+
+// Mutation check: drop failed() from the Fix-error branch and this fails.
+func TestFixSpanOnAFailedFix(t *testing.T) {
+	spans := fixTrace(t, stubSkill{fixErr: errors.New("boom")}, false)
+	fix, ok := spans["mctl_agent.fix"]
+	if !ok {
+		t.Fatalf("no fix span; got %v", keys(spans))
+	}
+	if fix.Status().Code != codes.Error {
+		t.Error("a failed fix left the span unmarked")
 	}
 }
 

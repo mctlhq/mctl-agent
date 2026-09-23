@@ -167,12 +167,12 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("marshaling request: %w", err)
+		return fail("encode", fmt.Errorf("marshaling request: %w", err))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", s.apiURL, bytes.NewReader(jsonBody))
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return fail("request", fmt.Errorf("creating request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-api-key", s.anthropicKey)
@@ -207,7 +207,6 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 	if err := json.Unmarshal(body, &apiResp); err != nil {
 		return fail("decode", fmt.Errorf("parsing claude response: %w", err))
 	}
-	metrics.LLMRequests.WithLabelValues(model, s.Name(), "ok").Inc()
 	// The provider's own counts, when it reports them. The model was billed
 	// for them even if the text below turns out unusable, so they are
 	// recorded before any further check.
@@ -231,10 +230,9 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		}
 	}
 	if text == "" {
-		span.SetAttributes(attribute.String("error.type", "no_text"))
-		span.SetStatus(codes.Error, "no_text")
-		return nil, fmt.Errorf("no text block in claude response")
+		return fail("no_text", fmt.Errorf("no text block in claude response"))
 	}
+	metrics.LLMRequests.WithLabelValues(model, s.Name(), "ok").Inc()
 
 	var result skill.DiagnosisResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {

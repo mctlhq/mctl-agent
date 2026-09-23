@@ -252,8 +252,12 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
-	// Last, so spans from in-flight work finished above are flushed.
-	if err := shutdownTracing(shutdownCtx); err != nil {
+	// Last, so spans from in-flight work finished above are flushed, with a
+	// budget of its own: a slow HTTP drain must not leave the flush an
+	// already-expired context.
+	traceCtx, traceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer traceCancel()
+	if err := shutdownTracing(traceCtx); err != nil {
 		slog.Error("tracing shutdown error", "error", err)
 	}
 }
