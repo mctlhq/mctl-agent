@@ -42,6 +42,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/skill/builtin"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	yamlskill "github.com/mctlhq/mctl-agent/internal/skill/yaml"
+	"github.com/mctlhq/mctl-agent/internal/telemetry"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
@@ -51,6 +52,14 @@ func main() {
 	slog.SetDefault(logger)
 
 	cfg := config.Load()
+
+	// Tracing (mctlhq/mctl-agent#38): configured only by the standard OTEL_*
+	// variables. Without an OTLP endpoint nothing is installed and the agent
+	// runs exactly as before; a failed exporter setup is logged, never fatal.
+	shutdownTracing, err := telemetry.Setup(context.Background())
+	if err != nil {
+		slog.Error("tracing setup failed; continuing without traces", "error", err)
+	}
 
 	// Initialize database store. The pod's network namespace is not always
 	// ready when the process starts: a same-node dial to shared-pg gets
@@ -242,6 +251,14 @@ func main() {
 	defer shutdownCancel()
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
+	}
+	// Last, so spans from in-flight work finished above are flushed, with a
+	// budget of its own: a slow HTTP drain must not leave the flush an
+	// already-expired context.
+	traceCtx, traceCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer traceCancel()
+	if err := shutdownTracing(traceCtx); err != nil {
+		slog.Error("tracing shutdown error", "error", err)
 	}
 }
 

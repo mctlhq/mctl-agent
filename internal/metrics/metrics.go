@@ -78,6 +78,28 @@ var OpenTickets = promauto.NewGaugeVec(
 	[]string{"status", "source"},
 )
 
+// LLMTokens counts tokens reported by the model provider per call
+// (mctlhq/mctl-agent#38), for cost attribution across skills. Labels are all
+// bounded: the model, the skill that made the call, the ticket type, and
+// direction (input or output). The provider's own counts are used, never an
+// estimate; a response without usage adds nothing.
+var LLMTokens = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "mctl_agent_llm_tokens_total",
+		Help: "Tokens reported by the model provider, by model, skill, ticket type and direction.",
+	},
+	[]string{"model", "skill", "ticket_type", "direction"},
+)
+
+// LLMRequests counts model calls by model, skill and outcome (ok, error).
+var LLMRequests = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "mctl_agent_llm_requests_total",
+		Help: "Model calls, by model, skill and outcome.",
+	},
+	[]string{"model", "skill", "outcome"},
+)
+
 func init() {
 	// Pre-initialize all expected label combinations so the metric appears
 	// in /metrics output at zero even before any ticket has been resolved.
@@ -96,5 +118,13 @@ func init() {
 	// the histogram series appears at first scrape for all outcome labels.
 	for _, outcome := range []string{"success", "http_error", "decode_error", "transport_error"} {
 		AMRequestDuration.WithLabelValues(outcome).Observe(0)
+	}
+
+	// Pre-populate LLMRequests so an error-rate rule has a zero series to
+	// evaluate on a healthy agent. Keep in sync with the model and skill
+	// name in internal/skill/builtin/llm_diagnosis.go. LLMTokens is left
+	// lazy: with ticket_type in its labels the cross-product is not worth it.
+	for _, outcome := range []string{"ok", "error"} {
+		LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", outcome)
 	}
 }

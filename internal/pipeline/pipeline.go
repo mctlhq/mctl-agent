@@ -22,12 +22,16 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/mctlhq/mctl-agent/internal/capability"
 	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/telemetry"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
@@ -375,6 +379,22 @@ func (p *Pipeline) ProcessTicket(t *ticket.Ticket) {
 func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	log := slog.With("ticket", t.ID, "service", t.Tenant+"/"+t.Service)
 
+	// One root span per ticket, with a child per stage. The outcome is read
+	// off the ticket when processing returns, whichever path it took, so no
+	// return below needs to remember to set it.
+	ctx, span := telemetry.Tracer().Start(ctx, "mctl_agent.process_ticket", trace.WithAttributes(
+		telemetry.TicketID.String(t.ID),
+		telemetry.TicketType.String(t.Type),
+	))
+	defer func() {
+		outcome := ticketOutcome(t)
+		span.SetAttributes(telemetry.TicketOutcome.String(outcome))
+		if outcome == telemetry.OutcomeFailed {
+			span.SetStatus(codes.Error, "ticket processing did not reach a terminal state")
+		}
+		span.End()
+	}()
+
 	// Notify about new ticket.
 	if shouldNotifyNewTicket(t) {
 		if err := p.telegram.SendNewTicket(t); err != nil {
@@ -402,8 +422,10 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	p.emitExternalEvent(ctx, webhook.EventTicketCreated, t, nil)
 
 	// Collect evidence.
-	p.collectEvidence(ctx, t)
-	p.collectHistoricalEvidence(ctx, t)
+	evCtx, evSpan := telemetry.Tracer().Start(ctx, "mctl_agent.collect_evidence")
+	p.collectEvidence(evCtx, t)
+	p.collectHistoricalEvidence(evCtx, t)
+	evSpan.End()
 
 	// Reload ticket with evidence.
 	t, err := p.store.Get(ctx, t.ID)
@@ -415,7 +437,9 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	ev := skill.NewEvidenceSet(t.Evidence)
 
 	// Match skills.
-	ranked := p.registry.Match(ctx, t, ev)
+	mCtx, mSpan := telemetry.Tracer().Start(ctx, "mctl_agent.match_skills")
+	ranked := p.registry.Match(mCtx, t, ev)
+	mSpan.End()
 	if len(ranked) == 0 {
 		log.Info("no skills matched ticket")
 		if shouldNotifyDiagnosis(t) {
@@ -441,8 +465,20 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		}
 
 		diagStart := time.Now()
-		diag, err := rs.Skill.Diagnose(ctx, t, ev)
+		dCtx, dSpan := telemetry.Tracer().Start(ctx, "mctl_agent.diagnose", trace.WithAttributes(
+			telemetry.SkillName.String(rs.Skill.Name()),
+		))
+		diag, err := rs.Skill.Diagnose(dCtx, t, ev)
 		diagDur := time.Since(diagStart)
+		if err != nil {
+			dSpan.SetStatus(codes.Error, "diagnosis failed")
+		} else {
+			dSpan.SetAttributes(
+				telemetry.DiagnosisConfidence.String(string(diag.Confidence)),
+				telemetry.DiagnosisFixable.Bool(diag.Fixable),
+			)
+		}
+		dSpan.End()
 		if err != nil {
 			if p.metrics != nil {
 				p.metrics.RecordDiagnosis(rs.Skill.Name(), t.ID, false, diagDur, err.Error())
@@ -577,6 +613,20 @@ func isQuietAlert(t *ticket.Ticket) bool {
 }
 
 func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, s skill.Skill, diag *skill.DiagnosisResult, log *slog.Logger) {
+	ctx, span := telemetry.Tracer().Start(ctx, "mctl_agent.fix", trace.WithAttributes(
+		telemetry.SkillName.String(s.Name()),
+	))
+	defer func() {
+		if t.PRNumber > 0 {
+			span.SetAttributes(telemetry.PRNumber.Int(t.PRNumber))
+		}
+		span.End()
+	}()
+	// failed marks the fix span as an error. Only real failures do: a skill
+	// declining to apply its fix, or a dry run, ends without a PR but is a
+	// decision, as an escalation is on the root span.
+	failed := func(reason string) { span.SetStatus(codes.Error, reason) }
+
 	fixStart := time.Now()
 	fixResult, err := s.Fix(ctx, t, diag)
 	fixDur := time.Since(fixStart)
@@ -589,6 +639,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			p.metrics.RecordFix(s.Name(), t.ID, false, fixDur, detail)
 		}
 		log.Warn("skill fix generation failed", "skill", s.Name(), "error", err)
+		failed("fix generation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		failedFrom := t.Status
@@ -626,6 +677,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	// fix-generation errors, rather than the read-failure escalation below.
 	if err := p.github.ValidatePath(filePath); err != nil {
 		log.Warn("rejected gitops path", "skill", s.Name(), "ticket", t.ID, "path", filePath, "error", err)
+		failed("gitops path rejected")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+err.Error())
 		t.Status = ticket.StatusFixProposed
@@ -639,6 +691,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	content, err := p.github.GetFileContent(ctx, filePath, "main")
 	if err != nil {
 		log.Error("failed to get file content", "path", filePath, "error", err)
+		failed("reading the gitops file failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			fmt.Sprintf("Could not read %s: %v", filePath, err))
 		p.escalate(ctx, t, fmt.Sprintf(
@@ -647,6 +700,8 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			filePath, err), diag)
 		return
 	}
+	// Set only now: the repository was actually read.
+	span.SetAttributes(telemetry.RepositoryName.String(p.github.RepoFullName()))
 
 	// Generate the actual patch based on fix type.
 	var newContent, summary string
@@ -679,6 +734,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 
 	if patchErr != nil {
 		log.Warn("patch generation failed", "error", patchErr)
+		failed("patch generation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+patchErr.Error())
 		failedFrom := t.Status
@@ -702,6 +758,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	})
 	if err != nil {
 		log.Error("failed to create PR", "error", err)
+		failed("pull request creation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"PR creation failed: "+err.Error())
 		// FixFailed first, while the ticket still reads as it did when the fix
@@ -829,4 +886,24 @@ func (p *Pipeline) rollbackImage(ctx context.Context, valuesPath, content string
 func currentImageTag(content string) string {
 	tag, _ := fixer.ExtractImageTag(content)
 	return tag
+}
+
+// ticketOutcome maps where processing left the ticket onto the bounded
+// mctl.ticket.outcome vocabulary. A pull request, merged or not, is
+// pr_created; a ticket still analyzing never reached a terminal state.
+// t is nil when the post-evidence reload failed: processTicketSync
+// reassigns it from store.Get, and that path is a failure too.
+func ticketOutcome(t *ticket.Ticket) string {
+	switch {
+	case t == nil:
+		return telemetry.OutcomeFailed
+	case t.PRNumber > 0:
+		return telemetry.OutcomePRCreated
+	case t.Status == ticket.StatusFixProposed || t.Status == ticket.StatusFixApplied:
+		return telemetry.OutcomeFixProposed
+	case t.Status == ticket.StatusEscalated:
+		return telemetry.OutcomeEscalated
+	default:
+		return telemetry.OutcomeFailed
+	}
 }
