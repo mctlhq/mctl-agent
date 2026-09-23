@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package telemetry
+// Package telemetrytest records spans in tests. Only test code imports it.
+package telemetrytest
 
 import (
 	"context"

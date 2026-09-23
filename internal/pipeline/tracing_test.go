@@ -24,6 +24,7 @@ import (
 
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/telemetry"
+	"github.com/mctlhq/mctl-agent/internal/telemetry/telemetrytest"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -55,7 +56,7 @@ func spansByName(spans []sdktrace.ReadOnlySpan) map[string]sdktrace.ReadOnlySpan
 
 func processTraced(t *testing.T, p *Pipeline, store *ticket.Store) (map[string]sdktrace.ReadOnlySpan, *ticket.Ticket) {
 	t.Helper()
-	rec := telemetry.RecordSpans(t)
+	rec := telemetrytest.RecordSpans(t)
 	tk := &ticket.Ticket{Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop, Tenant: "billing", Service: "api", Summary: "crashloop", Status: ticket.StatusAnalyzing}
 	if err := store.Create(context.Background(), tk); err != nil {
 		t.Fatal(err)
@@ -77,7 +78,7 @@ func TestProcessTicketEmitsOneTraceWithOutcome(t *testing.T) {
 	if !ok {
 		t.Fatalf("no root span; got %v", keys(spans))
 	}
-	ra := telemetry.SpanAttrs(root)
+	ra := telemetrytest.SpanAttrs(root)
 	if ra[telemetry.TicketID].AsString() != tk.ID || ra[telemetry.TicketType].AsString() != ticket.TypePodCrashloop {
 		t.Errorf("root ids = %v", ra)
 	}
@@ -97,7 +98,7 @@ func TestProcessTicketEmitsOneTraceWithOutcome(t *testing.T) {
 			t.Errorf("%s is not a child of the root span", name)
 		}
 	}
-	if n := telemetry.SpanAttrs(spans["mctl_agent.match_skills"])[attribute.Key("mctl_agent.matched_skills.count")]; n.AsInt64() != 0 {
+	if n := telemetrytest.SpanAttrs(spans["mctl_agent.match_skills"])[attribute.Key("mctl_agent.matched_skills.count")]; n.AsInt64() != 0 {
 		t.Errorf("matched_skills.count = %d, want 0", n.AsInt64())
 	}
 }
@@ -113,13 +114,13 @@ func TestProcessTicketDiagnoseSpanCarriesTheVerdict(t *testing.T) {
 	if !ok {
 		t.Fatalf("no diagnose span; got %v", keys(spans))
 	}
-	da := telemetry.SpanAttrs(d)
+	da := telemetrytest.SpanAttrs(d)
 	if da[telemetry.SkillName].AsString() != "medium_test" ||
 		da[telemetry.DiagnosisConfidence].AsString() != string(ticket.ConfidenceMedium) ||
 		!da[telemetry.DiagnosisFixable].AsBool() {
 		t.Errorf("diagnose attributes = %v", da)
 	}
-	if got := telemetry.SpanAttrs(spans["mctl_agent.process_ticket"])[telemetry.TicketOutcome].AsString(); got != telemetry.OutcomeFixProposed {
+	if got := telemetrytest.SpanAttrs(spans["mctl_agent.process_ticket"])[telemetry.TicketOutcome].AsString(); got != telemetry.OutcomeFixProposed {
 		t.Errorf("outcome = %q, want %q", got, telemetry.OutcomeFixProposed)
 	}
 	if d.Parent().SpanID() != spans["mctl_agent.process_ticket"].SpanContext().SpanID() {

@@ -29,7 +29,7 @@ import (
 
 	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/skill"
-	"github.com/mctlhq/mctl-agent/internal/telemetry"
+	"github.com/mctlhq/mctl-agent/internal/telemetry/telemetrytest"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -53,7 +53,7 @@ func llmTicket() *ticket.Ticket {
 }
 
 func TestLLMDiagnosisRecordsUsageOnSpanAndCounters(t *testing.T) {
-	rec := telemetry.RecordSpans(t)
+	rec := telemetrytest.RecordSpans(t)
 	s := stubLLM(t, http.StatusOK, `{"content":[{"type":"text","text":"{\"diagnosis\":\"d\",\"confidence\":\"HIGH\",\"fixable\":false}"}],"usage":{"input_tokens":1234,"output_tokens":56}}`)
 
 	tk := llmTicket()
@@ -87,7 +87,7 @@ func TestLLMDiagnosisRecordsUsageOnSpanAndCounters(t *testing.T) {
 	if sp.Name() != "chat claude-sonnet-5" || sp.SpanKind() != trace.SpanKindClient {
 		t.Errorf("span = %q kind %v, want client span \"chat claude-sonnet-5\"", sp.Name(), sp.SpanKind())
 	}
-	a := telemetry.SpanAttrs(sp)
+	a := telemetrytest.SpanAttrs(sp)
 	for k, want := range map[string]any{
 		"gen_ai.operation.name":      "chat",
 		"gen_ai.provider.name":       "anthropic",
@@ -110,7 +110,7 @@ func TestLLMDiagnosisRecordsUsageOnSpanAndCounters(t *testing.T) {
 }
 
 func TestLLMDiagnosisFailureSetsErrorTypeWithoutBody(t *testing.T) {
-	rec := telemetry.RecordSpans(t)
+	rec := telemetrytest.RecordSpans(t)
 	s := stubLLM(t, http.StatusTooManyRequests, `{"error":"`+llmSecretMarker+`"}`)
 	errs := metrics.LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", "error")
 	e0 := testutil.ToFloat64(errs)
@@ -129,7 +129,7 @@ func TestLLMDiagnosisFailureSetsErrorTypeWithoutBody(t *testing.T) {
 	if sp.Status().Code != codes.Error {
 		t.Errorf("status = %v, want Error", sp.Status().Code)
 	}
-	if v := telemetry.SpanAttrs(sp)[attribute.Key("error.type")]; v.AsString() != "429" {
+	if v := telemetrytest.SpanAttrs(sp)[attribute.Key("error.type")]; v.AsString() != "429" {
 		t.Errorf("error.type = %q, want \"429\"", v.AsString())
 	}
 	assertNoMarker(t, sp)
