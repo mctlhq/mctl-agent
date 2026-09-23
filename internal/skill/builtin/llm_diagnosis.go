@@ -21,10 +21,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/runbook"
 	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/telemetry"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -69,14 +76,19 @@ Respond ONLY with valid JSON:
   "reasoning": "Brief explanation of why this fix is appropriate"
 }`
 
+// anthropicMessagesURL is the Claude Messages API endpoint.
+const anthropicMessagesURL = "https://api.anthropic.com/v1/messages"
+
 // LLMDiagnosisSkill uses the Claude API as a fallback for tickets
 // that no pattern-based skill could handle.
 type LLMDiagnosisSkill struct {
 	anthropicKey string
+	// apiURL is the Messages endpoint; tests point it at a stub server.
+	apiURL string
 }
 
 func NewLLMDiagnosisSkill(anthropicKey string) *LLMDiagnosisSkill {
-	return &LLMDiagnosisSkill{anthropicKey: anthropicKey}
+	return &LLMDiagnosisSkill{anthropicKey: anthropicKey, apiURL: anthropicMessagesURL}
 }
 
 func (s *LLMDiagnosisSkill) Name() string    { return "llm_diagnosis" }
@@ -115,6 +127,30 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 
 	model := "claude-sonnet-5"
 
+	// One client span per model call, named "{operation} {model}" as the
+	// gen_ai conventions ask. It carries ids, the model and token counts,
+	// never the prompt or the completion.
+	ctx, span := telemetry.Tracer().Start(ctx, "chat "+model,
+		trace.WithSpanKind(trace.SpanKindClient),
+		trace.WithAttributes(
+			telemetry.GenAIOperationName.String("chat"),
+			telemetry.GenAIProviderName.String("anthropic"),
+			telemetry.GenAIRequestModel.String(model),
+			telemetry.SkillName.String(s.Name()),
+			telemetry.TicketID.String(t.ID),
+			telemetry.TicketType.String(t.Type),
+		))
+	defer span.End()
+	// fail marks the call failed with a bounded error.type. The error
+	// itself is not recorded on the span: for an HTTP failure it carries
+	// the provider's response body.
+	fail := func(errType string, err error) (*skill.DiagnosisResult, error) {
+		span.SetAttributes(attribute.String("error.type", errType))
+		span.SetStatus(codes.Error, errType)
+		metrics.LLMRequests.WithLabelValues(model, s.Name(), "error").Inc()
+		return nil, err
+	}
+
 	userMsg := buildUserMessage(t, ev)
 
 	reqBody := map[string]interface{}{
@@ -134,7 +170,7 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		return nil, fmt.Errorf("marshaling request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", "https://api.anthropic.com/v1/messages", bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", s.apiURL, bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -145,17 +181,17 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("claude API request: %w", err)
+		return fail("transport", fmt.Errorf("claude API request: %w", err))
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response: %w", err)
+		return fail("transport", fmt.Errorf("reading response: %w", err))
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("claude API returned %d: %s", resp.StatusCode, string(body))
+		return fail(strconv.Itoa(resp.StatusCode), fmt.Errorf("claude API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
 	var apiResp struct {
@@ -163,9 +199,25 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Usage *struct {
+			InputTokens  int64 `json:"input_tokens"`
+			OutputTokens int64 `json:"output_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &apiResp); err != nil {
-		return nil, fmt.Errorf("parsing claude response: %w", err)
+		return fail("decode", fmt.Errorf("parsing claude response: %w", err))
+	}
+	metrics.LLMRequests.WithLabelValues(model, s.Name(), "ok").Inc()
+	// The provider's own counts, when it reports them. The model was billed
+	// for them even if the text below turns out unusable, so they are
+	// recorded before any further check.
+	if u := apiResp.Usage; u != nil {
+		span.SetAttributes(
+			telemetry.GenAIUsageInputTokens.Int64(u.InputTokens),
+			telemetry.GenAIUsageOutputTokens.Int64(u.OutputTokens),
+		)
+		metrics.LLMTokens.WithLabelValues(model, s.Name(), t.Type, "input").Add(float64(u.InputTokens))
+		metrics.LLMTokens.WithLabelValues(model, s.Name(), t.Type, "output").Add(float64(u.OutputTokens))
 	}
 
 	// Extended-thinking models can return a thinking block before the text
@@ -179,6 +231,8 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		}
 	}
 	if text == "" {
+		span.SetAttributes(attribute.String("error.type", "no_text"))
+		span.SetStatus(codes.Error, "no_text")
 		return nil, fmt.Errorf("no text block in claude response")
 	}
 

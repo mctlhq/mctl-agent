@@ -22,12 +22,17 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/mctlhq/mctl-agent/internal/capability"
 	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/telemetry"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
@@ -375,6 +380,22 @@ func (p *Pipeline) ProcessTicket(t *ticket.Ticket) {
 func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	log := slog.With("ticket", t.ID, "service", t.Tenant+"/"+t.Service)
 
+	// One root span per ticket, with a child per stage. The outcome is read
+	// off the ticket when processing returns, whichever path it took, so no
+	// return below needs to remember to set it.
+	ctx, span := telemetry.Tracer().Start(ctx, "mctl_agent.process_ticket", trace.WithAttributes(
+		telemetry.TicketID.String(t.ID),
+		telemetry.TicketType.String(t.Type),
+	))
+	defer func() {
+		outcome := ticketOutcome(t)
+		span.SetAttributes(telemetry.TicketOutcome.String(outcome))
+		if outcome == telemetry.OutcomeFailed {
+			span.SetStatus(codes.Error, "ticket processing did not reach a terminal state")
+		}
+		span.End()
+	}()
+
 	// Notify about new ticket.
 	if shouldNotifyNewTicket(t) {
 		if err := p.telegram.SendNewTicket(t); err != nil {
@@ -402,8 +423,10 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	p.emitExternalEvent(ctx, webhook.EventTicketCreated, t, nil)
 
 	// Collect evidence.
-	p.collectEvidence(ctx, t)
-	p.collectHistoricalEvidence(ctx, t)
+	evCtx, evSpan := telemetry.Tracer().Start(ctx, "mctl_agent.collect_evidence")
+	p.collectEvidence(evCtx, t)
+	p.collectHistoricalEvidence(evCtx, t)
+	evSpan.End()
 
 	// Reload ticket with evidence.
 	t, err := p.store.Get(ctx, t.ID)
@@ -415,7 +438,10 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	ev := skill.NewEvidenceSet(t.Evidence)
 
 	// Match skills.
-	ranked := p.registry.Match(ctx, t, ev)
+	mCtx, mSpan := telemetry.Tracer().Start(ctx, "mctl_agent.match_skills")
+	ranked := p.registry.Match(mCtx, t, ev)
+	mSpan.SetAttributes(attribute.Int("mctl_agent.matched_skills.count", len(ranked)))
+	mSpan.End()
 	if len(ranked) == 0 {
 		log.Info("no skills matched ticket")
 		if shouldNotifyDiagnosis(t) {
@@ -441,8 +467,20 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		}
 
 		diagStart := time.Now()
-		diag, err := rs.Skill.Diagnose(ctx, t, ev)
+		dCtx, dSpan := telemetry.Tracer().Start(ctx, "mctl_agent.diagnose", trace.WithAttributes(
+			telemetry.SkillName.String(rs.Skill.Name()),
+		))
+		diag, err := rs.Skill.Diagnose(dCtx, t, ev)
 		diagDur := time.Since(diagStart)
+		if err != nil {
+			dSpan.SetStatus(codes.Error, "diagnosis failed")
+		} else {
+			dSpan.SetAttributes(
+				telemetry.DiagnosisConfidence.String(string(diag.Confidence)),
+				telemetry.DiagnosisFixable.Bool(diag.Fixable),
+			)
+		}
+		dSpan.End()
 		if err != nil {
 			if p.metrics != nil {
 				p.metrics.RecordDiagnosis(rs.Skill.Name(), t.ID, false, diagDur, err.Error())
@@ -577,6 +615,21 @@ func isQuietAlert(t *ticket.Ticket) bool {
 }
 
 func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket, s skill.Skill, diag *skill.DiagnosisResult, log *slog.Logger) {
+	ctx, span := telemetry.Tracer().Start(ctx, "mctl_agent.fix", trace.WithAttributes(
+		telemetry.SkillName.String(s.Name()),
+	))
+	defer func() {
+		if p.github != nil {
+			span.SetAttributes(telemetry.RepositoryName.String(p.github.RepoFullName()))
+		}
+		if t.PRNumber > 0 {
+			span.SetAttributes(telemetry.PRNumber.Int(t.PRNumber))
+		} else {
+			span.SetStatus(codes.Error, "no pull request was created")
+		}
+		span.End()
+	}()
+
 	fixStart := time.Now()
 	fixResult, err := s.Fix(ctx, t, diag)
 	fixDur := time.Since(fixStart)
@@ -829,4 +882,20 @@ func (p *Pipeline) rollbackImage(ctx context.Context, valuesPath, content string
 func currentImageTag(content string) string {
 	tag, _ := fixer.ExtractImageTag(content)
 	return tag
+}
+
+// ticketOutcome maps where processing left the ticket onto the bounded
+// mctl.ticket.outcome vocabulary. A pull request, merged or not, is
+// pr_created; a ticket still analyzing never reached a terminal state.
+func ticketOutcome(t *ticket.Ticket) string {
+	switch {
+	case t.PRNumber > 0:
+		return telemetry.OutcomePRCreated
+	case t.Status == ticket.StatusFixProposed || t.Status == ticket.StatusFixApplied:
+		return telemetry.OutcomeFixProposed
+	case t.Status == ticket.StatusEscalated:
+		return telemetry.OutcomeEscalated
+	default:
+		return telemetry.OutcomeFailed
+	}
 }

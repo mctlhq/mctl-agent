@@ -199,6 +199,10 @@ func (f *GitHubFixer) CreatePR(ctx context.Context, req PRRequest) (string, int,
 }
 
 // MergePR merges a PR by number.
+// RepoFullName is the GitOps repository as owner/repo, the form the
+// telemetry catalog's mctl.repository.name takes.
+func (f *GitHubFixer) RepoFullName() string { return f.owner + "/" + f.repo }
+
 func (f *GitHubFixer) MergePR(ctx context.Context, prNumber int) error {
 	_, _, err := f.client.PullRequests.Merge(ctx, f.owner, f.repo, prNumber,
 		"Approved via mctl-agent Telegram command",
