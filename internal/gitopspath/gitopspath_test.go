@@ -30,9 +30,14 @@ func TestDefaultAllowlistValidate(t *testing.T) {
 		{"traversal inside allowed prefix rejected", "platform-gitops/services/../../etc/passwd", true},
 		{"off-prefix path rejected", "bootstrap/x.yaml", true},
 		{"tenant values file accepted", "platform-gitops/services/acme/api/values.yaml", false},
-		{"platform service template accepted", "platform-gitops/apps/templates/mctl-agent.yaml", false},
+		// The old platform-service prefix was renamed in mctl-gitops (commit
+		// 18d64715); neither the dead prefix nor its replacement below is
+		// allowlisted — platform services and AppProjects are patched by
+		// hand, not by the agent (see fixer.IsPlatformService).
+		{"dead platform service template path rejected", "platform-gitops/apps/templates/mctl-agent.yaml", true},
 		{"workflow template accepted", "platform-gitops/argo-workflows/workflow-templates/wft-deploy-service.yaml", false},
-		{"project apps template accepted", "platform-gitops/apps/templates/projects/project-apps.yaml", false},
+		{"bootstrap platform service path rejected (not opened as a replacement)", "platform-gitops/bootstrap/templates/mctl-platform/mctl-agent.yaml", true},
+		{"dead project apps template path rejected", "platform-gitops/apps/templates/projects/project-apps.yaml", true},
 		{"prefix without trailing content rejected", "platform-gitops/services", true},
 		{"lookalike prefix rejected", "platform-gitops/services-evil/x.yaml", true},
 	}

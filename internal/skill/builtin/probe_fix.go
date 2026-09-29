@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -84,7 +85,7 @@ func (s *ProbeFixSkill) AutoMergeSafe() bool { return true }
 func (s *ProbeFixSkill) Fix(_ context.Context, t *ticket.Ticket, diag *skill.DiagnosisResult) (*skill.FixResult, error) {
 	return &skill.FixResult{
 		Applied:  true,
-		FilePath: detectFilePath(t.Tenant, t.Service),
+		FilePath: fixer.DetectFilePath(t.Tenant, t.Service),
 		Summary:  "Increase probe initialDelaySeconds to 30s",
 	}, nil
 }

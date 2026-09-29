@@ -37,10 +37,27 @@ type DiagnosisCompat struct {
 // that relies on the chart default and therefore has no explicit value.
 const defaultProbeDelay = 30
 
-// PlatformServices that use inline values in apps/templates/.
+// PlatformServices have no live GitOps values file the agent can patch:
+// their manifests are ArgoCD Application definitions inlined under
+// platform-gitops/bootstrap/templates/mctl-platform/, which is not in the
+// agent's write allowlist (internal/gitopspath). DetectFilePath returns ""
+// for these; callers must escalate rather than attempt a GitOps read — see
+// IsPlatformService.
+//
+// This used to point at a per-service YAML file under the directory that was
+// renamed to platform-gitops/bootstrap/templates/ in mctl-gitops (commit
+// 18d64715); the old location no longer exists.
 var PlatformServices = map[string]bool{
 	"mctl-api":   true,
 	"mctl-agent": true,
+}
+
+// IsPlatformService reports whether service is a platform service with no
+// GitOps values file the agent can read or patch automatically. A caller
+// that sees this must escalate instead of calling DetectFilePath's result
+// (which is "") through GetFileContent/CreatePR.
+func IsPlatformService(service string) bool {
+	return PlatformServices[service]
 }
 
 // PatchResult contains the generated patch.
@@ -51,12 +68,31 @@ type PatchResult struct {
 	Summary    string
 }
 
-// DetectFilePath determines the gitops file path for a service.
+// DetectFilePath determines the gitops values file path for a service, or
+// "" for a platform service (see IsPlatformService) — the caller must
+// escalate rather than treat "" as a path to read or write.
 func DetectFilePath(tenant, service string) string {
 	if PlatformServices[service] {
-		return fmt.Sprintf("platform-gitops/apps/templates/%s.yaml", service)
+		return ""
 	}
 	return fmt.Sprintf("platform-gitops/services/%s/%s/values.yaml", tenant, service)
+}
+
+// CandidatePaths maps every service name in services through DetectFilePath
+// for tenant, drops empty results (platform services, which have nothing to
+// probe), and deduplicates while preserving order.
+func CandidatePaths(tenant string, services []string) []string {
+	var paths []string
+	seen := make(map[string]bool)
+	for _, svc := range services {
+		p := DetectFilePath(tenant, svc)
+		if p == "" || seen[p] {
+			continue
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	return paths
 }
 
 // GenerateMemoryBump creates a patch that increases memory limit by 50%.
@@ -233,10 +269,10 @@ type probeBlock struct {
 }
 
 // findProbeBlocks locates every block describing one of the given probe kinds.
-// Two shapes are recognised, because the agent patches both raw Kubernetes
-// manifests and base-service values.yaml files:
+// Two shapes are recognised, because the agent historically patched both raw
+// Kubernetes manifests and base-service values.yaml files:
 //
-//	livenessProbe:            # raw manifest (apps/templates/*.yaml)
+//	livenessProbe:            # raw manifest
 //	  initialDelaySeconds: 10
 //
 //	probes:                   # base-service chart (services/<tenant>/*/values.yaml)

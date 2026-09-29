@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -66,7 +67,7 @@ func (s *OOMKilledSkill) Fix(_ context.Context, t *ticket.Ticket, _ *skill.Diagn
 	// The skill returns the fix type; the pipeline does the actual patching.
 	return &skill.FixResult{
 		Applied:    true,
-		FilePath:   detectFilePath(t.Tenant, t.Service),
+		FilePath:   fixer.DetectFilePath(t.Tenant, t.Service),
 		Summary:    "Bump memory limit by 50% (OOMKilled)",
 		NextSkills: []string{"quota_adjust"},
 	}, nil
@@ -82,16 +83,4 @@ func containsAny(s string, substrs ...string) bool {
 		}
 	}
 	return false
-}
-
-// detectFilePath determines the gitops values file for a service.
-func detectFilePath(tenant, service string) string {
-	platformServices := map[string]bool{
-		"mctl-api":   true,
-		"mctl-agent": true,
-	}
-	if platformServices[service] {
-		return "platform-gitops/apps/templates/" + service + ".yaml"
-	}
-	return "platform-gitops/services/" + tenant + "/" + service + "/values.yaml"
 }

@@ -113,10 +113,19 @@ func (s *WorkflowFixerSkill) Fix(_ context.Context, t *ticket.Ticket, diag *skil
 	}
 
 	if diag.FixType == "fix_appproject_whitelist" {
+		// The AppProject whitelist is not a per-service values file: it's an
+		// ArgoCD Project manifest under platform-gitops/bootstrap/templates/
+		// (its directory was renamed there in mctl-gitops commit 18d64715),
+		// which is outside the agent's write allowlist — the same reason
+		// platform services (mctl-api, mctl-agent) escalate instead of being
+		// patched. Applied=false routes this through the pipeline's existing
+		// "skill declined to apply a fix" escalation, so no GitOps read or PR
+		// is attempted.
 		return &skill.FixResult{
-			Applied:  true,
-			FilePath: "platform-gitops/apps/templates/projects/project-apps.yaml",
-			Summary:  "Add missing resource groups to AppProject namespaceResourceWhitelist",
+			Applied: false,
+			Summary: "AppProject whitelist changes are an ArgoCD Project manifest under " +
+				"platform-gitops/bootstrap/templates/projects/project-apps.yaml and are not " +
+				"patched automatically. Apply the fix by hand through a mctl-gitops PR.",
 		}, nil
 	}
 

@@ -18,6 +18,16 @@ The agent uses a modular **skills architecture**:
 - `internal/skill/metrics.go` — SQLite-backed metrics + circuit breaker (auto-disables failing skills)
 - `internal/capability/capability.go` — Provider + Context sandbox with per-skill access control
 - `internal/pipeline/pipeline.go` — Orchestrates: ticket → evidence → skill match → diagnose → fix → PR → notify
+- `internal/svcname/svcname.go` — Canonicalises a pod-scoped ticket's `Service`
+  against the base-service Helm chart's fullname signature
+  (`{tenant}-{app}-base-service`) so it resolves to the registered app name
+  (`mctl-telegram`, not `labs-mctl-telegram-base-service`). Applied once, at
+  ingestion, in `internal/monitor/alerthandler.go`'s `processAlert` — every
+  downstream consumer (GitOps path detection, mctl-api evidence queries,
+  ticket identity) sees the canonical name already. `internal/pipeline`
+  additionally probes `svcname.Candidates` as a safety net when generating a
+  fix, in case a ticket's `Service` predates canonicalisation or was set some
+  other way.
 
 ### Skill Types
 - `internal/skill/builtin/` — 9 compiled Go skills (OOMKilled, ImagePull, Rollback, ArgoCDDrift, ProbeFix, CPUThrottle, QuotaAdjust, ScaleUp, LLMDiagnosis)

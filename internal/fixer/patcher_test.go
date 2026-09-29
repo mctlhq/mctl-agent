@@ -1,9 +1,96 @@
 package fixer
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// TestDetectFilePath was moved here from
+// internal/skill/builtin/builtin_test.go when the builtin package's own
+// unexported duplicate of this function was deleted in favour of this
+// exported one. The platform-service cases now expect "" — see
+// IsPlatformService.
+func TestDetectFilePath(t *testing.T) {
+	tests := []struct {
+		tenant, service, want string
+	}{
+		{"billing", "payment-api", "platform-gitops/services/billing/payment-api/values.yaml"},
+		{"", "mctl-api", ""},
+		{"", "mctl-agent", ""},
+	}
+	for _, tt := range tests {
+		got := DetectFilePath(tt.tenant, tt.service)
+		if got != tt.want {
+			t.Errorf("DetectFilePath(%q, %q) = %q, want %q", tt.tenant, tt.service, got, tt.want)
+		}
+	}
+}
+
+func TestIsPlatformService(t *testing.T) {
+	tests := []struct {
+		service string
+		want    bool
+	}{
+		{"mctl-api", true},
+		{"mctl-agent", true},
+		{"payment-api", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := IsPlatformService(tt.service); got != tt.want {
+			t.Errorf("IsPlatformService(%q) = %v, want %v", tt.service, got, tt.want)
+		}
+	}
+}
+
+func TestCandidatePaths(t *testing.T) {
+	tests := []struct {
+		name     string
+		tenant   string
+		services []string
+		want     []string
+	}{
+		{
+			name:     "orders the given services and drops nothing when none are platform services",
+			tenant:   "labs",
+			services: []string{"mctl-telegram", "labs-mctl-telegram-base-service"},
+			want: []string{
+				"platform-gitops/services/labs/mctl-telegram/values.yaml",
+				"platform-gitops/services/labs/labs-mctl-telegram-base-service/values.yaml",
+			},
+		},
+		{
+			name:     "a platform service yields no candidate paths",
+			tenant:   "admins",
+			services: []string{"mctl-api"},
+			want:     nil,
+		},
+		{
+			name:     "duplicate mapped paths are deduplicated, preserving first occurrence order",
+			tenant:   "labs",
+			services: []string{"mctl-telegram", "mctl-telegram", "mctl-api"},
+			want: []string{
+				"platform-gitops/services/labs/mctl-telegram/values.yaml",
+			},
+		},
+		{
+			name:     "empty service list yields no candidates",
+			tenant:   "labs",
+			services: nil,
+			want:     nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CandidatePaths(tt.tenant, tt.services)
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("CandidatePaths(%q, %v) = %v, want %v", tt.tenant, tt.services, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestGenerateMemoryBump(t *testing.T) {
 	content := `resources:

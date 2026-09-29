@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -81,7 +82,7 @@ func (s *CPUThrottleSkill) AutoMergeSafe() bool { return true }
 func (s *CPUThrottleSkill) Fix(_ context.Context, t *ticket.Ticket, _ *skill.DiagnosisResult) (*skill.FixResult, error) {
 	return &skill.FixResult{
 		Applied:  true,
-		FilePath: detectFilePath(t.Tenant, t.Service),
+		FilePath: fixer.DetectFilePath(t.Tenant, t.Service),
 		Summary:  "Increase CPU limit to reduce throttling",
 	}, nil
 }
