@@ -16,12 +16,15 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/go-github/v68/github"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -712,7 +715,21 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		c, err := p.github.GetFileContent(ctx, candidate, "main")
 		if err != nil {
 			lastErr = err
-			continue
+			if ctx.Err() != nil {
+				// Context was cancelled or timed out — stop immediately
+				// rather than let the loop keep probing.
+				break
+			}
+			// 404 = this candidate path doesn't exist; keep walking the
+			// remaining candidates. Anything else (rate limit, 5xx, auth)
+			// means we can't trust that a later candidate's hit is actually
+			// the right file — stop instead of silently patching whatever
+			// the next candidate happens to resolve to.
+			var ghErr *github.ErrorResponse
+			if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
+				continue
+			}
+			break
 		}
 		filePath, content = candidate, c
 		if i > 0 {

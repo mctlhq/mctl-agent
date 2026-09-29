@@ -98,16 +98,35 @@ func Candidates(namespace, derived string, labels map[string]string) []string {
 		out = append(out, s)
 	}
 
-	for _, key := range IdentityLabels {
-		val := labels[key]
-		if val == "" {
-			continue
+	hasChartSignature := false
+	for _, suffix := range ChartFullnameSuffixes {
+		if strings.HasSuffix(derived, suffix) {
+			hasChartSignature = true
+			break
 		}
-		if instanceLabels[key] {
-			val = stripNamespacePrefix(val, namespace)
+	}
+
+	// IdentityLabels is only consulted for a pod-derived name — one that
+	// still carries the base-service chart's fullname signature. A name
+	// alerthandler.go already resolved from a workload label (deployment/
+	// statefulset/daemonset, an ArgoCD Application's name, or a workflow
+	// name) has already named itself correctly; letting a pod identity
+	// label override it risks naming the ticket after a different app the
+	// pod happens to carry a label for (e.g. a shared sidecar's
+	// backstage.io/kubernetes-id), which collapses that workload's alerts
+	// onto the wrong service key.
+	if hasChartSignature {
+		for _, key := range IdentityLabels {
+			val := labels[key]
+			if val == "" {
+				continue
+			}
+			if instanceLabels[key] {
+				val = stripNamespacePrefix(val, namespace)
+			}
+			add(val)
+			break
 		}
-		add(val)
-		break
 	}
 
 	for _, suffix := range ChartFullnameSuffixes {
