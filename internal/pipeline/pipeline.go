@@ -774,13 +774,18 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		// For LLM-generated fixes, try to apply from diagnosis fields.
 		if diag.CurrentValue != "" && diag.SuggestedValue != "" {
 			newContent, summary, patchErr = fixer.GenerateFromDiagnosis(content, toLegacyDiag(diag))
-		} else if fixResult.NewContent != "" && filePath == fixResult.FilePath {
+		} else if fixResult.NewContent != "" && (fixResult.FilePath == "" || filePath == fixResult.FilePath) {
 			// fixResult.NewContent is whole-file content the skill authored
 			// against fixResult.FilePath before candidate probing ran. If a
 			// different candidate resolved instead (filePath != fixResult.FilePath),
 			// that content was never generated for filePath's actual contents
 			// and must not be written there — fall through to the "no
 			// applicable fix strategy" error instead of corrupting the file.
+			// A skill that left FilePath empty (e.g. a remote skill that
+			// relies entirely on candidate resolution rather than proposing
+			// its own path) never made that per-path claim in the first
+			// place, so there is nothing for the resolved filePath to
+			// mismatch against — its NewContent is still safe to reuse.
 			newContent = fixResult.NewContent
 			summary = fixResult.Summary
 		} else {

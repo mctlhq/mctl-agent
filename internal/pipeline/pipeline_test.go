@@ -538,6 +538,181 @@ func TestHandleHighConfidenceFixProbesLaterCandidateOnMiss(t *testing.T) {
 	}
 }
 
+// TestHandleHighConfidenceFixRejectsMismatchedNewContentPath covers the guard
+// added to the FixResult.NewContent reuse branch: fixResult.NewContent is
+// whole-file content a skill authored against fixResult.FilePath specifically,
+// before candidate probing ran. When the skill's own path 404s and a later
+// svcname-derived candidate resolves instead, that NewContent was never
+// generated for the resolved file's actual contents and must not be written
+// there. This mirrors TestHandleHighConfidenceFixProbesLaterCandidateOnMiss's
+// setup (a stale Service whose skill-proposed path misses) but, unlike that
+// test, supplies no CurrentValue/SuggestedValue — so the only patch strategy
+// available is the guarded NewContent-reuse branch, and it must refuse rather
+// than corrupt the resolved file.
+func TestHandleHighConfidenceFixRejectsMismatchedNewContentPath(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	p.telegram = notify.NewTelegram("", "", "", nil)
+
+	var putCalls, pullCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			if strings.Contains(r.URL.Path, "labs-mctl-telegram-base-service") {
+				http.Error(w, "not found", http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "file", "encoding": "base64", "sha": "f1",
+				"content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n")),
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/main", "object": map[string]any{"sha": "m1"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/x"})
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			putCalls++
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			pullCalls++
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 8, "html_url": "https://github.com/owner/repo/pull/8"})
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	gh := fixer.NewGitHubFixer("", "", "owner", "repo", store, false, 10, 10, gitopspath.DefaultAllowlist())
+	if err := gh.SetBaseURL(srv.URL + "/"); err != nil {
+		t.Fatal(err)
+	}
+	p.github = gh
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypeResourceLimit,
+		Tenant: "labs", Service: "labs-mctl-telegram-base-service", Summary: "OOMKilled",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// No CurrentValue/SuggestedValue: GenerateFromDiagnosis is not applicable,
+	// so the only remaining strategy is the guarded NewContent-reuse branch.
+	diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true}
+	s := stubSkill{fix: &skill.FixResult{
+		Applied:    true,
+		FilePath:   "platform-gitops/services/labs/labs-mctl-telegram-base-service/values.yaml",
+		NewContent: "replicas: 2\n",
+		Summary:    "bump",
+	}}
+
+	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
+
+	if putCalls != 0 || pullCalls != 0 {
+		t.Fatalf("expected no write or PR when the resolved candidate does not match fixResult.FilePath, got putCalls=%d pullCalls=%d", putCalls, pullCalls)
+	}
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL != "" {
+		t.Fatalf("expected no PR to be opened, got PRURL=%q", got.PRURL)
+	}
+}
+
+// TestHandleHighConfidenceFixReusesNewContentWithEmptyFilePath covers the
+// other half of the same guard: a skill (such as a remote HTTP skill that
+// never computed its own path) may return NewContent with FilePath left
+// empty, relying entirely on candidate resolution. That skill never claimed
+// any particular path for its NewContent, so there is nothing for the
+// resolved filePath to mismatch against, and the content must still be
+// reused rather than rejected as if it were an unrelated-path hazard.
+func TestHandleHighConfidenceFixReusesNewContentWithEmptyFilePath(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	p.telegram = notify.NewTelegram("", "", "", nil)
+
+	var putBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "file", "encoding": "base64", "sha": "f1",
+				"content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n")),
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/main", "object": map[string]any{"sha": "m1"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/x"})
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			putBody, _ = io.ReadAll(r.Body)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 11, "html_url": "https://github.com/owner/repo/pull/11"})
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	gh := fixer.NewGitHubFixer("", "", "owner", "repo", store, false, 10, 10, gitopspath.DefaultAllowlist())
+	if err := gh.SetBaseURL(srv.URL + "/"); err != nil {
+		t.Fatal(err)
+	}
+	p.github = gh
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypeResourceLimit,
+		Tenant: "billing", Service: "api", Summary: "OOMKilled",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true}
+	s := stubSkill{fix: &skill.FixResult{
+		Applied:    true,
+		FilePath:   "",
+		NewContent: "replicas: 3\n",
+		Summary:    "bump via remote skill",
+	}}
+
+	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL == "" {
+		t.Fatalf("expected a PR to be opened reusing NewContent, analysis=%q", got.Analysis)
+	}
+	var putReq struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(putBody, &putReq); err != nil {
+		t.Fatalf("failed to parse PUT body: %v", err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(putReq.Content)
+	if err != nil {
+		t.Fatalf("failed to decode PUT content: %v", err)
+	}
+	if string(decoded) != "replicas: 3\n" {
+		t.Fatalf("PUT content = %q, want the skill's NewContent %q", decoded, "replicas: 3\n")
+	}
+}
+
 // TestHandleHighConfidenceFixStopsOnNon404FirstCandidate covers the error
 // classification in handleHighConfidenceFix's candidate probe loop: a
 // non-404 GetFileContent error (rate limit, 5xx, auth) must stop the probe
