@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -69,7 +70,7 @@ func (s *PostDeployRollbackSkill) Diagnose(_ context.Context, _ *ticket.Ticket, 
 func (s *PostDeployRollbackSkill) Fix(_ context.Context, t *ticket.Ticket, _ *skill.DiagnosisResult) (*skill.FixResult, error) {
 	return &skill.FixResult{
 		Applied:  true,
-		FilePath: detectFilePath(t.Tenant, t.Service),
+		FilePath: fixer.DetectFilePath(t.Tenant, t.Service),
 		Summary:  "Rollback to previous image tag (post-deploy crash)",
 	}, nil
 }

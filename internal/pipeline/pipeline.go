@@ -16,12 +16,15 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/go-github/v68/github"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -31,6 +34,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/skill"
+	"github.com/mctlhq/mctl-agent/internal/svcname"
 	"github.com/mctlhq/mctl-agent/internal/telemetry"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/mctlhq/mctl-agent/internal/webhook"
@@ -665,39 +669,85 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		p.metrics.RecordFix(s.Name(), t.ID, true, fixDur, fixResult.Summary)
 	}
 
-	filePath := fixResult.FilePath
-	if filePath == "" {
-		filePath = fixer.DetectFilePath(t.Tenant, t.Service)
-	}
-
-	// Reject any path outside the configured gitops allowlist before ever
-	// reading or writing it. GetFileContent/CreatePR enforce the same check
-	// again (defense in depth), but validating here lets a rejection be
-	// surfaced through the same "patch generation failed" path as other
-	// fix-generation errors, rather than the read-failure escalation below.
-	if err := p.github.ValidatePath(filePath); err != nil {
-		log.Warn("rejected gitops path", "skill", s.Name(), "ticket", t.ID, "path", filePath, "error", err)
-		failed("gitops path rejected")
+	// Platform services (mctl-api, mctl-agent) have no live GitOps values
+	// file: their manifests are ArgoCD Application definitions inlined under
+	// platform-gitops/bootstrap/templates/mctl-platform/, which is outside
+	// the agent's write allowlist. Check this on the resolved ticket service
+	// alone, before any GitHub call — fixResult.FilePath is "" for these too
+	// (fixer.DetectFilePath, which every skill above now calls, returns ""
+	// for the same reason), so this would otherwise fall through to a
+	// candidate list of nothing but a rejected empty path.
+	if fixer.IsPlatformService(t.Service) {
+		log.Info("platform service ticket escalated without a gitops read", "skill", s.Name(), "service", t.Service)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
-			"Fix identified but patch generation failed: "+err.Error())
-		t.Status = ticket.StatusFixProposed
-		_ = p.store.Update(ctx, t)
-		p.updateAlert(t)
-		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
+			fmt.Sprintf("%s is a platform service; its configuration is not patched automatically", t.Service))
+		p.escalate(ctx, t, fmt.Sprintf(
+			"[escalated] %s is a platform service; its configuration is an ArgoCD Application "+
+				"under platform-gitops/bootstrap/templates/mctl-platform/ and is not patched "+
+				"automatically. Apply the fix by hand through a mctl-gitops PR.", t.Service), diag)
 		return
 	}
 
-	// Get current file content from GitOps repo.
-	content, err := p.github.GetFileContent(ctx, filePath, "main")
-	if err != nil {
-		log.Error("failed to get file content", "path", filePath, "error", err)
+	// Candidate GitOps paths to probe, most authoritative first: whatever the
+	// skill itself proposed (verbatim — the only way a non-values.yaml path,
+	// such as workflow_fixer's fixed ClusterWorkflowTemplate target, reaches
+	// this list), then every name svcname.Candidates derives for
+	// t.Tenant/t.Service, mapped through fixer.DetectFilePath and
+	// deduplicated. t.Service was already canonicalised at ingestion
+	// (internal/monitor/alerthandler.go), so on the happy path this yields
+	// exactly one candidate and costs exactly one GetFileContent call; a
+	// ticket whose Service predates that canonicalisation, or was set some
+	// other way, still has its older-style candidates covered.
+	paths := candidatePaths(fixResult.FilePath, t.Tenant, t.Service)
+
+	// p.github.ValidatePath runs inside the loop, once per candidate, so an
+	// invalid one (outside the allowlist) is skipped rather than aborting the
+	// whole probe — the remaining candidates, including a plain skill-
+	// proposed path that happens to be legitimate, still get their turn.
+	var filePath, content string
+	var lastErr error
+	for i, candidate := range paths {
+		if err := p.github.ValidatePath(candidate); err != nil {
+			log.Warn("skipping gitops candidate outside allowlist", "skill", s.Name(), "path", candidate, "error", err)
+			lastErr = err
+			continue
+		}
+		c, err := p.github.GetFileContent(ctx, candidate, "main")
+		if err != nil {
+			lastErr = err
+			if ctx.Err() != nil {
+				// Context was cancelled or timed out — stop immediately
+				// rather than let the loop keep probing.
+				break
+			}
+			// 404 = this candidate path doesn't exist; keep walking the
+			// remaining candidates. Anything else (rate limit, 5xx, auth)
+			// means we can't trust that a later candidate's hit is actually
+			// the right file — stop instead of silently patching whatever
+			// the next candidate happens to resolve to.
+			var ghErr *github.ErrorResponse
+			if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == http.StatusNotFound {
+				continue
+			}
+			break
+		}
+		filePath, content = candidate, c
+		if i > 0 {
+			log.Info("gitops file resolved via a later candidate path",
+				"skill", s.Name(), "path", candidate, "candidates", paths)
+		}
+		break
+	}
+
+	if filePath == "" {
+		log.Error("failed to get file content from any candidate", "candidates", paths, "error", lastErr)
 		failed("reading the gitops file failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
-			fmt.Sprintf("Could not read %s: %v", filePath, err))
+			fmt.Sprintf("Could not read any candidate GitOps path (tried %d, last error: %v)", len(paths), lastErr))
 		p.escalate(ctx, t, fmt.Sprintf(
-			"[escalated] Could not read %s from the GitOps repo (%v), so no patch could be "+
-				"generated. This is an agent-side failure, not necessarily a service failure.",
-			filePath, err), diag)
+			"[escalated] Could not read any candidate GitOps path for %s/%s. Tried: %s (last error: %v). "+
+				"This is an agent-side failure, not necessarily a service failure.",
+			t.Tenant, t.Service, strings.Join(paths, "; "), lastErr), diag)
 		return
 	}
 	// Set only now: the repository was actually read.
@@ -724,7 +774,18 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		// For LLM-generated fixes, try to apply from diagnosis fields.
 		if diag.CurrentValue != "" && diag.SuggestedValue != "" {
 			newContent, summary, patchErr = fixer.GenerateFromDiagnosis(content, toLegacyDiag(diag))
-		} else if fixResult.NewContent != "" {
+		} else if fixResult.NewContent != "" && (fixResult.FilePath == "" || filePath == fixResult.FilePath) {
+			// fixResult.NewContent is whole-file content the skill authored
+			// against fixResult.FilePath before candidate probing ran. If a
+			// different candidate resolved instead (filePath != fixResult.FilePath),
+			// that content was never generated for filePath's actual contents
+			// and must not be written there — fall through to the "no
+			// applicable fix strategy" error instead of corrupting the file.
+			// A skill that left FilePath empty (e.g. a remote skill that
+			// relies entirely on candidate resolution rather than proposing
+			// its own path) never made that per-path claim in the first
+			// place, so there is nothing for the resolved filePath to
+			// mismatch against — its NewContent is still safe to reuse.
 			newContent = fixResult.NewContent
 			summary = fixResult.Summary
 		} else {
@@ -822,6 +883,38 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"[DRY-RUN] Would create PR: "+summary)
 	}
+}
+
+// candidatePaths returns the ordered, deduplicated GitOps paths to probe for
+// one ticket fix: skillPath first (a skill's own proposed FilePath, taken
+// verbatim so a fixed non-values.yaml target — such as workflow_fixer's
+// ClusterWorkflowTemplate path — is never dropped from the list), then
+// fixer.CandidatePaths for every service name svcname.Candidates derives
+// from tenant/service.
+//
+// labels is always nil in the svcname.Candidates call here: by the time a
+// ticket reaches the pipeline it carries only Tenant/Service —
+// internal/monitor/alerthandler.go already folded the raw alert labels into
+// Service at ingestion, and Skill.Fix (the only place a FixResult.FilePath
+// comes from) has no access to the original alert either. This still
+// reprobes the same suffix/prefix permutations svcname.Candidates derives
+// from the string alone, which is exactly what a ticket whose Service
+// predates canonicalisation, or was set some other way, needs.
+func candidatePaths(skillPath, tenant, service string) []string {
+	var paths []string
+	seen := make(map[string]bool)
+	add := func(p string) {
+		if p == "" || seen[p] {
+			return
+		}
+		seen[p] = true
+		paths = append(paths, p)
+	}
+	add(skillPath)
+	for _, p := range fixer.CandidatePaths(tenant, svcname.Candidates(tenant, service, nil)) {
+		add(p)
+	}
+	return paths
 }
 
 func isInfraAlert(t *ticket.Ticket) bool {

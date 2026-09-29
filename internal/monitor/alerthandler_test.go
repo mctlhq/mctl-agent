@@ -985,7 +985,11 @@ func TestAlertHandlerWorkloadLabelBeatsScrapeTargetPod(t *testing.T) {
 		wantTenant  string
 	}{
 		{
-			name: "deployment label wins over scrape target pod",
+			// The deployment label carries the base-service chart fullname
+			// ("admins-mctl-agents-worker-base-service"), which canonicalisation
+			// (internal/svcname) reduces to the registered app name
+			// ("mctl-agents-worker") the same way a pod-derived value would be.
+			name: "deployment label wins over scrape target pod, then is canonicalised",
 			labels: map[string]string{
 				"alertname":  "KubeDeploymentReplicasMismatch",
 				"namespace":  "admins",
@@ -993,7 +997,7 @@ func TestAlertHandlerWorkloadLabelBeatsScrapeTargetPod(t *testing.T) {
 				"pod":        "monitoring-kube-state-metrics-7c9d4f8b6-abc12",
 				"service":    "monitoring-kube-state-metrics",
 			},
-			wantService: "admins-mctl-agents-worker-base-service",
+			wantService: "mctl-agents-worker",
 			wantTenant:  "admins",
 		},
 		{
@@ -1019,13 +1023,15 @@ func TestAlertHandlerWorkloadLabelBeatsScrapeTargetPod(t *testing.T) {
 			wantTenant:  "monitoring",
 		},
 		{
-			name: "pod-scoped alert keeps its own pod-derived service",
+			// Same canonicalisation applies to the pod-derived path: the
+			// chart-fullname signature is stripped down to the app name.
+			name: "pod-scoped alert keeps its own pod-derived service, canonicalised",
 			labels: map[string]string{
 				"alertname": "KubePodCrashLooping",
 				"namespace": "admins",
 				"pod":       "admins-mctl-agents-worker-base-service-6d4b5c7f8-abc12",
 			},
-			wantService: "admins-mctl-agents-worker-base-service",
+			wantService: "mctl-agents-worker",
 			wantTenant:  "admins",
 		},
 	}
@@ -1130,8 +1136,8 @@ func TestAlertHandlerRolloutWindowOpensOneNewTicket(t *testing.T) {
 	if len(received) != 2 {
 		t.Fatalf("expected one new ticket under the corrected name, got %d total", len(received))
 	}
-	if received[1].Service != "admins-mctl-agents-worker-base-service" {
-		t.Errorf("new ticket service: got %q, want the workload name", received[1].Service)
+	if received[1].Service != "mctl-agents-worker" {
+		t.Errorf("new ticket service: got %q, want the canonicalised workload name", received[1].Service)
 	}
 
 	// A's resolve must not close the aggregate: B is still firing in it.
@@ -1301,8 +1307,113 @@ func TestAlertHandlerMixedBatchProcessesEveryAlert(t *testing.T) {
 	if len(received) != 1 {
 		t.Fatalf("expected the second alert to still produce a ticket, got %d", len(received))
 	}
-	if received[0].Service != "admins-mctl-api-base-service" {
+	if received[0].Service != "mctl-api" {
 		t.Errorf("wrong alert survived: %q", received[0].Service)
+	}
+}
+
+// TestAlertHandlerCanonicalisesBaseServiceChartFullname is the acceptance
+// case from issue-141 / incident 77c234ee: a base-service pod's chart
+// fullname must resolve to the registered app name, not the chart fullname,
+// so downstream GitOps paths and evidence queries target something that
+// exists.
+func TestAlertHandlerCanonicalisesBaseServiceChartFullname(t *testing.T) {
+	store := newTestStore(t)
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{{
+			Status: "firing",
+			Labels: map[string]string{
+				"alertname": "ContainerOOMKilled",
+				"namespace": "labs",
+				"pod":       "labs-mctl-telegram-base-service-744f465c75-dzkhf",
+			},
+			Annotations: map[string]string{"summary": "OOMKilled"},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(received))
+	}
+	if received[0].Tenant != "labs" {
+		t.Errorf("tenant = %q, want %q", received[0].Tenant, "labs")
+	}
+	if received[0].Service != "mctl-telegram" {
+		t.Errorf("service = %q, want %q", received[0].Service, "mctl-telegram")
+	}
+}
+
+// TestAlertHandlerNonBaseServicePodUnchanged pins the floor: a pod that does
+// not carry the base-service chart's fullname signature is not touched by
+// canonicalisation.
+func TestAlertHandlerNonBaseServicePodUnchanged(t *testing.T) {
+	store := newTestStore(t)
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{{
+			Status: "firing",
+			Labels: map[string]string{
+				"alertname": "KubePodCrashLooping",
+				"namespace": "default",
+				"pod":       "myapp-6d4b5c7f8-abc12",
+			},
+			Annotations: map[string]string{"summary": "crashloop"},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(received))
+	}
+	if received[0].Service != "myapp" {
+		t.Errorf("service = %q, want %q (unchanged)", received[0].Service, "myapp")
+	}
+}
+
+// TestAlertHandlerIgnoreServiceFilterMatchesCanonicalName is the T4
+// regression: the IgnoreService filter runs against the CANONICALISED
+// service name, not the raw pod-derived chart fullname. A regex written
+// against the app name (as an operator would write it) must still match
+// after canonicalisation strips the base-service chart signature.
+func TestAlertHandlerIgnoreServiceFilterMatchesCanonicalName(t *testing.T) {
+	store := newTestStore(t)
+	callCount := 0
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { callCount++ })
+	handler.IgnoreService = regexp.MustCompile(`^openclawpr\d+`)
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{{
+			Status: "firing",
+			Labels: map[string]string{
+				"alertname": "KubePodCrashLooping",
+				"namespace": "openclawpr4",
+				"pod":       "openclawpr4-base-service-6d4b5c7f8-abc12",
+			},
+			Annotations: map[string]string{"summary": "preview crashloop"},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if callCount != 0 {
+		t.Errorf("expected the ticket to be dropped by the filter after canonicalisation, got %d callback(s)", callCount)
 	}
 }
 

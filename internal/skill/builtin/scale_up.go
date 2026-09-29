@@ -18,6 +18,7 @@ import (
 	"context"
 	"strings"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -84,7 +85,7 @@ func (s *ScaleUpSkill) Diagnose(_ context.Context, _ *ticket.Ticket, _ skill.Evi
 func (s *ScaleUpSkill) Fix(_ context.Context, t *ticket.Ticket, _ *skill.DiagnosisResult) (*skill.FixResult, error) {
 	return &skill.FixResult{
 		Applied:    true,
-		FilePath:   detectFilePath(t.Tenant, t.Service),
+		FilePath:   fixer.DetectFilePath(t.Tenant, t.Service),
 		Summary:    "Increase HPA maxReplicas from 5 to 10",
 		NextSkills: []string{"quota_adjust"},
 	}, nil

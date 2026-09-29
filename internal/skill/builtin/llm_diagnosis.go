@@ -28,6 +28,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/runbook"
 	"github.com/mctlhq/mctl-agent/internal/skill"
@@ -46,7 +47,11 @@ const systemPrompt = `You are a platform engineer diagnosing issues in a Kuberne
 
 ## GitOps File Structure
 - Standard services: platform-gitops/services/{team}/{service}/values.yaml
-- Platform services (mctl-api): platform-gitops/apps/templates/{service}.yaml (inline helm values)
+- Platform services (mctl-api, mctl-agent): no live values file — their
+  configuration is an ArgoCD Application under
+  platform-gitops/bootstrap/templates/mctl-platform/ and is not patched
+  automatically; a platform-service ticket is escalated for a human to fix
+  by hand instead
 - Helm chart schema: image.repository, image.tag, resources.requests/limits, env, ingress, probes
 
 ## Common Issues & Fixes
@@ -255,7 +260,7 @@ func (s *LLMDiagnosisSkill) Fix(_ context.Context, t *ticket.Ticket, diag *skill
 
 	return &skill.FixResult{
 		Applied:  true,
-		FilePath: detectFilePath(t.Tenant, t.Service),
+		FilePath: fixer.DetectFilePath(t.Tenant, t.Service),
 		Summary:  fmt.Sprintf("Update %s from %s to %s", diag.YAMLField, diag.CurrentValue, diag.SuggestedValue),
 	}, nil
 }

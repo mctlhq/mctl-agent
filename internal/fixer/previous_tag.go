@@ -81,9 +81,13 @@ func isImageBlockKey(trimmed string) bool {
 // Two indent shapes need to work:
 //  1. Tenant `services/<tenant>/<svc>/values.yaml` — `image:` is at
 //     column 0 with `tag:` indented two spaces under it.
-//  2. Platform `apps/templates/<svc>.yaml` — the chart values are
-//     inlined under `helm.values: |`, so `image:` ends up indented
-//     several levels deep (typically 8 spaces) with `tag:` deeper still.
+//  2. Inline chart values (historically, a platform service's per-service
+//     YAML) — the chart values are inlined under `helm.values: |`, so
+//     `image:` ends up indented several levels deep (typically 8 spaces)
+//     with `tag:` deeper still. Platform services have no such live file
+//     today (see fixer.IsPlatformService), but the shape is kept here in
+//     case content in this indented form is ever handed to this function
+//     from elsewhere.
 //
 // Algorithm: collect every `image:` line in the file, then prefer the
 // one(s) at the SHALLOWEST indent — that's the chart image both for

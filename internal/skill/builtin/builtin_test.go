@@ -278,22 +278,6 @@ func TestLLMDiagnosisSkillMatchWithKey(t *testing.T) {
 	}
 }
 
-func TestDetectFilePath(t *testing.T) {
-	tests := []struct {
-		tenant, service, want string
-	}{
-		{"billing", "payment-api", "platform-gitops/services/billing/payment-api/values.yaml"},
-		{"", "mctl-api", "platform-gitops/apps/templates/mctl-api.yaml"},
-		{"", "mctl-agent", "platform-gitops/apps/templates/mctl-agent.yaml"},
-	}
-	for _, tt := range tests {
-		got := detectFilePath(tt.tenant, tt.service)
-		if got != tt.want {
-			t.Errorf("detectFilePath(%q, %q) = %q, want %q", tt.tenant, tt.service, got, tt.want)
-		}
-	}
-}
-
 func TestAllSkillsRegistered(t *testing.T) {
 	reg := skill.NewRegistry()
 	RegisterAll(reg, "test-key")

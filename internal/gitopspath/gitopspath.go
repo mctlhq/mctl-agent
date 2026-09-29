@@ -27,11 +27,19 @@ import (
 )
 
 // DefaultPrefixes are the path prefixes mctl-agent already writes to today:
-// tenant/service values files, platform-service inline values, and the
-// Argo Workflow templates patched by the workflow-related builtin skills.
+// tenant/service values files, and the Argo Workflow templates patched by
+// the workflow-related builtin skills.
+//
+// The prefix this list used to carry for platform-service inline values was
+// removed: that directory was renamed in mctl-gitops (commit 18d64715), so
+// every path built under the old prefix 404s. Its replacement is
+// deliberately NOT added here either — it holds ArgoCD Application/Project
+// manifests for platform services and AppProjects, which the agent does not
+// patch automatically (see fixer.IsPlatformService and the escalation path
+// in pipeline.handleHighConfidenceFix). Opening the write allowlist to that
+// directory is a separate security decision.
 var DefaultPrefixes = []string{
 	"platform-gitops/services/",
-	"platform-gitops/apps/templates/",
 	"platform-gitops/argo-workflows/workflow-templates/",
 }
 

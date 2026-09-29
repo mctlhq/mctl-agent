@@ -201,7 +201,6 @@ func TestLoadGitOpsPathAllowlistDefault(t *testing.T) {
 
 	want := []string{
 		"platform-gitops/services/",
-		"platform-gitops/apps/templates/",
 		"platform-gitops/argo-workflows/workflow-templates/",
 	}
 	if len(cfg.GitOpsPathAllowlist) != len(want) {

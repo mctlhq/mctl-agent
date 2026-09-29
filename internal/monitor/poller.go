@@ -505,28 +505,35 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 // membership check is comparing like with like and can correctly detect
 // a service that existed at ticket-creation time but was since removed.
 //
-// SourceAlertManager tickets do NOT satisfy that precondition and must
-// never reach this check. Their Service field comes from AlertManager
-// labels via two paths, neither of which matches mctl-api's bare
-// registered app name:
-//   - TypeArgoCDDegraded: the ArgoCD Application name, "{tenant}-{app}"
-//     (e.g. "admins-mctl-agent" vs. the registry's "mctl-agent").
-//   - everything else: extractService(pod), which for any base-service
-//     chart deployment returns "{release}-base-service" (the chart's
-//     fullname, e.g. "labs-mctl-telegram-base-service" vs. the registry's
-//     "mctl-telegram") — or "" when the alert carries no pod label at all
-//     (cluster-level alerts like a vmagent scrape_pool warning).
+// SourceAlertManager tickets still do NOT reach this check, and that
+// exclusion is DELIBERATELY RETAINED pending its own review — do not
+// re-enable pruning for SourceAlertManager alongside an unrelated change.
 //
-// Because of this, the membership check can never be true for an
-// AlertManager-sourced ticket about a service that legitimately exists —
-// every one of them ages past OrphanAfter and gets force-closed with the
-// misleading "service does not exist" reason regardless of whether the
-// underlying alert is still firing (observed live: admins-mctl-agent
-// genuinely OutOfSync, closed as "orphaned" roughly once a day). The
-// correct closure path for these is reconcileWithAlertManager, which
-// checks the real AlertManager active-alert fingerprint set instead of
-// a name-inventory heuristic, backstopped by the MaxAnalyzingAge /
-// AnalyzingAfter / FixProposedAfter TTLs for tickets no skill resolves.
+// What this comment used to document as the reason for the exclusion — that
+// extractService(pod), for any base-service chart deployment, returns
+// "{release}-base-service" (the chart's fullname, e.g.
+// "labs-mctl-telegram-base-service") rather than mctl-api's bare registered
+// app name ("mctl-telegram"), so the membership check could never match a
+// legitimately-existing service — is now resolved AT INGESTION: processAlert
+// (internal/monitor/alerthandler.go) canonicalises the resolved service name
+// through internal/svcname before a ticket is ever created, so a pod-scoped
+// AlertManager ticket's Service is already the registry's app name.
+//
+// The exclusion nonetheless stays, because one AlertManager path is not
+// covered by that canonicalisation: TypeArgoCDDegraded sets Service from the
+// ArgoCD Application name ("{tenant}-{app}", e.g. "admins-mctl-agent"),
+// which carries no base-service chart-fullname signature for svcname to
+// strip, so it passes through unchanged — still "admins-mctl-agent" against
+// the registry's "mctl-agent" (observed live: admins-mctl-agent genuinely
+// OutOfSync, closed as "orphaned" roughly once a day, before this exclusion
+// existed). Re-enabling pruning for SourceAlertManager needs that case
+// handled too, plus its own risk assessment; it is left for a follow-up.
+//
+// The correct closure path for AlertManager-sourced tickets remains
+// reconcileWithAlertManager, which checks the real AlertManager active-alert
+// fingerprint set instead of a name-inventory heuristic, backstopped by the
+// MaxAnalyzingAge / AnalyzingAfter / FixProposedAfter TTLs for tickets no
+// skill resolves.
 func (p *Poller) pruneOrphans(ctx context.Context, state refreshState) {
 	if p.OrphanAfter <= 0 {
 		return
