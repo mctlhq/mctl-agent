@@ -248,14 +248,22 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// to be absent from the active set. Earlier revisions of this PR tried
 	// the fallback three ways; each one reintroduced a cross-workload
 	// resolve.
+	// workloadLabeled records whether `service` below gets overridden from a
+	// workload/ArgoCD/workflow label rather than staying pod-derived. It
+	// gates which labels svcname.Resolve is allowed to consult further
+	// down: a.Labels is trustworthy as the SAME object's identity only on
+	// the pod-derived path (the default, workloadLabeled == false case).
+	workloadLabeled := false
 	for _, key := range []string{"deployment", "statefulset", "daemonset"} {
 		if obj := a.Labels[key]; obj != "" {
 			service = obj
+			workloadLabeled = true
 			break
 		}
 	}
 	if tType == ticket.TypeWorkflowFailed && workflow != "" {
 		service = workflow
+		workloadLabeled = true
 	}
 	if tType == ticket.TypeArgoCDDegraded {
 		// ArgoCD app health metrics carry the Application identity in
@@ -267,6 +275,7 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 		// needs to diagnose.
 		if app := a.Labels["name"]; app != "" {
 			service = app
+			workloadLabeled = true
 		}
 		if dest := a.Labels["dest_namespace"]; dest != "" {
 			tenant = dest
@@ -288,6 +297,16 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// the real GitOps path happens later, when the pipeline probes candidate
 	// paths in mctl-gitops.
 	//
+	// svcname.Candidates' IdentityLabels lookup is only safe when labels
+	// describes the same object `service` was derived from. That holds for
+	// the pod-derived path, but not once workloadLabeled is true: a.Labels
+	// there can carry a different object's identity (kube-state-metrics'
+	// own scrape-target labels, or a shared sidecar's
+	// backstage.io/kubernetes-id), which would misname an
+	// already-correctly-named workload. Pass nil in that case so
+	// Candidates' label lookup is a guaranteed no-op rather than relying on
+	// it to infer the same thing from derived's own shape.
+	//
 	// ROLLOUT NOTE, same shape and same reasoning as the workload-label
 	// rewrite's note above (#105): an alert already firing when this ships
 	// keeps its pre-existing ticket under the old pod-derived key, so it
@@ -300,7 +319,11 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// coarser key, and only AM reconcile (which requires every one of a
 	// ticket's fingerprints to be absent from the active set) can decide
 	// that correctly.
-	service = svcname.Resolve(namespace, service, a.Labels)
+	svcLabels := a.Labels
+	if workloadLabeled {
+		svcLabels = nil
+	}
+	service = svcname.Resolve(namespace, service, svcLabels)
 
 	// Some VMRules (absent() checks with no label matcher, e.g.
 	// MctlAgentMetricsAbsent, OpenclawLlmMetricsAbsent) produce alerts with

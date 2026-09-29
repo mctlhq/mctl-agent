@@ -529,6 +529,133 @@ func TestHandleHighConfidenceFixProbesLaterCandidateOnMiss(t *testing.T) {
 	}
 }
 
+// TestHandleHighConfidenceFixStopsOnNon404FirstCandidate covers the error
+// classification in handleHighConfidenceFix's candidate probe loop: a
+// non-404 GetFileContent error (rate limit, 5xx, auth) must stop the probe
+// immediately rather than fall through to a later candidate, because a hit
+// on that later candidate could not be trusted to actually be the right
+// file. The ticket here has multiple viable candidates (svcname derives
+// "mctl-telegram" and "labs-mctl-telegram" in addition to the skill's own
+// path), so a loop that kept walking on a 500/403 would make more than one
+// "/contents/" request; this pins that it does not.
+func TestHandleHighConfidenceFixStopsOnNon404FirstCandidate(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+	}{
+		{name: "500 on first candidate", status: http.StatusInternalServerError},
+		{name: "403 on first candidate", status: http.StatusForbidden},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, store := newEscalateTestPipeline(t)
+			p.telegram = notify.NewTelegram("", "", "", nil)
+
+			var contentGETs int
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.URL.Path, "/contents/") {
+					contentGETs++
+				}
+				http.Error(w, "unavailable", tc.status)
+			}))
+			defer srv.Close()
+
+			gh := fixer.NewGitHubFixer("", "", "owner", "repo", nil, true, 0, 0, gitopspath.DefaultAllowlist())
+			if err := gh.SetBaseURL(srv.URL + "/"); err != nil {
+				t.Fatal(err)
+			}
+			p.github = gh
+
+			tk := &ticket.Ticket{
+				Source: ticket.SourceAlertManager, Type: ticket.TypeResourceLimit,
+				Tenant: "labs", Service: "labs-mctl-telegram-base-service", Summary: "OOMKilled",
+			}
+			if err := store.Create(ctx, tk); err != nil {
+				t.Fatal(err)
+			}
+			tk.Status = ticket.StatusAnalyzing
+			if err := store.Update(ctx, tk); err != nil {
+				t.Fatal(err)
+			}
+
+			diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true}
+			s := stubSkill{fix: &skill.FixResult{
+				Applied:  true,
+				FilePath: "platform-gitops/services/labs/labs-mctl-telegram-base-service/values.yaml",
+				Summary:  "bump",
+			}}
+
+			p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
+
+			if contentGETs != 1 {
+				t.Errorf("GetFileContent calls = %d, want exactly 1 — a %d must stop the probe, not fall through to a later candidate", contentGETs, tc.status)
+			}
+
+			got, err := store.Get(ctx, tk.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != ticket.StatusEscalated {
+				t.Errorf("status = %q, want %q", got.Status, ticket.StatusEscalated)
+			}
+		})
+	}
+}
+
+// TestHandleHighConfidenceFixStopsOnCancelledContext covers the other half
+// of the same error classification: once ctx.Err() != nil the probe loop
+// must break immediately, so an already-cancelled context yields at most one
+// "/contents/" request no matter how many candidates svcname derived for the
+// ticket.
+func TestHandleHighConfidenceFixStopsOnCancelledContext(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	p.telegram = notify.NewTelegram("", "", "", nil)
+
+	var contentGETs int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/contents/") {
+			contentGETs++
+		}
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	gh := fixer.NewGitHubFixer("", "", "owner", "repo", nil, true, 0, 0, gitopspath.DefaultAllowlist())
+	if err := gh.SetBaseURL(srv.URL + "/"); err != nil {
+		t.Fatal(err)
+	}
+	p.github = gh
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypeResourceLimit,
+		Tenant: "labs", Service: "labs-mctl-telegram-base-service", Summary: "OOMKilled",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true}
+	s := stubSkill{fix: &skill.FixResult{
+		Applied:  true,
+		FilePath: "platform-gitops/services/labs/labs-mctl-telegram-base-service/values.yaml",
+		Summary:  "bump",
+	}}
+
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	p.handleHighConfidenceFix(cancelledCtx, tk, s, diag, slog.Default())
+
+	if contentGETs > 1 {
+		t.Errorf("GetFileContent calls = %d, want at most 1 — a cancelled context must stop the probe immediately", contentGETs)
+	}
+}
+
 // TestHandleHighConfidenceFixEscalatesPlatformServiceWithoutARead (T8): a
 // mctl-api ticket has no live GitOps values file to probe, so it must
 // escalate with the platform-service message and never touch GitHub at all.

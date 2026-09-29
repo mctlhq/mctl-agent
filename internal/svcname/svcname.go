@@ -74,15 +74,28 @@ var instanceLabels = map[string]bool{
 //     name legitimately begins with the tenant name.
 //  4. derived unchanged — always last, so today's behaviour is the floor.
 //
-// The "{namespace}-" strip in candidates 1 (instance spellings) and 2 is
-// gated on there being a signature to strip: for candidate 2 that means a
-// ChartFullnameSuffixes entry actually matched derived. Without that gate, a
-// plain StatefulSet pod named "labs-something-0" in namespace "labs" would
-// be silently renamed to "something". With it, only names carrying the
-// chart's own fullname signature are touched, and any derived value that
-// does not end in one of ChartFullnameSuffixes (e.g. "myapp-6d4b5c7f8-abc12"
-// already reduced to "myapp", "two-parts", "a-b-c-d-e") falls straight
-// through to candidate 4 unchanged.
+// Candidate 1 is a matter of provenance, not of what derived looks like: it
+// is safe only when labels actually describes the SAME object derived was
+// computed from — true for a name derived straight off a pod, not
+// necessarily true once a caller has overridden derived from a workload
+// label (deployment/statefulset/daemonset), an ArgoCD Application name, or a
+// workflow name, because a.Labels there can carry values that belong to a
+// different object entirely (kube-state-metrics' own scrape-target labels,
+// or a shared sidecar's backstage.io/kubernetes-id). Candidates trusts the
+// caller to have made that call already: pass the real labels for a
+// pod-derived name, and nil for anything resolved from a workload/ArgoCD/
+// workflow label. See internal/monitor/alerthandler.go's processAlert for
+// where that provenance decision is made.
+//
+// The "{namespace}-" strip in candidate 2 is gated on there being a
+// signature to strip — a ChartFullnameSuffixes entry actually matched
+// derived. Without that gate, a plain StatefulSet pod named
+// "labs-something-0" in namespace "labs" would be silently renamed to
+// "something". With it, only names carrying the chart's own fullname
+// signature are touched, and any derived value that does not end in one of
+// ChartFullnameSuffixes (e.g. "myapp-6d4b5c7f8-abc12" already reduced to
+// "myapp", "two-parts", "a-b-c-d-e") falls straight through to candidate 4
+// unchanged.
 func Candidates(namespace, derived string, labels map[string]string) []string {
 	if derived == "" {
 		return nil
@@ -98,35 +111,20 @@ func Candidates(namespace, derived string, labels map[string]string) []string {
 		out = append(out, s)
 	}
 
-	hasChartSignature := false
-	for _, suffix := range ChartFullnameSuffixes {
-		if strings.HasSuffix(derived, suffix) {
-			hasChartSignature = true
-			break
+	// A nil (or key-less) labels map falls straight through every lookup
+	// below to "", so a caller passing nil for a workload/ArgoCD/workflow-
+	// derived name — see the provenance note above — safely skips this
+	// candidate without an explicit guard here.
+	for _, key := range IdentityLabels {
+		val := labels[key]
+		if val == "" {
+			continue
 		}
-	}
-
-	// IdentityLabels is only consulted for a pod-derived name — one that
-	// still carries the base-service chart's fullname signature. A name
-	// alerthandler.go already resolved from a workload label (deployment/
-	// statefulset/daemonset, an ArgoCD Application's name, or a workflow
-	// name) has already named itself correctly; letting a pod identity
-	// label override it risks naming the ticket after a different app the
-	// pod happens to carry a label for (e.g. a shared sidecar's
-	// backstage.io/kubernetes-id), which collapses that workload's alerts
-	// onto the wrong service key.
-	if hasChartSignature {
-		for _, key := range IdentityLabels {
-			val := labels[key]
-			if val == "" {
-				continue
-			}
-			if instanceLabels[key] {
-				val = stripNamespacePrefix(val, namespace)
-			}
-			add(val)
-			break
+		if instanceLabels[key] {
+			val = stripNamespacePrefix(val, namespace)
 		}
+		add(val)
+		break
 	}
 
 	for _, suffix := range ChartFullnameSuffixes {

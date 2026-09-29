@@ -91,6 +91,43 @@ func TestCandidates(t *testing.T) {
 			derived:   "",
 			want:      nil,
 		},
+		{
+			// Provenance gating (nil vs real labels) is the caller's job —
+			// see alerthandler.go's processAlert — not something Candidates
+			// infers from derived's shape. A workload-labeled name (one
+			// that does not carry the chart's fullname signature) still
+			// gets an IdentityLabels hit here as long as the caller passes
+			// labels; this pins that Candidates itself no longer gates on
+			// hasChartSignature.
+			name:      "identity label is honoured even without a chart-fullname signature, when the caller passes labels",
+			namespace: "vault",
+			derived:   "vault",
+			labels:    map[string]string{"backstage.io/kubernetes-id": "vault-canonical"},
+			want:      []string{"vault-canonical", "vault"},
+		},
+		{
+			// The mirror of the case above: a caller that knows `derived`
+			// came from a workload/ArgoCD/workflow label (not a pod) is
+			// expected to pass nil, and nil safely disables the
+			// IdentityLabels lookup — even though derived here does carry
+			// the chart-fullname signature, so the old hasChartSignature
+			// heuristic would have consulted labels had they been passed.
+			name:      "nil labels disable the identity-label candidate entirely, even with a chart-fullname signature",
+			namespace: "labs",
+			derived:   "labs-mctl-telegram-base-service",
+			labels:    nil,
+			want:      []string{"mctl-telegram", "labs-mctl-telegram", "labs-mctl-telegram-base-service"},
+		},
+		{
+			// An empty-valued identity label key is skipped exactly like a
+			// missing one — falls through to the next IdentityLabels entry
+			// rather than adding "".
+			name:      "empty identity label value falls through to the next candidate",
+			namespace: "labs",
+			derived:   "labs-mctl-telegram-base-service",
+			labels:    map[string]string{"backstage.io/kubernetes-id": "", "app.kubernetes.io/instance": "labs-mctl-telegram"},
+			want:      []string{"mctl-telegram", "labs-mctl-telegram", "labs-mctl-telegram-base-service"},
+		},
 	}
 
 	for _, tt := range tests {
