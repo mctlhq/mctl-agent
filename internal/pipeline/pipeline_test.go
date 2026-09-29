@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mctlhq/mctl-agent/internal/fixer"
@@ -510,12 +511,20 @@ func TestHandleHighConfidenceFixProbesLaterCandidateOnMiss(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true}
+	// CurrentValue/SuggestedValue drive GenerateFromDiagnosis, which patches
+	// whatever content is actually read from the resolved candidate path —
+	// unlike FixResult.NewContent, which is whole-file content authored
+	// against FilePath specifically and must not be reused once a different
+	// candidate resolves (that mismatch is exactly what this test used to
+	// paper over).
+	diag := &skill.DiagnosisResult{
+		Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true,
+		YAMLField: "replicas", CurrentValue: "replicas: 1", SuggestedValue: "replicas: 2",
+	}
 	s := stubSkill{fix: &skill.FixResult{
-		Applied:    true,
-		FilePath:   "platform-gitops/services/labs/labs-mctl-telegram-base-service/values.yaml",
-		NewContent: "replicas: 2\n",
-		Summary:    "bump",
+		Applied:  true,
+		FilePath: "platform-gitops/services/labs/labs-mctl-telegram-base-service/values.yaml",
+		Summary:  "bump",
 	}}
 
 	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
@@ -603,19 +612,53 @@ func TestHandleHighConfidenceFixStopsOnNon404FirstCandidate(t *testing.T) {
 	}
 }
 
+// cancelAfterCtx wraps a context.Context and reports itself as cancelled
+// via Err() only once armed. It deliberately does NOT override Done() (the
+// embedded context's Done() channel, which never closes here, is left as
+// is), so it never aborts or delays any actual HTTP round trip — it exists
+// purely so a test can flip ctx.Err() to non-nil at an exact, deterministic
+// point without racing a real request/response. Verified empirically: Go's
+// net/http client does not gate a request on ctx.Err() as a synchronous
+// pre-check, only on the Done() channel closing, so overriding Err() alone
+// is safe here.
+type cancelAfterCtx struct {
+	context.Context
+	cancelled *atomic.Bool
+}
+
+func (c cancelAfterCtx) Err() error {
+	if c.cancelled.Load() {
+		return context.Canceled
+	}
+	return c.Context.Err()
+}
+
 // TestHandleHighConfidenceFixStopsOnCancelledContext covers the other half
 // of the same error classification: once ctx.Err() != nil the probe loop
-// must break immediately, so an already-cancelled context yields at most one
-// "/contents/" request no matter how many candidates svcname derived for the
-// ticket.
+// must break immediately rather than fall through to the next candidate. A
+// context that is already cancelled before the first GetFileContent call
+// does not exercise this — Go's http client aborts that first request
+// before it ever reaches the mock server, so contentGETs stays at 0 or 1
+// regardless of whether the explicit ctx.Err() break exists. Instead, this
+// test arms a cancelAfterCtx (whose Err() flips to context.Canceled but
+// whose Done() channel never closes, so it never itself aborts a request)
+// on the mock server's first "/contents/" request, before responding 404.
+// By the time handleHighConfidenceFix's loop checks ctx.Err() after that
+// call returns, the context reports cancelled — so it must break rather
+// than continue on to the ticket's other svcname-derived candidates. If the
+// break were removed, the loop would classify the 404 and continue, issuing
+// a second real request that reaches the mock server and pushes contentGETs
+// to 2.
 func TestHandleHighConfidenceFixStopsOnCancelledContext(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
 	p.telegram = notify.NewTelegram("", "", "", nil)
 
 	var contentGETs int
+	var cancelled atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/contents/") {
 			contentGETs++
+			cancelled.Store(true)
 		}
 		http.Error(w, "not found", http.StatusNotFound)
 	}))
@@ -646,13 +689,12 @@ func TestHandleHighConfidenceFixStopsOnCancelledContext(t *testing.T) {
 		Summary:  "bump",
 	}}
 
-	cancelledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
+	testCtx := cancelAfterCtx{Context: context.Background(), cancelled: &cancelled}
 
-	p.handleHighConfidenceFix(cancelledCtx, tk, s, diag, slog.Default())
+	p.handleHighConfidenceFix(testCtx, tk, s, diag, slog.Default())
 
-	if contentGETs > 1 {
-		t.Errorf("GetFileContent calls = %d, want at most 1 — a cancelled context must stop the probe immediately", contentGETs)
+	if contentGETs != 1 {
+		t.Errorf("GetFileContent calls = %d, want exactly 1 — the loop must break as soon as ctx.Err() reports cancelled, not fall through to a later candidate", contentGETs)
 	}
 }
 
