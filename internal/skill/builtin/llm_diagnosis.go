@@ -130,7 +130,7 @@ func (s *LLMDiagnosisSkill) Diagnose(ctx context.Context, t *ticket.Ticket, ev s
 		}, nil
 	}
 
-	model := "claude-sonnet-5"
+	model := "claude-sonnet-5-5"
 
 	// One client span per model call, named "{operation} {model}" as the
 	// gen_ai conventions ask. It carries ids, the model and token counts,
