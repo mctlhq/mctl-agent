@@ -1,6 +1,6 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build run test fmt clean
+.PHONY: build run test test-race fmt clean
 
 build:
 	CGO_ENABLED=0 go build -ldflags="-s -w" -o mctl-agent ./cmd/agent
@@ -10,6 +10,9 @@ run:
 
 test:
 	go test ./...
+
+test-race:
+	go test -race ./...
 
 fmt:
 	goimports -w .

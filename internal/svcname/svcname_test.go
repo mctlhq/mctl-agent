@@ -86,6 +86,12 @@ func TestCandidates(t *testing.T) {
 			want:      []string{"labs-something"},
 		},
 		{
+			name:      "base-service chart fullname resolves to the app name with no labels",
+			namespace: "labs",
+			derived:   "labs-foo-base-service",
+			want:      []string{"foo", "labs-foo", "labs-foo-base-service"},
+		},
+		{
 			name:      "empty derived returns nil",
 			namespace: "labs",
 			derived:   "",
@@ -156,5 +162,52 @@ func TestResolve(t *testing.T) {
 	})
 	if got != "mctl-telegram-canonical" {
 		t.Errorf("Resolve with identity label = %q, want the label value", got)
+	}
+}
+
+func TestTrimPodSuffix(t *testing.T) {
+	tests := []struct {
+		name string
+		pod  string
+		want string
+	}{
+		{
+			name: "base-service StatefulSet ordinal strips only the ordinal",
+			pod:  "labs-foo-base-service-0",
+			want: "labs-foo-base-service",
+		},
+		{
+			name: "base-service Deployment RS-hash form strips both trailing segments",
+			pod:  "labs-mctl-telegram-base-service-6d4b5c7f8-abc12",
+			want: "labs-mctl-telegram-base-service",
+		},
+		{
+			name: "two-segment name is returned unchanged",
+			pod:  "foo-bar",
+			want: "foo-bar",
+		},
+		{
+			// "labs-something-0" has an all-digits last segment but its
+			// remainder ("labs-something") does not end in a
+			// ChartFullnameSuffixes entry, so the ordinal gate does not
+			// fire — this pins today's strip-two fallback exactly, the
+			// same value extractService already returns.
+			name: "non-signature name with a numeric tail falls back to strip-two",
+			pod:  "labs-something-0",
+			want: "labs",
+		},
+		{
+			name: "empty pod name returns empty",
+			pod:  "",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := TrimPodSuffix(tt.pod); got != tt.want {
+				t.Errorf("TrimPodSuffix(%q) = %q, want %q", tt.pod, got, tt.want)
+			}
+		})
 	}
 }

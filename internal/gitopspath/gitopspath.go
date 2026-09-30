@@ -88,6 +88,18 @@ func (a Allowlist) Validate(candidate string) error {
 		return fmt.Errorf("gitops path %q resolves outside the repository", candidate)
 	}
 
+	// The uncleaned candidate is what GetFileContent/CreatePR actually send to
+	// the GitHub API (internal/fixer/github.go), so a candidate whose cleaned
+	// form differs — an empty path segment, a "./" segment, or a trailing "/"
+	// — must be rejected here rather than silently validated against a
+	// string nobody sends. Every production path is built by
+	// fixer.DetectFilePath's Sprintf (always canonical) or a fixed
+	// workflow-template constant, so no legitimate caller produces a
+	// non-canonical path.
+	if cleaned != candidate {
+		return fmt.Errorf("gitops path %q is not in canonical form (resolves to %q)", candidate, cleaned)
+	}
+
 	for _, p := range a.prefixes {
 		if strings.HasPrefix(cleaned, p) {
 			return nil

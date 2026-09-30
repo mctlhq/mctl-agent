@@ -22,7 +22,6 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/ctxutil"
@@ -323,7 +322,7 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	if workloadLabeled {
 		svcLabels = nil
 	}
-	service = svcname.Resolve(namespace, service, svcLabels)
+	service = svcname.Resolve(tenant, service, svcLabels)
 
 	// Some VMRules (absent() checks with no label matcher, e.g.
 	// MctlAgentMetricsAbsent, OpenclawLlmMetricsAbsent) produce alerts with
@@ -551,16 +550,13 @@ func classifyAlert(alertName string) (ticketType, severity string) {
 	}
 }
 
-// extractService extracts the service name from a pod name by stripping
-// the ReplicaSet hash and pod suffix (e.g. "myapp-6d4b5c7f8-abc12" → "myapp").
+// extractService extracts the service name from a pod name by stripping the
+// ReplicaSet hash and pod suffix (e.g. "myapp-6d4b5c7f8-abc12" → "myapp"), or
+// a base-service StatefulSet's ordinal suffix (e.g.
+// "labs-foo-base-service-0" → "labs-foo-base-service") so the chart-fullname
+// signature survives for svcname.Resolve to canonicalise. The chart-fullname
+// knowledge lives in internal/svcname (see svcname.TrimPodSuffix) rather
+// than here, the same reason that package exists at all.
 func extractService(pod string) string {
-	if pod == "" {
-		return ""
-	}
-	parts := strings.Split(pod, "-")
-	if len(parts) <= 2 {
-		return pod
-	}
-	// Strip last two segments (RS hash + pod ID).
-	return strings.Join(parts[:len(parts)-2], "-")
+	return svcname.TrimPodSuffix(pod)
 }

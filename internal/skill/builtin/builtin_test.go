@@ -16,6 +16,7 @@ package builtin
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/mctlhq/mctl-agent/internal/skill"
@@ -596,5 +597,27 @@ func TestScaleUpSkillMatch(t *testing.T) {
 	}
 	if len(fix.NextSkills) == 0 || fix.NextSkills[0] != "quota_adjust" {
 		t.Error("expected NextSkills to include quota_adjust")
+	}
+}
+
+// TestWorkflowFixerSkillFixDeclinesAppProjectWhitelist pins existing
+// behaviour (internal/skill/builtin/workflow_fixer.go): fix_appproject_whitelist
+// is an AppProject manifest change, outside the agent's write allowlist, so
+// Fix must decline with Applied:false rather than attempt a GitOps read/write
+// — see also the pipeline's own explicit refusal of this FixType in the
+// switch inside handleHighConfidenceFix, which exists as defense in depth in
+// case some future skill ever emits this FixType with Applied:true.
+func TestWorkflowFixerSkillFixDeclinesAppProjectWhitelist(t *testing.T) {
+	s := NewWorkflowFixerSkill()
+
+	fix, err := s.Fix(context.Background(), &ticket.Ticket{}, &skill.DiagnosisResult{FixType: "fix_appproject_whitelist"})
+	if err != nil {
+		t.Fatalf("expected no error, got: %v", err)
+	}
+	if fix.Applied {
+		t.Error("expected Applied == false")
+	}
+	if !strings.Contains(fix.Summary, "platform-gitops/bootstrap/templates/projects/project-apps.yaml") {
+		t.Errorf("expected summary to name the AppProject manifest location, got: %q", fix.Summary)
 	}
 }

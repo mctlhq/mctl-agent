@@ -18,6 +18,8 @@ func TestDetectFilePath(t *testing.T) {
 		{"billing", "payment-api", "platform-gitops/services/billing/payment-api/values.yaml"},
 		{"", "mctl-api", ""},
 		{"", "mctl-agent", ""},
+		{"", "payment-api", ""},
+		{"billing", "", ""},
 	}
 	for _, tt := range tests {
 		got := DetectFilePath(tt.tenant, tt.service)

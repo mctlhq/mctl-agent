@@ -69,9 +69,13 @@ type PatchResult struct {
 }
 
 // DetectFilePath determines the gitops values file path for a service, or
-// "" for a platform service (see IsPlatformService) — the caller must
-// escalate rather than treat "" as a path to read or write.
+// "" for a platform service (see IsPlatformService) or an empty tenant/
+// service — the caller must escalate rather than treat "" as a path to read
+// or write.
 func DetectFilePath(tenant, service string) string {
+	if tenant == "" || service == "" {
+		return ""
+	}
 	if PlatformServices[service] {
 		return ""
 	}
@@ -434,29 +438,6 @@ func GenerateWorkflowParamFix(content string) (string, string, error) {
 		return content, "", fmt.Errorf("no 'default:' found in template")
 	}
 	return newContent, "Replace 'default:' with 'value:' in ClusterWorkflowTemplate", nil
-}
-
-// GenerateAppProjectWhitelistFix adds missing API groups to the AppProject whitelist.
-func GenerateAppProjectWhitelistFix(content string) (string, string, error) {
-	// Simple implementation: find external-secrets.io and append others.
-	groups := []string{"argoproj.io", "monitoring.coreos.com"}
-	newContent := content
-	var added []string
-
-	for _, g := range groups {
-		if !strings.Contains(content, g) {
-			pattern := "group: external-secrets.io\n      kind: \"*\""
-			replacement := pattern + fmt.Sprintf("\n    - group: %s\n      kind: \"*\"", g)
-			newContent = strings.Replace(newContent, pattern, replacement, 1)
-			added = append(added, g)
-		}
-	}
-
-	if len(added) == 0 {
-		return content, "", fmt.Errorf("API groups already present or anchor not found")
-	}
-
-	return newContent, "Add missing API groups to AppProject whitelist: " + strings.Join(added, ", "), nil
 }
 
 // bumpCPU increases a Kubernetes CPU string by 50%.

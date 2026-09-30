@@ -42,11 +42,20 @@ var ChartFullnameSuffixes = []string{"-base-service"}
 // the canonical app directly. kube_pod_labels exposes Kubernetes labels as
 // "label_<sanitised>" series, so both the raw and "label_" spellings are
 // accepted for each source label.
+//
+// The "label_" spellings are ordered first, ahead of the raw dotted/slashed
+// spellings, because they are the only spellings that can actually arrive in
+// an AlertManager payload's labels map: Prometheus/VictoriaMetrics label
+// names must match [a-zA-Z_][a-zA-Z0-9_]*, so a raw key such as
+// "backstage.io/kubernetes-id" — containing "." and "/" — can never be a
+// legal label name there. Only a kube_pod_labels join produces the
+// "label_<sanitised>" form. The raw spellings are kept as a trailing
+// fallback for any non-alert caller that does supply them directly.
 var IdentityLabels = []string{
-	"backstage.io/kubernetes-id",
 	"label_backstage_io_kubernetes_id",
-	"app.kubernetes.io/instance",
 	"label_app_kubernetes_io_instance",
+	"backstage.io/kubernetes-id",
+	"app.kubernetes.io/instance",
 }
 
 // instanceLabels is the subset of IdentityLabels whose value is a Helm
@@ -153,6 +162,61 @@ func stripNamespacePrefix(s, namespace string) string {
 		return s[len(prefix):]
 	}
 	return s
+}
+
+// TrimPodSuffix reduces a pod name to the workload name a canonical app name
+// can be derived from.
+//
+// A base-service StatefulSet pod is "{release}-base-service-{ordinal}": one
+// trailing segment, not the two a Deployment's "-{rs}-{id}" suffix carries.
+// When the pod name's last "-"-separated segment is all digits AND the
+// remainder (the name with that segment and its separator removed) ends in a
+// ChartFullnameSuffixes entry, only that one segment is stripped, leaving the
+// chart fullname ("{release}-base-service") for Candidates to canonicalise
+// the same way it already does for a Deployment pod.
+//
+// Otherwise this keeps today's extractService behaviour exactly: strip the
+// last two "-"-separated segments (the ReplicaSet hash and pod ID), or
+// return the name unchanged for two segments or fewer.
+//
+// The all-digits + signature double gate mirrors the gating rationale
+// documented on Candidates above: without it, a plain StatefulSet pod named
+// "labs-something-0" would be misread as carrying an ordinal and reduced to
+// "labs-something", which is not the chart-fullname signature this function
+// exists to recognise.
+func TrimPodSuffix(pod string) string {
+	if pod == "" {
+		return ""
+	}
+	parts := strings.Split(pod, "-")
+	if len(parts) > 1 {
+		last := parts[len(parts)-1]
+		if last != "" && isAllDigits(last) {
+			remainder := strings.Join(parts[:len(parts)-1], "-")
+			for _, suffix := range ChartFullnameSuffixes {
+				if strings.HasSuffix(remainder, suffix) {
+					return remainder
+				}
+			}
+		}
+	}
+	if len(parts) <= 2 {
+		return pod
+	}
+	// Strip last two segments (RS hash + pod ID).
+	return strings.Join(parts[:len(parts)-2], "-")
+}
+
+// isAllDigits reports whether every rune in s is an ASCII digit. Callers
+// must not pass "" — an empty string vacuously satisfies this loop and is
+// not a meaningful StatefulSet ordinal.
+func isAllDigits(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // Resolve returns the single most authoritative candidate name —
