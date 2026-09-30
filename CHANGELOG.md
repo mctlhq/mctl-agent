@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.3.0](https://github.com/mctlhq/mctl-agent/compare/2.2.0...2.3.0) (2026-09-30)
+
+
+### Features
+
+* **agents:** issue-143-follow-ups-from-142-service-name-canonic ([313902f](https://github.com/mctlhq/mctl-agent/commit/313902fd6d51289aff1bc30e146db2e8a574ff49))
+
+
+### Bug Fixes
+
+* **agents:** harden service-name canonicalisation and escalation messages ([6f329a5](https://github.com/mctlhq/mctl-agent/commit/6f329a5074f799346f9b085cf807c844d49728f2))
+* commit is what makes release-please pick it up. ([96a12ec](https://github.com/mctlhq/mctl-agent/commit/96a12eca8891e76a5f61aa87d18b3a6363d8e781))
+* **diagnosis:** release the claude-sonnet-5-5 switch ([76b9279](https://github.com/mctlhq/mctl-agent/commit/76b92794a0b2ba860cdbc07e7ce1beef8ea9e8c5))
+* **diagnosis:** release the claude-sonnet-5-5 switch ([96a12ec](https://github.com/mctlhq/mctl-agent/commit/96a12eca8891e76a5f61aa87d18b3a6363d8e781))
+
 ## [2.2.0](https://github.com/mctlhq/mctl-agent/compare/2.1.0...2.2.0) (2026-09-29)
 
 
