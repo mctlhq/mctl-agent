@@ -40,6 +40,9 @@ func TestDefaultAllowlistValidate(t *testing.T) {
 		{"dead project apps template path rejected", "platform-gitops/apps/templates/projects/project-apps.yaml", true},
 		{"prefix without trailing content rejected", "platform-gitops/services", true},
 		{"lookalike prefix rejected", "platform-gitops/services-evil/x.yaml", true},
+		{"empty path segment rejected", "platform-gitops/services//x/values.yaml", true},
+		{"dot segment rejected", "platform-gitops/services/./x/values.yaml", true},
+		{"trailing slash rejected", "platform-gitops/services/acme/api/", true},
 	}
 
 	for _, tt := range tests {

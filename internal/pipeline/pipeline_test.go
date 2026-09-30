@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -385,12 +386,12 @@ func TestHandleHighConfidenceFixHappyPathReadsExactlyOnce(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
 	p.telegram = notify.NewTelegram("", "", "", nil)
 
-	var contentGETs int
+	var contentGETs atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
-			contentGETs++
+			contentGETs.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"type": "file", "encoding": "base64", "sha": "f1",
 				"content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n")),
@@ -444,8 +445,8 @@ func TestHandleHighConfidenceFixHappyPathReadsExactlyOnce(t *testing.T) {
 
 	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
 
-	if contentGETs != 1 {
-		t.Errorf("GetFileContent calls = %d, want exactly 1 on the happy path", contentGETs)
+	if contentGETs.Load() != 1 {
+		t.Errorf("GetFileContent calls = %d, want exactly 1 on the happy path", contentGETs.Load())
 	}
 	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
@@ -538,6 +539,49 @@ func TestHandleHighConfidenceFixProbesLaterCandidateOnMiss(t *testing.T) {
 	}
 }
 
+// TestHandleHighConfidenceFixEscalatesEmptyCandidateListDistinctly (T3)
+// covers a ticket whose Service is empty (and whose skill left FilePath
+// empty too) so candidatePaths has nothing to probe: escalation must say so
+// distinctly, and must never render "tried 0, last error: <nil>" — nothing
+// was tried, so reporting a probe failure would be simply wrong.
+func TestHandleHighConfidenceFixEscalatesEmptyCandidateListDistinctly(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	p.telegram = notify.NewTelegram("", "", "", nil)
+	// p.github is deliberately left nil: with no candidates, the probe loop
+	// never runs and nothing touches it.
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypeResourceLimit,
+		Tenant: "labs", Service: "", Summary: "OOMKilled",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true}
+	s := stubSkill{fix: &skill.FixResult{Applied: true, FilePath: "", Summary: "bump"}}
+
+	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusEscalated {
+		t.Errorf("status = %q, want %q", got.Status, ticket.StatusEscalated)
+	}
+	if !strings.Contains(got.Analysis, "No candidate GitOps path could be derived") {
+		t.Errorf("analysis missing the distinct empty-candidate-list message: %q", got.Analysis)
+	}
+	if strings.Contains(got.Analysis, "tried 0") {
+		t.Errorf("analysis must not render a probe-failure message when nothing was probed: %q", got.Analysis)
+	}
+}
+
 // TestHandleHighConfidenceFixRejectsMismatchedNewContentPath covers the guard
 // added to the FixResult.NewContent reuse branch: fixResult.NewContent is
 // whole-file content a skill authored against fixResult.FilePath specifically,
@@ -553,7 +597,7 @@ func TestHandleHighConfidenceFixRejectsMismatchedNewContentPath(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
 	p.telegram = notify.NewTelegram("", "", "", nil)
 
-	var putCalls, pullCalls int
+	var putCalls, pullCalls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -572,10 +616,10 @@ func TestHandleHighConfidenceFixRejectsMismatchedNewContentPath(t *testing.T) {
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/x"})
 		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
-			putCalls++
+			putCalls.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]any{})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
-			pullCalls++
+			pullCalls.Add(1)
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"number": 8, "html_url": "https://github.com/owner/repo/pull/8"})
 		default:
@@ -612,10 +656,17 @@ func TestHandleHighConfidenceFixRejectsMismatchedNewContentPath(t *testing.T) {
 		Summary:    "bump",
 	}}
 
-	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
+	// The mismatch error is logged (log.Warn("patch generation failed",
+	// "error", patchErr)) and sent to Telegram, but never written to
+	// t.Analysis — a text handler writing to a buffer is the only way to
+	// observe the exact operator-facing error text from this test.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
 
-	if putCalls != 0 || pullCalls != 0 {
-		t.Fatalf("expected no write or PR when the resolved candidate does not match fixResult.FilePath, got putCalls=%d pullCalls=%d", putCalls, pullCalls)
+	p.handleHighConfidenceFix(context.Background(), tk, s, diag, logger)
+
+	if putCalls.Load() != 0 || pullCalls.Load() != 0 {
+		t.Fatalf("expected no write or PR when the resolved candidate does not match fixResult.FilePath, got putCalls=%d pullCalls=%d", putCalls.Load(), pullCalls.Load())
 	}
 	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
@@ -623,6 +674,104 @@ func TestHandleHighConfidenceFixRejectsMismatchedNewContentPath(t *testing.T) {
 	}
 	if got.PRURL != "" {
 		t.Fatalf("expected no PR to be opened, got PRURL=%q", got.PRURL)
+	}
+
+	logged := logBuf.String()
+	const (
+		skillPath    = "platform-gitops/services/labs/labs-mctl-telegram-base-service/values.yaml"
+		resolvedPath = "platform-gitops/services/labs/mctl-telegram/values.yaml"
+	)
+	if !strings.Contains(logged, skillPath) {
+		t.Errorf("patch-generation-failed log missing the skill-proposed path %q: %q", skillPath, logged)
+	}
+	if !strings.Contains(logged, resolvedPath) {
+		t.Errorf("patch-generation-failed log missing the resolved path %q: %q", resolvedPath, logged)
+	}
+	if strings.Contains(logged, "no applicable fix strategy") {
+		t.Errorf("patch-generation-failed log must not fall back to the empty-FixType message: %q", logged)
+	}
+}
+
+// TestHandleHighConfidenceFixRefusesAppProjectWhitelist (T5) covers task 5:
+// even though WorkflowFixerSkill.Fix (the only real producer of
+// fix_appproject_whitelist) already returns Applied:false and never reaches
+// this switch, the pipeline must refuse the FixType explicitly as defense in
+// depth for any future skill that emits it with Applied:true — and must
+// never run the (now-deleted) AppProject whitelist transform or reach
+// GitHub with a write.
+func TestHandleHighConfidenceFixRefusesAppProjectWhitelist(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	p.telegram = notify.NewTelegram("", "", "", nil)
+
+	var putCalls, pullCalls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "file", "encoding": "base64", "sha": "f1",
+				"content": base64.StdEncoding.EncodeToString([]byte("whitelist: []\n")),
+			})
+		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/git/ref/"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/main", "object": map[string]any{"sha": "m1"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/git/refs"):
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/x"})
+		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
+			putCalls.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]any{})
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
+			pullCalls.Add(1)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{"number": 12, "html_url": "https://github.com/owner/repo/pull/12"})
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	gh := fixer.NewGitHubFixer("", "", "owner", "repo", store, false, 10, 10, gitopspath.DefaultAllowlist())
+	if err := gh.SetBaseURL(srv.URL + "/"); err != nil {
+		t.Fatal(err)
+	}
+	p.github = gh
+
+	tk := &ticket.Ticket{
+		Source: ticket.SourceAlertManager, Type: ticket.TypeWorkflowFailed,
+		Tenant: "platform", Service: "argo-workflows", Summary: "AppProject whitelist stale",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = ticket.StatusAnalyzing
+	if err := store.Update(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true, FixType: "fix_appproject_whitelist"}
+	s := stubSkill{fix: &skill.FixResult{
+		Applied:  true,
+		FilePath: "platform-gitops/services/platform/argo-workflows/values.yaml",
+		Summary:  "whitelist fix",
+	}}
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	p.handleHighConfidenceFix(context.Background(), tk, s, diag, logger)
+
+	if putCalls.Load() != 0 || pullCalls.Load() != 0 {
+		t.Fatalf("expected no write or PR for a refused fix_appproject_whitelist, got putCalls=%d pullCalls=%d", putCalls.Load(), pullCalls.Load())
+	}
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PRURL != "" {
+		t.Fatalf("expected no PR to be opened, got PRURL=%q", got.PRURL)
+	}
+	if !strings.Contains(logBuf.String(), "AppProject") {
+		t.Errorf("patch-generation-failed log missing the AppProject refusal message: %q", logBuf.String())
 	}
 }
 
@@ -637,6 +786,7 @@ func TestHandleHighConfidenceFixReusesNewContentWithEmptyFilePath(t *testing.T) 
 	p, store := newEscalateTestPipeline(t)
 	p.telegram = notify.NewTelegram("", "", "", nil)
 
+	var putBodyMu sync.Mutex
 	var putBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -652,7 +802,10 @@ func TestHandleHighConfidenceFixReusesNewContentWithEmptyFilePath(t *testing.T) 
 			w.WriteHeader(http.StatusCreated)
 			_ = json.NewEncoder(w).Encode(map[string]any{"ref": "refs/heads/x"})
 		case r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/contents/"):
-			putBody, _ = io.ReadAll(r.Body)
+			body, _ := io.ReadAll(r.Body)
+			putBodyMu.Lock()
+			putBody = body
+			putBodyMu.Unlock()
 			_ = json.NewEncoder(w).Encode(map[string]any{})
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
 			w.WriteHeader(http.StatusCreated)
@@ -701,7 +854,10 @@ func TestHandleHighConfidenceFixReusesNewContentWithEmptyFilePath(t *testing.T) 
 	var putReq struct {
 		Content string `json:"content"`
 	}
-	if err := json.Unmarshal(putBody, &putReq); err != nil {
+	putBodyMu.Lock()
+	body := putBody
+	putBodyMu.Unlock()
+	if err := json.Unmarshal(body, &putReq); err != nil {
 		t.Fatalf("failed to parse PUT body: %v", err)
 	}
 	decoded, err := base64.StdEncoding.DecodeString(putReq.Content)
@@ -736,10 +892,10 @@ func TestHandleHighConfidenceFixStopsOnNon404FirstCandidate(t *testing.T) {
 			p, store := newEscalateTestPipeline(t)
 			p.telegram = notify.NewTelegram("", "", "", nil)
 
-			var contentGETs int
+			var contentGETs atomic.Int64
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.Contains(r.URL.Path, "/contents/") {
-					contentGETs++
+					contentGETs.Add(1)
 				}
 				http.Error(w, "unavailable", tc.status)
 			}))
@@ -772,8 +928,8 @@ func TestHandleHighConfidenceFixStopsOnNon404FirstCandidate(t *testing.T) {
 
 			p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
 
-			if contentGETs != 1 {
-				t.Errorf("GetFileContent calls = %d, want exactly 1 — a %d must stop the probe, not fall through to a later candidate", contentGETs, tc.status)
+			if contentGETs.Load() != 1 {
+				t.Errorf("GetFileContent calls = %d, want exactly 1 — a %d must stop the probe, not fall through to a later candidate", contentGETs.Load(), tc.status)
 			}
 
 			got, err := store.Get(ctx, tk.ID)
@@ -828,11 +984,11 @@ func TestHandleHighConfidenceFixStopsOnCancelledContext(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
 	p.telegram = notify.NewTelegram("", "", "", nil)
 
-	var contentGETs int
+	var contentGETs atomic.Int64
 	var cancelled atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "/contents/") {
-			contentGETs++
+			contentGETs.Add(1)
 			cancelled.Store(true)
 		}
 		http.Error(w, "not found", http.StatusNotFound)
@@ -868,8 +1024,8 @@ func TestHandleHighConfidenceFixStopsOnCancelledContext(t *testing.T) {
 
 	p.handleHighConfidenceFix(testCtx, tk, s, diag, slog.Default())
 
-	if contentGETs != 1 {
-		t.Errorf("GetFileContent calls = %d, want exactly 1 — the loop must break as soon as ctx.Err() reports cancelled, not fall through to a later candidate", contentGETs)
+	if contentGETs.Load() != 1 {
+		t.Errorf("GetFileContent calls = %d, want exactly 1 — the loop must break as soon as ctx.Err() reports cancelled, not fall through to a later candidate", contentGETs.Load())
 	}
 }
 

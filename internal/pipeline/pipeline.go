@@ -740,8 +740,23 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	}
 
 	if filePath == "" {
-		log.Error("failed to get file content from any candidate", "candidates", paths, "error", lastErr)
 		failed("reading the gitops file failed")
+		if len(paths) == 0 {
+			// Nothing was probed — svcname.Candidates and the skill's own
+			// FilePath both came back empty, so there is no candidate list to
+			// report a probe failure against. Reporting "tried 0, last error:
+			// <nil>" here would read as a probe outcome when none was ever
+			// attempted.
+			log.Error("no candidate gitops path could be derived", "tenant", t.Tenant, "service", t.Service)
+			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+				fmt.Sprintf("No candidate GitOps path could be derived for %s/%s", t.Tenant, t.Service))
+			p.escalate(ctx, t, fmt.Sprintf(
+				"[escalated] No candidate GitOps path could be derived for %s/%s. "+
+					"This is an agent-side failure, not necessarily a service failure.",
+				t.Tenant, t.Service), diag)
+			return
+		}
+		log.Error("failed to get file content from any candidate", "candidates", paths, "error", lastErr)
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			fmt.Sprintf("Could not read any candidate GitOps path (tried %d, last error: %v)", len(paths), lastErr))
 		p.escalate(ctx, t, fmt.Sprintf(
@@ -767,7 +782,14 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	case "fix_workflow_params":
 		newContent, summary, patchErr = fixer.GenerateWorkflowParamFix(content)
 	case "fix_appproject_whitelist":
-		newContent, summary, patchErr = fixer.GenerateAppProjectWhitelistFix(content)
+		// AppProject manifests live under
+		// platform-gitops/bootstrap/templates/projects/, outside the write
+		// allowlist (internal/gitopspath). Its only producer
+		// (builtin.WorkflowFixerSkill) returns Applied:false and is
+		// escalated before this switch; refuse it explicitly here too so a
+		// future skill emitting this FixType cannot run an AppProject
+		// transform against a tenant values.yaml.
+		patchErr = fmt.Errorf("fix type %q targets an ArgoCD AppProject manifest, which is not patched automatically", diag.FixType)
 	case "rollback_image":
 		newContent, summary, patchErr = p.rollbackImage(ctx, filePath, content)
 	default:
@@ -788,6 +810,10 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			// mismatch against — its NewContent is still safe to reuse.
 			newContent = fixResult.NewContent
 			summary = fixResult.Summary
+		} else if fixResult.NewContent != "" && fixResult.FilePath != "" && filePath != fixResult.FilePath {
+			patchErr = fmt.Errorf(
+				"skill authored whole-file content for %q but the resolved gitops file is %q; refusing to write it there",
+				fixResult.FilePath, filePath)
 		} else {
 			patchErr = fmt.Errorf("no applicable fix strategy for type: %s", diag.FixType)
 		}

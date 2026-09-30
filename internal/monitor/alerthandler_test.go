@@ -402,6 +402,51 @@ func TestAlertHandlerArgoCDLabels(t *testing.T) {
 	}
 }
 
+// TestAlertHandlerArgoCDCanonicalisesAgainstDestNamespace covers task 6:
+// svcname.Resolve must strip the resolved tenant's prefix (from
+// dest_namespace, when it won), not the raw namespace label's prefix. The
+// ArgoCD Application name here carries the base-service chart-fullname
+// signature with a tenant prefix that matches dest_namespace ("labs") but
+// not the alert's own namespace ("argocd") — so this only canonicalises to
+// "foo" when svcname.Resolve is handed the resolved tenant.
+func TestAlertHandlerArgoCDCanonicalisesAgainstDestNamespace(t *testing.T) {
+	store := newTestStore(t)
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{
+			{
+				Status: "firing",
+				Labels: map[string]string{
+					"alertname":      "ArgoCDApplicationDegraded",
+					"namespace":      "argocd",
+					"name":           "labs-foo-base-service",
+					"dest_namespace": "labs",
+					"project":        "platform",
+				},
+				Annotations: map[string]string{"summary": "labs-foo-base-service Degraded"},
+			},
+		},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(received))
+	}
+	if received[0].Tenant != "labs" {
+		t.Errorf("tenant: got %q, want %q (dest_namespace label)", received[0].Tenant, "labs")
+	}
+	if received[0].Service != "foo" {
+		t.Errorf("service: got %q, want %q (canonicalised against dest_namespace, not namespace)", received[0].Service, "foo")
+	}
+}
+
 func TestAlertHandlerDedup(t *testing.T) {
 	store := newTestStore(t)
 
@@ -1351,6 +1396,47 @@ func TestAlertHandlerCanonicalisesBaseServiceChartFullname(t *testing.T) {
 	}
 }
 
+// TestAlertHandlerCanonicalisesBaseServiceStatefulSetOrdinal covers tasks
+// 7-8: a base-service StatefulSet pod carries one trailing ordinal segment
+// ("{release}-base-service-0"), not the two a Deployment's RS-hash suffix
+// carries. Before svcname.TrimPodSuffix, extractService's unconditional
+// strip-two reduced this to "labs-foo-base" — which matches no
+// ChartFullnameSuffixes entry — so canonicalisation never ran and the
+// ticket carried the raw chart fullname instead of the registered app name.
+func TestAlertHandlerCanonicalisesBaseServiceStatefulSetOrdinal(t *testing.T) {
+	store := newTestStore(t)
+	var received []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
+		received = append(received, tk)
+	})
+
+	payload := alertManagerPayload{
+		Status: "firing",
+		Alerts: []alert{{
+			Status: "firing",
+			Labels: map[string]string{
+				"alertname": "ContainerOOMKilled",
+				"namespace": "labs",
+				"pod":       "labs-foo-base-service-0",
+			},
+			Annotations: map[string]string{"summary": "OOMKilled"},
+		}},
+	}
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body))
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	if len(received) != 1 {
+		t.Fatalf("expected 1 ticket, got %d", len(received))
+	}
+	if received[0].Tenant != "labs" {
+		t.Errorf("tenant = %q, want %q", received[0].Tenant, "labs")
+	}
+	if received[0].Service != "foo" {
+		t.Errorf("service = %q, want %q", received[0].Service, "foo")
+	}
+}
+
 // TestAlertHandlerNonBaseServicePodUnchanged pins the floor: a pod that does
 // not carry the base-service chart's fullname signature is not touched by
 // canonicalisation.
@@ -1390,11 +1476,19 @@ func TestAlertHandlerNonBaseServicePodUnchanged(t *testing.T) {
 // service name, not the raw pod-derived chart fullname. A regex written
 // against the app name (as an operator would write it) must still match
 // after canonicalisation strips the base-service chart signature.
+//
+// The pattern is anchored (`^openclawpr\d+$`) rather than left open-ended:
+// the raw derived name "openclawpr4-base-service" does NOT match the
+// anchored pattern (it has a non-digit, non-end suffix after "openclawpr4"),
+// while the canonicalised "openclawpr4" does. An unanchored pattern would
+// match BOTH the raw and the canonical name, so it would pass whether or not
+// svcname.Resolve actually ran — this anchor is what makes the test fail if
+// canonicalisation is bypassed.
 func TestAlertHandlerIgnoreServiceFilterMatchesCanonicalName(t *testing.T) {
 	store := newTestStore(t)
 	callCount := 0
 	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { callCount++ })
-	handler.IgnoreService = regexp.MustCompile(`^openclawpr\d+`)
+	handler.IgnoreService = regexp.MustCompile(`^openclawpr\d+$`)
 
 	payload := alertManagerPayload{
 		Status: "firing",
