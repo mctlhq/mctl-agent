@@ -125,6 +125,6 @@ func init() {
 	// name in internal/skill/builtin/llm_diagnosis.go. LLMTokens is left
 	// lazy: with ticket_type in its labels the cross-product is not worth it.
 	for _, outcome := range []string{"ok", "error"} {
-		LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", outcome)
+		LLMRequests.WithLabelValues("claude-sonnet-5-5", "llm_diagnosis", outcome)
 	}
 }

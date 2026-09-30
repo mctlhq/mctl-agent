@@ -57,9 +57,9 @@ func TestLLMDiagnosisRecordsUsageOnSpanAndCounters(t *testing.T) {
 	s := stubLLM(t, http.StatusOK, `{"content":[{"type":"text","text":"{\"diagnosis\":\"d\",\"confidence\":\"HIGH\",\"fixable\":false}"}],"usage":{"input_tokens":1234,"output_tokens":56}}`)
 
 	tk := llmTicket()
-	in := metrics.LLMTokens.WithLabelValues("claude-sonnet-5", "llm_diagnosis", tk.Type, "input")
-	out := metrics.LLMTokens.WithLabelValues("claude-sonnet-5", "llm_diagnosis", tk.Type, "output")
-	ok := metrics.LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", "ok")
+	in := metrics.LLMTokens.WithLabelValues("claude-sonnet-5-5", "llm_diagnosis", tk.Type, "input")
+	out := metrics.LLMTokens.WithLabelValues("claude-sonnet-5-5", "llm_diagnosis", tk.Type, "output")
+	ok := metrics.LLMRequests.WithLabelValues("claude-sonnet-5-5", "llm_diagnosis", "ok")
 	in0, out0, ok0 := testutil.ToFloat64(in), testutil.ToFloat64(out), testutil.ToFloat64(ok)
 
 	res, err := s.Diagnose(context.Background(), tk, skill.NewEvidenceSet(nil))
@@ -84,14 +84,14 @@ func TestLLMDiagnosisRecordsUsageOnSpanAndCounters(t *testing.T) {
 		t.Fatalf("got %d spans, want 1", len(spans))
 	}
 	sp := spans[0]
-	if sp.Name() != "chat claude-sonnet-5" || sp.SpanKind() != trace.SpanKindClient {
-		t.Errorf("span = %q kind %v, want client span \"chat claude-sonnet-5\"", sp.Name(), sp.SpanKind())
+	if sp.Name() != "chat claude-sonnet-5-5" || sp.SpanKind() != trace.SpanKindClient {
+		t.Errorf("span = %q kind %v, want client span \"chat claude-sonnet-5-5\"", sp.Name(), sp.SpanKind())
 	}
 	a := telemetrytest.SpanAttrs(sp)
 	for k, want := range map[string]any{
 		"gen_ai.operation.name":      "chat",
 		"gen_ai.provider.name":       "anthropic",
-		"gen_ai.request.model":       "claude-sonnet-5",
+		"gen_ai.request.model":       "claude-sonnet-5-5",
 		"gen_ai.usage.input_tokens":  int64(1234),
 		"gen_ai.usage.output_tokens": int64(56),
 		"mctl.skill.name":            "llm_diagnosis",
@@ -112,7 +112,7 @@ func TestLLMDiagnosisRecordsUsageOnSpanAndCounters(t *testing.T) {
 func TestLLMDiagnosisFailureSetsErrorTypeWithoutBody(t *testing.T) {
 	rec := telemetrytest.RecordSpans(t)
 	s := stubLLM(t, http.StatusTooManyRequests, `{"error":"`+llmSecretMarker+`"}`)
-	errs := metrics.LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", "error")
+	errs := metrics.LLMRequests.WithLabelValues("claude-sonnet-5-5", "llm_diagnosis", "error")
 	e0 := testutil.ToFloat64(errs)
 
 	if _, err := s.Diagnose(context.Background(), llmTicket(), skill.NewEvidenceSet(nil)); err == nil {
@@ -143,8 +143,8 @@ func TestLLMDiagnosisFailureSetsErrorTypeWithoutBody(t *testing.T) {
 func TestLLMDiagnosisNoTextCountsAsError(t *testing.T) {
 	rec := telemetrytest.RecordSpans(t)
 	s := stubLLM(t, http.StatusOK, `{"content":[{"type":"thinking","thinking":"hm"}],"usage":{"input_tokens":10,"output_tokens":3}}`)
-	ok := metrics.LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", "ok")
-	errs := metrics.LLMRequests.WithLabelValues("claude-sonnet-5", "llm_diagnosis", "error")
+	ok := metrics.LLMRequests.WithLabelValues("claude-sonnet-5-5", "llm_diagnosis", "ok")
+	errs := metrics.LLMRequests.WithLabelValues("claude-sonnet-5-5", "llm_diagnosis", "error")
 	ok0, e0 := testutil.ToFloat64(ok), testutil.ToFloat64(errs)
 
 	if _, err := s.Diagnose(context.Background(), llmTicket(), skill.NewEvidenceSet(nil)); err == nil {
