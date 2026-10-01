@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.4.0](https://github.com/mctlhq/mctl-agent/compare/2.3.0...2.4.0) (2026-10-01)
+
+
+### Features
+
+* **telegram:** forward private /start to the bot-start bridge ([3c7890e](https://github.com/mctlhq/mctl-agent/commit/3c7890e4dfbc52dabd096e4a9f99589023fd4f68))
+* **telegram:** forward private /start to the bot-start bridge ([e88f436](https://github.com/mctlhq/mctl-agent/commit/e88f4360cb0d8b8bdaf14c044fe87c5b90dfd73f))
+
+
+### Bug Fixes
+
+* **botstart:** cap in-flight forwards and count every outcome ([63c7b31](https://github.com/mctlhq/mctl-agent/commit/63c7b31ca5f28fc0b9771b3f8ead757de28d7c10))
+* **botstart:** close the forwarder before draining; fail closed ([2194479](https://github.com/mctlhq/mctl-agent/commit/2194479cacb61becaf463e43bb7613fe6a822971))
+
 ## [2.3.0](https://github.com/mctlhq/mctl-agent/compare/2.2.0...2.3.0) (2026-09-30)
 
 
