@@ -30,6 +30,7 @@ import (
 	"time"
 
 	agentapi "github.com/mctlhq/mctl-agent/internal/api"
+	"github.com/mctlhq/mctl-agent/internal/botstart"
 	"github.com/mctlhq/mctl-agent/internal/capability"
 	"github.com/mctlhq/mctl-agent/internal/config"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
@@ -161,6 +162,21 @@ func main() {
 	// Remote skill manager.
 	remoteMgr := remote.NewManager(registry)
 
+	// Private /start forwarding to mctl-telegram's bot-start bridge. A token
+	// that is set but too short fails startup rather than dropping every
+	// /start; no URL or no token leaves forwarding disabled.
+	botStartForwarder, err := botstart.New(botstart.Config{
+		URL:   cfg.BotStartForwardURL,
+		Token: cfg.BotStartForwardToken,
+	})
+	if err != nil {
+		slog.Error("invalid bot-start forward config", "error", err)
+		os.Exit(1)
+	}
+	if !botStartForwarder.Enabled() {
+		slog.Info("bot-start forward disabled: BOT_START_FORWARD_URL or BOT_START_FORWARD_TOKEN unset")
+	}
+
 	// Router.
 	routerOpts := agentapi.Options{
 		Store:                 store,
@@ -174,6 +190,7 @@ func main() {
 		TelegramWebhookSecret: cfg.TelegramWebhookSecret,
 		AlertWebhookToken:     cfg.AlertWebhookToken,
 		OnAlert:               alertHandler.ServeHTTP,
+		BotStart:              botStartForwarder,
 	}
 	if ghWebhookHandler != nil {
 		routerOpts.OnGitHubWebhook = ghWebhookHandler.ServeHTTP
@@ -252,6 +269,8 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
+	// Give /start forwards already in flight the rest of the HTTP budget.
+	botStartForwarder.Wait(shutdownCtx)
 	// Last, so spans from in-flight work finished above are flushed, with a
 	// budget of its own: a slow HTTP drain must not leave the flush an
 	// already-expired context.

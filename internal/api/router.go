@@ -26,6 +26,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/mctlhq/mctl-agent/internal/botstart"
 	"github.com/mctlhq/mctl-agent/internal/ctxutil"
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/mcp"
@@ -64,6 +65,9 @@ type Options struct {
 	OnAlert func(w http.ResponseWriter, r *http.Request)
 	// OnGitHubWebhook handles GitHub webhook events (optional).
 	OnGitHubWebhook func(w http.ResponseWriter, r *http.Request)
+	// BotStart forwards a private /start to mctl-telegram's bot-start
+	// bridge. Nil (or disabled) still consumes the /start.
+	BotStart *botstart.Forwarder
 }
 
 // NewRouter creates the HTTP router.
@@ -190,6 +194,24 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
+		// A private /start is a client opening the login bot, not an
+		// operator command, so it is handled before the chat allowlist: the
+		// webhook secret above already proves Telegram delivered it. Only
+		// the update id, the sender id and the message date are forwarded —
+		// never the text — and the forward runs in the background so
+		// Telegram gets its 200 immediately. The /start is consumed here in
+		// every case, including the operator's own chat, so it never reaches
+		// command handling.
+		if notify.IsPrivateChat(update) && notify.IsStartCommand(update) {
+			telegramID := update.Message.Chat.ID
+			if update.Message.From != nil && update.Message.From.ID != 0 {
+				telegramID = update.Message.From.ID
+			}
+			opts.BotStart.Forward(update.UpdateID, telegramID, time.Unix(update.Message.Date, 0))
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
 		// The webhook secret and the chat allowlist authenticate different
 		// things: the secret proves the request came via Telegram's
 		// delivery, the allowlist proves who sent the message. Production
@@ -201,7 +223,6 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 		// webhook secret must not run commands.
 		if opts.TelegramWebhookSecret == "" || !opts.Telegram.HasChatAllowlist() {
 			slog.Warn("telegram command rejected: set both TELEGRAM_WEBHOOK_SECRET and TELEGRAM_CHAT_ID",
-				"chat_id", update.Message.Chat.ID,
 				"webhook_secret_set", opts.TelegramWebhookSecret != "",
 				"chat_allowlist_set", opts.Telegram.HasChatAllowlist())
 			w.WriteHeader(http.StatusOK)
@@ -209,8 +230,10 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 		}
 
 		if opts.Telegram != nil && !opts.Telegram.CommandChatAllowed(update.Message.Chat.ID) {
+			// No chat id: a non-allowlisted chat is a client, and its id is
+			// personal data that has no place in operator logs.
 			slog.Warn("telegram command from non-allowlisted chat",
-				"chat_id", update.Message.Chat.ID)
+				"chat_type", update.Message.Chat.Type)
 			w.WriteHeader(http.StatusOK)
 			return
 		}

@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -300,12 +301,61 @@ func ParseCommand(text string) *TelegramCommand {
 
 // TelegramUpdate is the Telegram Bot API update structure.
 type TelegramUpdate struct {
-	Message *struct {
+	UpdateID int64 `json:"update_id"`
+	Message  *struct {
 		Text string `json:"text"`
-		Chat struct {
+		// Date is the message time as Unix seconds, set by Telegram.
+		Date int64 `json:"date"`
+		From *struct {
 			ID int64 `json:"id"`
+		} `json:"from"`
+		Chat struct {
+			ID   int64  `json:"id"`
+			Type string `json:"type"`
 		} `json:"chat"`
+		Entities []TelegramMessageEntity `json:"entities"`
 	} `json:"message"`
+}
+
+// TelegramMessageEntity is one entity of a message. Offset and Length are
+// counted in UTF-16 code units, as the Bot API defines them.
+type TelegramMessageEntity struct {
+	Type   string `json:"type"`
+	Offset int    `json:"offset"`
+	Length int    `json:"length"`
+}
+
+// IsPrivateChat reports whether the update carries a message from a
+// one-to-one chat with the bot.
+func IsPrivateChat(update TelegramUpdate) bool {
+	return update.Message != nil && update.Message.Chat.Type == "private"
+}
+
+// IsStartCommand reports whether the message is the /start bot command:
+// its first entity is a bot_command at offset 0 whose text, with any
+// "@botname" suffix removed, equals /start ignoring case. Trailing
+// arguments ("/start onboarding") do not matter; "/startx" and plain text
+// that merely begins with "/start" but carries no bot_command entity do not
+// match. Telegram only adds a username suffix that names this bot, and only
+// private chats are acted on, so the suffix is stripped without comparing it.
+func IsStartCommand(update TelegramUpdate) bool {
+	m := update.Message
+	if m == nil || len(m.Entities) == 0 {
+		return false
+	}
+	e := m.Entities[0]
+	if e.Type != "bot_command" || e.Offset != 0 || e.Length <= 0 {
+		return false
+	}
+	units := utf16.Encode([]rune(m.Text))
+	if e.Length > len(units) {
+		return false
+	}
+	token := string(utf16.Decode(units[:e.Length]))
+	if at := strings.IndexByte(token, '@'); at >= 0 {
+		token = token[:at]
+	}
+	return strings.EqualFold(token, "/start")
 }
 
 // HasChatAllowlist reports whether at least one chat ID is configured.
