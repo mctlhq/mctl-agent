@@ -162,19 +162,10 @@ func main() {
 	// Remote skill manager.
 	remoteMgr := remote.NewManager(registry)
 
-	// Private /start forwarding to mctl-telegram's bot-start bridge. A token
-	// that is set but too short fails startup rather than dropping every
-	// /start; no URL or no token leaves forwarding disabled.
-	botStartForwarder, err := botstart.New(botstart.Config{
-		URL:   cfg.BotStartForwardURL,
-		Token: cfg.BotStartForwardToken,
-	})
+	botStartForwarder, err := newBotStartForwarder(cfg.BotStartForwardURL, cfg.BotStartForwardToken, cfg.TelegramWebhookSecret)
 	if err != nil {
 		slog.Error("invalid bot-start forward config", "error", err)
 		os.Exit(1)
-	}
-	if !botStartForwarder.Enabled() {
-		slog.Info("bot-start forward disabled: BOT_START_FORWARD_URL or BOT_START_FORWARD_TOKEN unset")
 	}
 
 	// Router.
@@ -261,9 +252,13 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	slog.Info("shutting down")
-	// The /start drain gets its own budget, sized to one forward's full
-	// deadline and started now, so it runs alongside the HTTP drain rather
-	// than after it: total shutdown stays bounded by the longer of the two.
+	// The /start drain budget is absolute from the signal, on purpose. Each
+	// forward runs in its own goroutine and keeps making progress while
+	// srv.Shutdown drains HTTP below, so time spent there is not lost to
+	// it: the budget only bounds how long after the signal a forward may
+	// still finish. Sized to one forward's full deadline, it lets any send
+	// already in flight at the signal complete, and keeps total shutdown at
+	// max(HTTP drain, this budget) + trace flush rather than their sum.
 	botStartCtx, botStartCancel := context.WithTimeout(context.Background(), botStartForwarder.Deadline()+time.Second)
 	defer botStartCancel()
 
@@ -285,6 +280,36 @@ func main() {
 	if err := shutdownTracing(traceCtx); err != nil {
 		slog.Error("tracing shutdown error", "error", err)
 	}
+}
+
+// newBotStartForwarder builds the private /start forwarder for
+// mctl-telegram's bot-start bridge. A token that is set but too short, or a
+// malformed URL, is an error that fails startup rather than dropping every
+// /start; no URL or no token leaves forwarding disabled.
+//
+// Forwarding also stays disabled while TELEGRAM_WEBHOOK_SECRET is unset:
+// the secret is the only thing that proves Telegram delivered an update, so
+// without it a /start is unauthenticated input and must never reach the
+// bridge as an observation. The webhook route already rejects every
+// request in that state (telegramSecretOK fails closed); this keeps the
+// forwarder fail-closed on its own rather than relying on that alone.
+// Disabling rather than exiting matches warnUnsetAuthTokens: an unset
+// inbound secret is logged and fails closed, it does not stop the agent.
+func newBotStartForwarder(forwardURL, forwardToken, telegramWebhookSecret string) (*botstart.Forwarder, error) {
+	f, err := botstart.New(botstart.Config{URL: forwardURL, Token: forwardToken})
+	if err != nil {
+		return nil, err
+	}
+	if !f.Enabled() {
+		slog.Info("bot-start forward disabled: BOT_START_FORWARD_URL or BOT_START_FORWARD_TOKEN unset")
+		return f, nil
+	}
+	if telegramWebhookSecret == "" {
+		slog.Warn("bot-start forward disabled: TELEGRAM_WEBHOOK_SECRET is unset, so a /start cannot be authenticated",
+			"variable", "TELEGRAM_WEBHOOK_SECRET")
+		return botstart.New(botstart.Config{})
+	}
+	return f, nil
 }
 
 // warnUnsetAuthTokens logs a slog.Warn for each inbound auth token that is

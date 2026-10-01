@@ -50,6 +50,13 @@ const (
 	// bridge that times out rather than answering: 5s + 1s + 5s + 4s + 5s =
 	// 20s, plus a second of slack. A smaller cap would silently cut the third
 	// attempt exactly when the bridge is slow.
+	//
+	// It also sets the shutdown drain (deadline + 1s, see cmd/agent), which
+	// makes worst-case shutdown about 22s + 5s trace flush = 27s. The
+	// mctl-agent Deployment sets no terminationGracePeriodSeconds, so the
+	// Kubernetes default of 30s applies: raising this, or the attempt
+	// timeout or backoff, past ~24s needs a longer grace period in
+	// mctl-gitops first, or the tail of the drain is cut by SIGKILL.
 	defaultDeadline    = 21 * time.Second
 	defaultMaxInFlight = 32
 	maxResponseBytes   = 4 << 10
@@ -228,20 +235,23 @@ func (f *Forwarder) Forward(updateID, telegramID int64, observedAt time.Time) {
 	}()
 }
 
-// Shutdown lets sends in flight finish until ctx ends, then cancels the
-// rest and waits for them to record their outcome, so no observation leaves
-// mctl_agent_bot_start_forward_total uncounted. A send cut short is counted
-// failed. Forward calls after Shutdown are dropped. It returns promptly
-// once ctx ends: the HTTP request and the backoff timer both honour
-// cancellation.
+// Shutdown stops accepting new observations, lets sends in flight finish
+// until ctx ends, then cancels the rest and waits for them to record their
+// outcome, so no observation leaves mctl_agent_bot_start_forward_total
+// uncounted. A send cut short is counted failed; Forward calls from the
+// moment Shutdown starts are dropped. It returns promptly once ctx ends:
+// the HTTP request and the backoff timer both honour cancellation.
 func (f *Forwarder) Shutdown(ctx context.Context) {
 	if !f.Enabled() {
 		return
 	}
-	f.Wait(ctx)
+	// closed is set before the first wg.Wait, under the same lock Forward
+	// holds around its check and wg.Add, so no Add can run concurrently with
+	// a Wait (sync.WaitGroup panics on that) and nothing new joins the drain.
 	f.mu.Lock()
 	f.closed = true
 	f.mu.Unlock()
+	f.Wait(ctx)
 	f.cancel()
 	f.wg.Wait()
 }

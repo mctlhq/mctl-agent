@@ -228,6 +228,44 @@ func TestTelegramStartWithoutDateUsesReceiptTime(t *testing.T) {
 	}
 }
 
+// With TELEGRAM_WEBHOOK_SECRET unset nothing on the route is authenticated,
+// so even with a configured forwarder a private /start must not reach the
+// bridge: the request is refused at the door, as every other update is.
+func TestTelegramStartNotForwardedWithoutWebhookSecret(t *testing.T) {
+	tgAPI := recordTelegramAPI(t)
+	bridge, srv := newBridge(t, http.StatusAccepted)
+	f := newForwarder(t, srv.URL, botstart.Config{})
+	h := NewRouter(Options{
+		Telegram: notify.NewTelegram("bot-token", "210408407", "", nil),
+		BotStart: f,
+		OnAlert:  func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
+	})
+	sent := testutil.ToFloat64(metrics.BotStartForward.WithLabelValues("sent"))
+
+	for _, header := range []string{"", "anything"} {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/telegram",
+			bytes.NewReader(telegramMessage(t, 49, clientChatID, "private", "/start", "/start")))
+		if header != "" {
+			req.Header.Set("X-Telegram-Bot-Api-Secret-Token", header)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("secret header %q: status %d, want 401", header, w.Code)
+		}
+	}
+	drain(t, f)
+	if bridge.count() != 0 {
+		t.Fatalf("forwarded %d unauthenticated /start", bridge.count())
+	}
+	if got := testutil.ToFloat64(metrics.BotStartForward.WithLabelValues("sent")) - sent; got != 0 {
+		t.Fatalf("sent delta = %v, want 0", got)
+	}
+	if calls := tgAPI.calls(); len(calls) != 0 {
+		t.Fatalf("Bot API calls: %v", calls)
+	}
+}
+
 func TestTelegramNonStartIsNotForwarded(t *testing.T) {
 	recordTelegramAPI(t)
 	bridge, srv := newBridge(t, http.StatusAccepted)

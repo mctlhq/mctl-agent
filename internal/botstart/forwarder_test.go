@@ -444,3 +444,103 @@ func TestShutdownCountsAbandonedSends(t *testing.T) {
 	f.Forward(3, 4, time.Now())
 	assertDeltas(t, before, map[string]float64{"failed": 1, "dropped": 1})
 }
+
+// Once Shutdown has begun, a /start arriving during the drain is shed and
+// counted, never added to the WaitGroup being waited on.
+func TestForwardDuringDrainIsDropped(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	before := snapshot()
+
+	f, err := New(Config{URL: srv.URL, Token: testToken, Deadline: time.Minute, AttemptTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Forward(1, 2, time.Now()) // in flight, holds the drain open
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		f.Shutdown(ctx)
+		close(done)
+	}()
+	// The drain must be closed to newcomers while the first send is still
+	// in flight, not only after it ends.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		f.mu.Lock()
+		closed := f.closed
+		f.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			close(release)
+			t.Fatal("Shutdown did not close the forwarder before draining")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	f.Forward(3, 4, time.Now())
+	assertDeltas(t, before, map[string]float64{"dropped": 1})
+
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Shutdown did not return")
+	}
+	assertDeltas(t, before, map[string]float64{"dropped": 1, "sent": 1})
+}
+
+// Many Forward calls racing Shutdown: run under -race, this trips the
+// sync.WaitGroup misuse panic ("Add called concurrently with Wait") if an
+// Add can still slip in while the drain waits. Every call ends with exactly
+// one outcome.
+func TestForwardRacingShutdown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	for round := 0; round < 50; round++ {
+		before := snapshot()
+		f, err := New(Config{URL: srv.URL, Token: testToken, MaxInFlight: 1000})
+		if err != nil {
+			t.Fatal(err)
+		}
+		const callers = 40
+		var start sync.WaitGroup
+		var callersDone sync.WaitGroup
+		start.Add(1)
+		for i := 0; i < callers; i++ {
+			callersDone.Add(1)
+			go func() {
+				defer callersDone.Done()
+				start.Wait()
+				f.Forward(1, 2, time.Now())
+			}()
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		start.Done()
+		f.Shutdown(ctx)
+		cancel()
+		callersDone.Wait()
+		// Shutdown has waited for every accepted send, and the callers
+		// have returned, so each call has recorded its outcome.
+		after := snapshot()
+		total := 0.0
+		for _, o := range []string{"sent", "failed", "dropped", "rejected"} {
+			total += after[o] - before[o]
+		}
+		if total != callers {
+			t.Fatalf("round %d: %v outcomes for %d calls", round, total, callers)
+		}
+	}
+}
