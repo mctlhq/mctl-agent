@@ -126,6 +126,8 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 | `AGENT_API_TOKEN` | Bearer token for tickets/skills/MCP/webhook CRUD | — | Prod |
 | `ALERTMANAGER_WEBHOOK_TOKEN` | Bearer token for `POST /api/v1/alerts` | — | Prod |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub workflow webhooks | — | If used |
+| `BOT_START_FORWARD_URL` | mctl-telegram bot-start bridge (`POST /internal/bot-start-observations`); private `/start` is forwarded there | — (disabled) | For #679 |
+| `BOT_START_FORWARD_TOKEN` | Shared bearer for that bridge, the value mctl-telegram reads as `BOT_START_BRIDGE_TOKEN`; at least 32 characters or startup fails | — (disabled) | For #679 |
 | `POLL_INTERVAL` | Polling frequency | `5m` | No |
 | `DB_PATH` | SQLite database path | `/data/mctl-agent.db` | No |
 | `MAX_PR_PER_HOUR` | Rate limit — PRs per hour | `5` | No |
@@ -136,7 +138,7 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 The agent exposes an HTTP API (chi router) for:
 
 - **POST /api/v1/alerts** — AlertManager webhook (bearer when `ALERTMANAGER_WEBHOOK_TOKEN` is set)
-- **POST /api/v1/telegram** — Telegram commands (secret_token + allowlisted chat)
+- **POST /api/v1/telegram** — Telegram commands (secret_token + allowlisted chat). A private `/start` is consumed before the allowlist and forwarded in the background as `{update_id, telegram_id, observed_at}` only (no text) when `BOT_START_FORWARD_URL` and `BOT_START_FORWARD_TOKEN` are set; at most 32 in flight (excess is dropped and counted), retrying 5xx/transport errors for 3 attempts within a 21s deadline; metric `mctl_agent_bot_start_forward_total{outcome=sent|retry|failed|rejected|dropped|disabled}`
 - **GET /api/v1/tickets** — list tracked incidents (bearer when `AGENT_API_TOKEN` is set)
 - **POST /api/v1/skills/register** — register a remote skill (bearer when set)
 - **POST /mcp** — MCP JSON-RPC (bearer when set)

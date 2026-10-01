@@ -64,7 +64,7 @@ The agent uses a modular **skills architecture**:
 
 ## API Endpoints
 - `POST /api/v1/alerts` — AlertManager webhook (`ALERTMANAGER_WEBHOOK_TOKEN` bearer when set)
-- `POST /api/v1/telegram` — Telegram bot webhook (`TELEGRAM_WEBHOOK_SECRET` header when set)
+- `POST /api/v1/telegram` — Telegram bot webhook (`TELEGRAM_WEBHOOK_SECRET` header when set); a private `/start` is consumed before the chat allowlist and forwarded to mctl-telegram by `internal/botstart` (`BOT_START_FORWARD_URL` + `BOT_START_FORWARD_TOKEN`)
 - `GET /api/v1/tickets` — List tickets (`AGENT_API_TOKEN` bearer when set)
 - `GET /api/v1/skills` — List all skills (bearer when set)
 - `GET /api/v1/skills/{name}/metrics` — Skill metrics (bearer when set)

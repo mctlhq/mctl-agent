@@ -71,6 +71,14 @@ type Config struct {
 	// (comma-separated prefixes). Defaults to the prefixes already used by
 	// fixer.DetectFilePath and the workflow-related builtin skills.
 	GitOpsPathAllowlist []string
+	// BotStartForwardURL is mctl-telegram's bot-start bridge endpoint
+	// (POST /internal/bot-start-observations). Env: BOT_START_FORWARD_URL.
+	// Empty, or an empty token, disables forwarding of private /start.
+	BotStartForwardURL string
+	// BotStartForwardToken is the shared bearer for that endpoint, the
+	// same secret mctl-telegram reads as BOT_START_BRIDGE_TOKEN. Env:
+	// BOT_START_FORWARD_TOKEN. Never log it.
+	BotStartForwardToken string
 }
 
 func Load() Config {
@@ -287,6 +295,8 @@ func Load() Config {
 		AMReconcileMinAge:           amReconcileMinAge,
 		MaxAnalyzingAge:             maxAnalyzingAge,
 		GitOpsPathAllowlist:         gitOpsPathAllowlist,
+		BotStartForwardURL:          strings.TrimSpace(os.Getenv("BOT_START_FORWARD_URL")),
+		BotStartForwardToken:        strings.TrimSpace(os.Getenv("BOT_START_FORWARD_TOKEN")),
 	}
 }
 
