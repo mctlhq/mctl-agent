@@ -261,6 +261,11 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 	slog.Info("shutting down")
+	// The /start drain gets its own budget, sized to one forward's full
+	// deadline and started now, so it runs alongside the HTTP drain rather
+	// than after it: total shutdown stays bounded by the longer of the two.
+	botStartCtx, botStartCancel := context.WithTimeout(context.Background(), botStartForwarder.Deadline()+time.Second)
+	defer botStartCancel()
 
 	cancel() // Stop poller.
 
@@ -269,8 +274,9 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Error("shutdown error", "error", err)
 	}
-	// Give /start forwards already in flight the rest of the HTTP budget.
-	botStartForwarder.Wait(shutdownCtx)
+	// Forwards still running when the budget ends are cancelled and counted
+	// failed, so none vanish from mctl_agent_bot_start_forward_total.
+	botStartForwarder.Shutdown(botStartCtx)
 	// Last, so spans from in-flight work finished above are flushed, with a
 	// budget of its own: a slow HTTP drain must not leave the flush an
 	// already-expired context.

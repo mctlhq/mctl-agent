@@ -196,6 +196,38 @@ func TestTelegramPrivateStartIsForwarded(t *testing.T) {
 	}
 }
 
+// A message without a date (malformed, but past the webhook secret) must
+// not be recorded as 1970: receipt time stands in.
+func TestTelegramStartWithoutDateUsesReceiptTime(t *testing.T) {
+	recordTelegramAPI(t)
+	bridge, srv := newBridge(t, http.StatusAccepted)
+	f := newForwarder(t, srv.URL, botstart.Config{})
+	h := startRouter(t, f)
+
+	var update map[string]any
+	if err := json.Unmarshal(telegramMessage(t, 48, clientChatID, "private", "/start", "/start"), &update); err != nil {
+		t.Fatal(err)
+	}
+	update["message"].(map[string]any)["date"] = 0
+	body, _ := json.Marshal(update)
+
+	before := time.Now().UTC().Truncate(time.Second)
+	if w := postTelegram(t, h, body); w.Code != http.StatusOK {
+		t.Fatalf("status %d, want 200", w.Code)
+	}
+	drain(t, f)
+	if bridge.count() != 1 {
+		t.Fatalf("forwarded %d times, want 1", bridge.count())
+	}
+	got, err := time.Parse(time.RFC3339, bridge.bodies[0]["observed_at"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Before(before) || got.After(time.Now().Add(time.Second)) {
+		t.Fatalf("observed_at = %v, want receipt time (~%v)", got, before)
+	}
+}
+
 func TestTelegramNonStartIsNotForwarded(t *testing.T) {
 	recordTelegramAPI(t)
 	bridge, srv := newBridge(t, http.StatusAccepted)

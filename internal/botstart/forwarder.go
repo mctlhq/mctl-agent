@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -45,8 +46,13 @@ const MinTokenLen = 32
 
 const (
 	defaultAttemptTimeout = 5 * time.Second
-	defaultDeadline       = 15 * time.Second
-	maxResponseBytes      = 4 << 10
+	// defaultDeadline covers the worst case of all three attempts against a
+	// bridge that times out rather than answering: 5s + 1s + 5s + 4s + 5s =
+	// 20s, plus a second of slack. A smaller cap would silently cut the third
+	// attempt exactly when the bridge is slow.
+	defaultDeadline    = 21 * time.Second
+	defaultMaxInFlight = 32
+	maxResponseBytes   = 4 << 10
 )
 
 // defaultBackoff is the wait before the second and the third attempt; three
@@ -65,8 +71,11 @@ type Config struct {
 	Backoff []time.Duration
 	// AttemptTimeout bounds a single HTTP attempt. Zero means 5s.
 	AttemptTimeout time.Duration
-	// Deadline bounds one observation across all attempts. Zero means 15s.
+	// Deadline bounds one observation across all attempts. Zero means 21s.
 	Deadline time.Duration
+	// MaxInFlight caps observations being sent at once; a /start arriving
+	// while the cap is full is dropped and counted as such. Zero means 32.
+	MaxInFlight int
 	// Transport overrides the HTTP transport (tests).
 	Transport http.RoundTripper
 }
@@ -78,7 +87,16 @@ type Forwarder struct {
 	backoff  []time.Duration
 	deadline time.Duration
 	client   *http.Client
-	wg       sync.WaitGroup
+	// sem holds one token per observation in flight, bounding goroutines
+	// and sockets when /start arrives faster than the bridge answers.
+	sem chan struct{}
+	// base parents every send; Shutdown cancels it to end the stragglers.
+	base   context.Context
+	cancel context.CancelFunc
+	// mu orders wg.Add in Forward against the final wg.Wait in Shutdown.
+	mu     sync.Mutex
+	closed bool
+	wg     sync.WaitGroup
 }
 
 // New validates cfg and returns a Forwarder. With no URL or no token the
@@ -116,9 +134,30 @@ func New(cfg Config) (*Forwarder, error) {
 	if cfg.AttemptTimeout > 0 {
 		attemptTimeout = cfg.AttemptTimeout
 	}
+	maxInFlight := defaultMaxInFlight
+	if cfg.MaxInFlight > 0 {
+		maxInFlight = cfg.MaxInFlight
+	}
+	f.sem = make(chan struct{}, maxInFlight)
+	f.base, f.cancel = context.WithCancel(context.Background())
+	transport := cfg.Transport
+	if transport == nil {
+		// A dedicated transport rather than http.DefaultTransport, so the
+		// bridge never gets more connections than there are sends in flight
+		// and the forwarder shares no pool with the rest of the process.
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: attemptTimeout, KeepAlive: 30 * time.Second}).DialContext,
+			MaxConnsPerHost:       maxInFlight,
+			MaxIdleConnsPerHost:   4,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   attemptTimeout,
+			ResponseHeaderTimeout: attemptTimeout,
+		}
+	}
 	f.client = &http.Client{
 		Timeout:   attemptTimeout,
-		Transport: cfg.Transport,
+		Transport: transport,
 		// Never follow a redirect: it would resend the bearer to wherever
 		// the Location points. A 3xx is answered as a rejection.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
@@ -131,8 +170,20 @@ func (f *Forwarder) Enabled() bool {
 	return f != nil && f.url != "" && f.token != ""
 }
 
+// Deadline is how long one observation may take across all its attempts;
+// a shutdown drain sized to it lets every send in flight finish.
+func (f *Forwarder) Deadline() time.Duration {
+	if f == nil {
+		return 0
+	}
+	return f.deadline
+}
+
 // Forward sends one observation in the background and returns at once.
-// observedAt is the Telegram message date, not the time of receipt.
+// observedAt is the Telegram message date, not the time of receipt. When
+// MaxInFlight sends are already running the observation is dropped and
+// counted as dropped: shedding is visible, and a burst of /start never
+// turns into unbounded goroutines and sockets against a struggling bridge.
 func (f *Forwarder) Forward(updateID, telegramID int64, observedAt time.Time) {
 	if !f.Enabled() {
 		metrics.BotStartForward.WithLabelValues("disabled").Inc()
@@ -148,15 +199,51 @@ func (f *Forwarder) Forward(updateID, telegramID int64, observedAt time.Time) {
 		slog.Error("bot-start forward: encode failed")
 		return
 	}
+	select {
+	case f.sem <- struct{}{}:
+	default:
+		metrics.BotStartForward.WithLabelValues("dropped").Inc()
+		slog.Warn("bot-start forward dropped: too many in flight", "max_in_flight", cap(f.sem))
+		return
+	}
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		<-f.sem
+		metrics.BotStartForward.WithLabelValues("dropped").Inc()
+		slog.Warn("bot-start forward dropped: shutting down")
+		return
+	}
 	f.wg.Add(1)
+	f.mu.Unlock()
 	go func() {
 		defer f.wg.Done()
+		defer func() { <-f.sem }()
 		// Detached from the webhook request: Telegram's connection is
-		// answered and closed long before the retries are done.
-		ctx, cancel := context.WithTimeout(context.Background(), f.deadline)
+		// answered and closed long before the retries are done. Only
+		// Shutdown cancels base.
+		ctx, cancel := context.WithTimeout(f.base, f.deadline)
 		defer cancel()
 		f.send(ctx, body)
 	}()
+}
+
+// Shutdown lets sends in flight finish until ctx ends, then cancels the
+// rest and waits for them to record their outcome, so no observation leaves
+// mctl_agent_bot_start_forward_total uncounted. A send cut short is counted
+// failed. Forward calls after Shutdown are dropped. It returns promptly
+// once ctx ends: the HTTP request and the backoff timer both honour
+// cancellation.
+func (f *Forwarder) Shutdown(ctx context.Context) {
+	if !f.Enabled() {
+		return
+	}
+	f.Wait(ctx)
+	f.mu.Lock()
+	f.closed = true
+	f.mu.Unlock()
+	f.cancel()
+	f.wg.Wait()
 }
 
 // Wait blocks until every in-flight observation has finished or ctx ends.
@@ -197,7 +284,7 @@ func (f *Forwarder) send(ctx context.Context, body []byte) {
 		}
 		if attempt >= attempts || ctx.Err() != nil {
 			metrics.BotStartForward.WithLabelValues("failed").Inc()
-			slog.Warn("bot-start forward failed", "status", status, "attempt", attempt, "err", f.scrub(err))
+			slog.Warn("bot-start forward failed", "status", status, "attempt", attempt, "err", f.scrub(err), "reason", f.stopReason(ctx))
 			return
 		}
 		metrics.BotStartForward.WithLabelValues("retry").Inc()
@@ -208,9 +295,21 @@ func (f *Forwarder) send(ctx context.Context, body []byte) {
 		case <-ctx.Done():
 			timer.Stop()
 			metrics.BotStartForward.WithLabelValues("failed").Inc()
-			slog.Warn("bot-start forward failed", "attempt", attempt, "err", "deadline exceeded")
+			slog.Warn("bot-start forward failed", "attempt", attempt, "reason", f.stopReason(ctx))
 			return
 		}
+	}
+}
+
+// stopReason names why a send ended early, for the failure log.
+func (f *Forwarder) stopReason(ctx context.Context) string {
+	switch {
+	case f.base.Err() != nil:
+		return "shutdown"
+	case ctx.Err() != nil:
+		return "deadline"
+	default:
+		return "attempts exhausted"
 	}
 }
 

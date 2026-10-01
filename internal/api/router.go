@@ -207,7 +207,14 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 			if update.Message.From != nil && update.Message.From.ID != 0 {
 				telegramID = update.Message.From.ID
 			}
-			opts.BotStart.Forward(update.UpdateID, telegramID, time.Unix(update.Message.Date, 0))
+			// date is required on a Message; a missing or zero one would
+			// otherwise be recorded as 1970. Receipt time is the closest
+			// honest substitute — the webhook is delivered within seconds.
+			observedAt := time.Unix(update.Message.Date, 0)
+			if update.Message.Date <= 0 {
+				observedAt = time.Now()
+			}
+			opts.BotStart.Forward(update.UpdateID, telegramID, observedAt)
 			w.WriteHeader(http.StatusOK)
 			return
 		}

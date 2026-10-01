@@ -22,7 +22,7 @@ import (
 
 const testToken = "0123456789abcdef0123456789abcdef0123456789abcdef" // 48 chars
 
-var outcomes = []string{"sent", "retry", "failed", "disabled", "rejected"}
+var outcomes = []string{"sent", "retry", "failed", "disabled", "rejected", "dropped"}
 
 // snapshot reads every outcome counter so a test can assert deltas; the
 // counters are process-global.
@@ -321,4 +321,126 @@ func TestScrubRemovesToken(t *testing.T) {
 	if strings.Contains(got, testToken) {
 		t.Fatalf("scrub kept the token: %q", got)
 	}
+}
+
+// With the cap full, the next /start is shed and counted, the bridge never
+// sees more than the cap at once, and every slot comes back afterwards.
+func TestForwardCapsInFlight(t *testing.T) {
+	const capN = 2
+	var inFlight, peak atomic.Int32
+	release := make(chan struct{})
+	arrived := make(chan struct{}, 8)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := inFlight.Add(1)
+		for {
+			p := peak.Load()
+			if n <= p || peak.CompareAndSwap(p, n) {
+				break
+			}
+		}
+		arrived <- struct{}{}
+		<-release
+		inFlight.Add(-1)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	before := snapshot()
+
+	f, err := New(Config{URL: srv.URL, Token: testToken, MaxInFlight: capN, Backoff: []time.Duration{time.Millisecond, time.Millisecond}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < capN; i++ {
+		f.Forward(int64(i+1), 2, time.Now())
+	}
+	for i := 0; i < capN; i++ {
+		select {
+		case <-arrived:
+		case <-time.After(5 * time.Second):
+			t.Fatal("capped sends never reached the bridge")
+		}
+	}
+	f.Forward(99, 2, time.Now()) // cap+1: shed
+	assertDeltas(t, before, map[string]float64{"dropped": 1})
+
+	close(release)
+	wait(t, f)
+	if len(f.sem) != 0 {
+		t.Fatalf("%d slots still held after every send finished", len(f.sem))
+	}
+	if p := peak.Load(); p > capN {
+		t.Fatalf("bridge saw %d concurrent sends, cap %d", p, capN)
+	}
+	// The slots are free again: the next /start goes through.
+	f.Forward(100, 2, time.Now())
+	wait(t, f)
+	assertDeltas(t, before, map[string]float64{"dropped": 1, "sent": capN + 1})
+}
+
+// Without an injected transport the forwarder owns one, capped to the
+// in-flight limit, instead of sharing http.DefaultTransport.
+func TestForwarderUsesDedicatedCappedTransport(t *testing.T) {
+	f, err := New(Config{URL: "http://bridge.example/x", Token: testToken, MaxInFlight: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr, ok := f.client.Transport.(*http.Transport)
+	if !ok || tr == http.DefaultTransport {
+		t.Fatalf("transport = %T, want a dedicated *http.Transport", f.client.Transport)
+	}
+	if tr.MaxConnsPerHost != 7 {
+		t.Fatalf("MaxConnsPerHost = %d, want 7", tr.MaxConnsPerHost)
+	}
+}
+
+// The default deadline must leave room for every attempt against a bridge
+// that times out, or the last retry is silently cut.
+func TestDefaultDeadlineCoversAllAttempts(t *testing.T) {
+	worst := time.Duration(len(defaultBackoff)+1) * defaultAttemptTimeout
+	for _, b := range defaultBackoff {
+		worst += b
+	}
+	f, err := New(Config{URL: "http://bridge.example/x", Token: testToken})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Deadline() <= worst {
+		t.Fatalf("deadline %v does not cover the worst case %v", f.Deadline(), worst)
+	}
+}
+
+// Shutdown is bounded by its context, and a send it cuts short still
+// records a terminal outcome instead of vanishing from the metric. Forward
+// after Shutdown is shed.
+func TestShutdownCountsAbandonedSends(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	before := snapshot()
+
+	f, err := New(Config{URL: srv.URL, Token: testToken, AttemptTimeout: time.Minute, Deadline: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Forward(1, 2, time.Now())
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	f.Shutdown(ctx)
+	if d := time.Since(start); d > 3*time.Second {
+		t.Fatalf("Shutdown took %v with a 100ms budget", d)
+	}
+	assertDeltas(t, before, map[string]float64{"failed": 1})
+	if len(f.sem) != 0 {
+		t.Fatalf("%d slots still held after Shutdown", len(f.sem))
+	}
+
+	f.Forward(3, 4, time.Now())
+	assertDeltas(t, before, map[string]float64{"failed": 1, "dropped": 1})
 }

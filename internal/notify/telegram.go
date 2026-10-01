@@ -336,8 +336,11 @@ func IsPrivateChat(update TelegramUpdate) bool {
 // "@botname" suffix removed, equals /start ignoring case. Trailing
 // arguments ("/start onboarding") do not matter; "/startx" and plain text
 // that merely begins with "/start" but carries no bot_command entity do not
-// match. Telegram only adds a username suffix that names this bot, and only
-// private chats are acted on, so the suffix is stripped without comparing it.
+// match. Any "@suffix" is stripped without comparing it to this bot's
+// username, which notify.Telegram does not know: "/start@SomeOtherBot" typed
+// into the DM with this bot is accepted as a /start too. That is harmless
+// because only private chats are acted on, so the sender is already talking
+// to this bot one-to-one.
 func IsStartCommand(update TelegramUpdate) bool {
 	m := update.Message
 	if m == nil || len(m.Entities) == 0 {

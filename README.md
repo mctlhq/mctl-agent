@@ -138,7 +138,7 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 The agent exposes an HTTP API (chi router) for:
 
 - **POST /api/v1/alerts** — AlertManager webhook (bearer when `ALERTMANAGER_WEBHOOK_TOKEN` is set)
-- **POST /api/v1/telegram** — Telegram commands (secret_token + allowlisted chat). A private `/start` is consumed before the allowlist and forwarded in the background as `{update_id, telegram_id, observed_at}` only (no text) when `BOT_START_FORWARD_URL` and `BOT_START_FORWARD_TOKEN` are set; metric `mctl_agent_bot_start_forward_total{outcome}`
+- **POST /api/v1/telegram** — Telegram commands (secret_token + allowlisted chat). A private `/start` is consumed before the allowlist and forwarded in the background as `{update_id, telegram_id, observed_at}` only (no text) when `BOT_START_FORWARD_URL` and `BOT_START_FORWARD_TOKEN` are set; at most 32 in flight (excess is dropped and counted), retrying 5xx/transport errors for 3 attempts within a 21s deadline; metric `mctl_agent_bot_start_forward_total{outcome=sent|retry|failed|rejected|dropped|disabled}`
 - **GET /api/v1/tickets** — list tracked incidents (bearer when `AGENT_API_TOKEN` is set)
 - **POST /api/v1/skills/register** — register a remote skill (bearer when set)
 - **POST /mcp** — MCP JSON-RPC (bearer when set)

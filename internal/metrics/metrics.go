@@ -131,19 +131,21 @@ func init() {
 
 // BotStartForward counts private /start observations forwarded to
 // mctl-telegram's bot-start bridge, by outcome: sent (2xx), retry (a 5xx or
-// transport error that will be retried), failed (retries exhausted or the
-// deadline passed), rejected (a non-retryable non-2xx, such as 400 or 401)
-// and disabled (no forward URL or token configured). It carries no ids.
+// transport error that will be retried), failed (retries exhausted, the
+// deadline passed, or cut short at shutdown), rejected (a non-retryable
+// non-2xx, such as 400 or 401), dropped (shed because the in-flight cap was
+// full, or arriving during shutdown) and disabled (no forward URL or token
+// configured). It carries no ids.
 var BotStartForward = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Name: "mctl_agent_bot_start_forward_total",
-		Help: "Private /start observations forwarded to the bot-start bridge, by outcome.",
+		Help: "Private /start observations forwarded to the bot-start bridge, by outcome (sent, retry, failed, rejected, dropped, disabled).",
 	},
 	[]string{"outcome"},
 )
 
 func init() {
-	for _, outcome := range []string{"sent", "retry", "failed", "disabled", "rejected"} {
+	for _, outcome := range []string{"sent", "retry", "failed", "disabled", "rejected", "dropped"} {
 		BotStartForward.WithLabelValues(outcome)
 	}
 }
