@@ -124,7 +124,7 @@ func (h *GitHubWebhookHandler) processWorkflowRun(ctx context.Context, event wor
 	}
 
 	// Dedup check.
-	existing, err := h.store.FindDuplicate(ctx, tenant, service, ticket.TypeGitHubActionsFailed)
+	existing, err := h.store.FindDuplicate(ctx, tenant, service, ticket.TypeGitHubActionsFailed, "")
 	if err != nil {
 		slog.Error("dedup check failed for github webhook", "error", err)
 	}
