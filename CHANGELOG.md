@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.4.1](https://github.com/mctlhq/mctl-agent/compare/2.4.0...2.4.1) (2026-10-10)
+
+
+### Bug Fixes
+
+* **deps:** bump Go to 1.26.9 for net/http advisories ([d5be11b](https://github.com/mctlhq/mctl-agent/commit/d5be11ba3e5757210ab2e4c70e735918c64d2c9a))
+* **deps:** bump golang.org/x/net to v0.60.0 for GO-2026-6617 ([ea21c9a](https://github.com/mctlhq/mctl-agent/commit/ea21c9a1b15a8c2d029830e66527235e0e94ce20))
+* **deps:** bump x/net to v0.60.0 and Go to 1.26.9 ([5c18674](https://github.com/mctlhq/mctl-agent/commit/5c186749dedb3e55cb188dd784443b55f61a8968))
+
 ## [2.4.0](https://github.com/mctlhq/mctl-agent/compare/2.3.0...2.4.0) (2026-10-01)
 
 
