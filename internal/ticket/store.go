@@ -450,19 +450,27 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 	return tickets, rows.Err()
 }
 
-// FindDuplicate checks for an existing open ticket with the same tenant, service, and type.
-func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*Ticket, error) {
+// FindDuplicate checks for an existing open ticket with the same tenant,
+// service, type, and alert name.
+//
+// alertName is part of the key for the same reason it is in
+// FindRecentlyResolved: classifyAlert collapses several distinct alert names
+// into one ticket type, so keying on type alone would fold a different alert
+// into an unrelated open ticket and swallow it. An empty alertName matches
+// tickets whose alert_name is blank — those created by the poller and other
+// non-AlertManager sources — so those callers keep matching each other.
+func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType, alertName string) (*Ticket, error) {
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets
-		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
+		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status NOT IN (?, ?)
 		ORDER BY created_at DESC LIMIT 1`
 
 	err := s.db.QueryRowContext(ctx, s.rebind(query),
-		tenant, service, ticketType, StatusResolved, StatusSuppressed,
+		tenant, service, ticketType, alertName, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
@@ -617,7 +625,7 @@ func (s *Store) Touch(ctx context.Context, id string) error {
 // fingerprint into the ticket's fingerprint set. The set is stored as
 // a comma-separated string in the alert_fingerprint column.
 //
-// Tickets are deduplicated by (tenant, service, type) in the
+// Tickets are deduplicated by (tenant, service, type, alertName) in the
 // AlertHandler, so a single ticket can represent multiple concurrent
 // AlertManager alerts (e.g. the same alertname firing on two pods of
 // the same service). The reconciliation pass only resolves a ticket

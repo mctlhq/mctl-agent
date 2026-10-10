@@ -1867,9 +1867,9 @@ type blockingStore struct {
 	attempts int
 }
 
-func (s *blockingStore) FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*ticket.Ticket, error) {
+func (s *blockingStore) FindDuplicate(ctx context.Context, tenant, service, ticketType, alertName string) (*ticket.Ticket, error) {
 	s.attempts++
-	return s.alertStore.FindDuplicate(ctx, tenant, service, ticketType)
+	return s.alertStore.FindDuplicate(ctx, tenant, service, ticketType, alertName)
 }
 
 func (s *blockingStore) Create(ctx context.Context, t *ticket.Ticket) error {
@@ -1921,5 +1921,89 @@ func TestAlertHandlerStopsWhenTheBatchBudgetIsGone(t *testing.T) {
 	}
 	if blocking.attempts != 1 {
 		t.Errorf("the loop must stop once the budget is gone, not keep issuing calls that cannot succeed: want 1 attempt, got %d", blocking.attempts)
+	}
+}
+
+// postAlert sends one alert through the handler as a single-alert webhook.
+func postAlert(t *testing.T, h *AlertHandler, status, fingerprint, alertName string) {
+	t.Helper()
+	payload := alertManagerPayload{Alerts: []alert{{
+		Status:      status,
+		Fingerprint: fingerprint,
+		Labels: map[string]string{
+			"alertname": alertName,
+			"namespace": "platform-db",
+			"pod":       "shared-pg-1",
+		},
+	}}}
+	body, _ := json.Marshal(payload)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("webhook for %s/%s: want 200, got %d", alertName, status, w.Code)
+	}
+}
+
+func TestAlertHandlerDedupKeyedByAlertName(t *testing.T) {
+	// TenantMemoryQuotaHigh and CPUThrottlingHigh both classify as
+	// TypeResourceLimit. While one is open, the other is a distinct alert
+	// and must get its own ticket rather than be folded into the first.
+	store := newTestStore(t)
+	var created []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { created = append(created, tk) })
+
+	postAlert(t, handler, "firing", "fp-throttle", "CPUThrottlingHigh")
+	postAlert(t, handler, "firing", "fp-memquota", "TenantMemoryQuotaHigh")
+
+	if len(created) != 2 {
+		t.Fatalf("expected a ticket per distinct alert name, got %d", len(created))
+	}
+	if created[0].AlertName == created[1].AlertName {
+		t.Errorf("tickets share alert name %q", created[0].AlertName)
+	}
+}
+
+func TestAlertHandlerSameAlertNameStillDeduplicated(t *testing.T) {
+	store := newTestStore(t)
+	callCount := 0
+	handler := NewAlertHandler(store, func(*ticket.Ticket) { callCount++ })
+
+	postAlert(t, handler, "firing", "fp-throttle", "CPUThrottlingHigh")
+	postAlert(t, handler, "firing", "fp-throttle", "CPUThrottlingHigh")
+
+	if callCount != 1 {
+		t.Errorf("expected the re-firing alert to be deduplicated, got %d tickets", callCount)
+	}
+}
+
+func TestAlertHandlerCriticalBypassesFlapCooldown(t *testing.T) {
+	// A critical alert that re-fires right after resolving is what an
+	// operator most needs to see, so the cooldown must not swallow it.
+	store := newTestStore(t)
+	callCount := 0
+	handler := NewAlertHandler(store, func(*ticket.Ticket) { callCount++ })
+	handler.FlapCooldown = 10 * time.Minute
+
+	postAlert(t, handler, "firing", "fp-crash", "PodCrashLooping")
+	postAlert(t, handler, "resolved", "fp-crash", "PodCrashLooping")
+	postAlert(t, handler, "firing", "fp-crash", "PodCrashLooping")
+
+	if callCount != 2 {
+		t.Errorf("expected critical alert inside the cooldown to open a ticket, got %d tickets", callCount)
+	}
+}
+
+func TestAlertHandlerWarningStillSuppressedByFlapCooldown(t *testing.T) {
+	store := newTestStore(t)
+	callCount := 0
+	handler := NewAlertHandler(store, func(*ticket.Ticket) { callCount++ })
+	handler.FlapCooldown = 10 * time.Minute
+
+	postAlert(t, handler, "firing", "fp-notready", "KubePodNotReady")
+	postAlert(t, handler, "resolved", "fp-notready", "KubePodNotReady")
+	postAlert(t, handler, "firing", "fp-notready", "KubePodNotReady")
+
+	if callCount != 1 {
+		t.Errorf("expected warning alert inside the cooldown to be suppressed, got %d tickets", callCount)
 	}
 }

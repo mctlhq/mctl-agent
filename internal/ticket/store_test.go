@@ -182,7 +182,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	store := newTestStore(t)
 
 	// No tickets yet — should return nil.
-	dup, err := store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +197,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	}
 
 	// Same tenant/service/type → should find duplicate.
-	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +209,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	}
 
 	// Different type → no duplicate.
-	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
-	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,5 +1004,94 @@ func TestStoreRecordPRLinkagePersistsTheDiagnosis(t *testing.T) {
 	}
 	if got.Status != StatusFixProposed {
 		t.Errorf("status: want %q, got %q", StatusFixProposed, got.Status)
+	}
+}
+
+func TestStoreFindDuplicateKeyedByAlertName(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: SourceAlertManager, AlertName: "CPUThrottlingHigh",
+		Type: TypeResourceLimit, Tenant: "billing", Service: "api",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	// Same alert name still firing → duplicate.
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, "CPUThrottlingHigh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup == nil || dup.ID != tk.ID {
+		t.Fatalf("expected the open ticket to be found for the same alert name, got %+v", dup)
+	}
+
+	// Different alert name mapped to the same type → not a duplicate.
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, "TenantMemoryQuotaHigh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup != nil {
+		t.Errorf("a different alert name must not match an open ticket, got %s", dup.ID)
+	}
+
+	// Empty alert name must not match a ticket that has one.
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup != nil {
+		t.Errorf("empty alert name must not match a named ticket, got %s", dup.ID)
+	}
+}
+
+func TestStoreFindDuplicateEmptyAlertNameMatchesEmpty(t *testing.T) {
+	// Poller and GitHub-webhook tickets carry no alert_name and must keep
+	// matching each other.
+	store := newTestStore(t)
+
+	tk := &Ticket{Source: SourcePolling, Type: TypeArgoCDDegraded, Tenant: "billing", Service: "api"}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypeArgoCDDegraded, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup == nil || dup.ID != tk.ID {
+		t.Fatalf("expected blank alert_name tickets to match each other, got %+v", dup)
+	}
+}
+
+// The postgres dialect runs the same query through rebind, which rewrites ?
+// into $N. SQLite accepts $N parameters, so flipping the dialect on the test
+// store exercises the rewritten statement end to end and checks that the
+// extra alert_name placeholder still binds in order.
+func TestStoreFindDuplicateRebindDialect(t *testing.T) {
+	store := newTestStore(t)
+
+	tk := &Ticket{
+		Source: SourceAlertManager, AlertName: "CPUThrottlingHigh",
+		Type: TypeResourceLimit, Tenant: "billing", Service: "api",
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+
+	store.dialect = "postgres"
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, "CPUThrottlingHigh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup == nil || dup.ID != tk.ID {
+		t.Fatalf("expected duplicate under rebind, got %+v", dup)
+	}
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, "TenantMemoryQuotaHigh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup != nil {
+		t.Errorf("different alert name must not match under rebind, got %s", dup.ID)
 	}
 }
