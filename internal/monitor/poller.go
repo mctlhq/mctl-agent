@@ -187,7 +187,7 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 		}
 
 		// Dedup: check for existing open ticket.
-		existing, err := p.store.FindDuplicate(ctx, team, app, ticket.TypeArgoCDDegraded)
+		existing, err := p.store.FindDuplicate(ctx, team, app, ticket.TypeArgoCDDegraded, "")
 		if err != nil {
 			slog.Error("poller: dedup check failed", "error", err)
 			continue
@@ -451,9 +451,10 @@ func (p *Poller) reconcileWithAlertManager(ctx context.Context) {
 		default:
 			continue
 		}
-		// AlertHandler deduplicates by (tenant, service, type) so a
-		// single ticket can represent multiple concurrent AM alerts
-		// with different fingerprints. Resolve only when ALL of the
+		// AlertHandler deduplicates by (tenant, service, type, alertName)
+		// so a single ticket can represent multiple concurrent AM alerts
+		// (same alertname, e.g. on two pods) with different fingerprints.
+		// Resolve only when ALL of the
 		// ticket's fingerprints are absent from the active set; if any
 		// one is still firing, the underlying incident is still real.
 		anyStillFiring := false
