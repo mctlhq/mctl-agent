@@ -102,9 +102,6 @@ func TestLoadOverrides(t *testing.T) {
 	if cfg.GitHubToken != "ghp_test123" {
 		t.Errorf("GitHubToken = %q", cfg.GitHubToken)
 	}
-	if cfg.WebhookDefaultTTL != 15*time.Minute {
-		t.Errorf("WebhookDefaultTTL = %v, want 15m", cfg.WebhookDefaultTTL)
-	}
 }
 
 func TestLoadInboundAuthEnv(t *testing.T) {

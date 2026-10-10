@@ -47,9 +47,7 @@ type Config struct {
 	MaxPRPerDay                 int
 	AutoMergeEnabled            bool
 	EscalationTag               string
-	WebhookEnabled              bool
-	WebhookCallbackURL          string
-	WebhookDefaultTTL           time.Duration
+	WebhookCallbackURL          string // public base URL; the Telegram bot webhook is registered at <url>/api/v1/telegram
 	AlertFlapCooldown           time.Duration
 	AutoResolveStaleAfter       time.Duration
 	AutoResolveAnalyzingAfter   time.Duration
@@ -117,18 +115,6 @@ func Load() Config {
 		autoMergeEnabled = true
 	} else if v != "" {
 		slog.Warn("AUTO_MERGE_ENABLED set to unrecognized value, defaulting to false", "value", v)
-	}
-
-	webhookEnabled := false
-	if v := os.Getenv("WEBHOOK_ENABLED"); v == "true" {
-		webhookEnabled = true
-	}
-
-	webhookDefaultTTL := 15 * time.Minute
-	if v := os.Getenv("WEBHOOK_DEFAULT_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			webhookDefaultTTL = d
-		}
 	}
 
 	alertFlapCooldown := 10 * time.Minute
@@ -277,9 +263,7 @@ func Load() Config {
 		MaxPRPerDay:                 maxPRPerDay,
 		AutoMergeEnabled:            autoMergeEnabled,
 		EscalationTag:               envOr("ESCALATION_TAG", "@mashkovd"),
-		WebhookEnabled:              webhookEnabled,
 		WebhookCallbackURL:          envOr("WEBHOOK_CALLBACK_URL", "http://localhost:8081"),
-		WebhookDefaultTTL:           webhookDefaultTTL,
 		AlertFlapCooldown:           alertFlapCooldown,
 		AutoResolveStaleAfter:       autoResolveStaleAfter,
 		AutoResolveAnalyzingAfter:   autoResolveAnalyzingAfter,

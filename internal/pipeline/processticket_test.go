@@ -156,8 +156,8 @@ func TestTriggerAnalysisRejectsCancelledContext(t *testing.T) {
 // fix step that failed because the diagnosis deadline expired — so escalate is
 // routinely called with an already-cancelled context. Writing the terminal
 // status under it fails instantly while the rest of escalate still mirrors to
-// mctl-api and emits the external event, leaving the ticket stuck in
-// `analyzing` and disagreeing with everything downstream (codex P2 on #112).
+// mctl-api, leaving the ticket stuck in `analyzing` and disagreeing with
+// everything downstream (codex P2 on #112).
 func TestEscalatePersistsUnderAnExpiredContext(t *testing.T) {
 	p, store := newAsyncTestPipeline(t, 1)
 
@@ -173,7 +173,7 @@ func TestEscalatePersistsUnderAnExpiredContext(t *testing.T) {
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	p.escalate(expired, tk, "[escalated] the fix step ran out of time", nil)
+	p.escalate(expired, tk, "[escalated] the fix step ran out of time")
 
 	got, err := store.Get(context.Background(), tk.ID)
 	if err != nil {
@@ -215,7 +215,7 @@ func TestEscalateDoesNotClobberAConcurrentResolution(t *testing.T) {
 	// The pipeline still holds its pre-resolve copy and now escalates it.
 	expired, cancel := context.WithCancel(context.Background())
 	cancel()
-	p.escalate(expired, tk, "[escalated] the fix step ran out of time", nil)
+	p.escalate(expired, tk, "[escalated] the fix step ran out of time")
 
 	got, err := store.Get(context.Background(), tk.ID)
 	if err != nil {
@@ -423,9 +423,8 @@ func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T
 	}
 	atomic.StoreInt32(&mirrored, 0)
 	raced.Status = ticket.StatusFixProposed
-	// The return value gates the external webhook: announcing a transition
-	// neither store accepted would tell consumers a resolved ticket was
-	// escalated.
+	// The return value reports whether the store took the transition:
+	// reporting one it refused would mean a resolved ticket was escalated.
 	if newPipeline().persistDiagnosisAndMirror(expired, raced, ticket.StatusAnalyzing) {
 		t.Error("a transition the store refused must not be reported as applied")
 	}

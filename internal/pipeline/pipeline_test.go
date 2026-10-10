@@ -131,7 +131,7 @@ func TestEscalateLeavesAnalyzing(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
 	tk := newAnalyzingTicket(t, store)
 
-	p.escalate(context.Background(), tk, "Escalated: no skill matched this ticket", nil)
+	p.escalate(context.Background(), tk, "Escalated: no skill matched this ticket")
 
 	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
@@ -159,7 +159,7 @@ func TestEscalateAppendsToExistingAnalysis(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	p.escalate(context.Background(), tk, "[escalated] Infrastructure-scope alert", nil)
+	p.escalate(context.Background(), tk, "[escalated] Infrastructure-scope alert")
 
 	got, err := store.Get(ctx, tk.ID)
 	if err != nil {
@@ -183,7 +183,7 @@ func TestEscalatedTicketStaysInListOpen(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
 	tk := newAnalyzingTicket(t, store)
 
-	p.escalate(context.Background(), tk, "Escalated: no skill matched", nil)
+	p.escalate(context.Background(), tk, "Escalated: no skill matched")
 
 	open, err := store.ListOpen(ctx)
 	if err != nil {
@@ -226,7 +226,7 @@ func TestAlertSyncPreservesOrder(t *testing.T) {
 	// Mirrors processTicketSync: the diagnosis sync, then an early return that
 	// escalates.
 	p.updateAlert(tk)
-	p.escalate(context.Background(), tk, "Escalated: no skill matched", nil)
+	p.escalate(context.Background(), tk, "Escalated: no skill matched")
 
 	mu.Lock()
 	defer mu.Unlock()
