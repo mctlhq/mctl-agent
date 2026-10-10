@@ -1059,12 +1059,28 @@ func TestFindDuplicateQueryPostgresPlaceholders(t *testing.T) {
 	if strings.Contains(q, "?") {
 		t.Errorf("rebound query still has ? placeholders: %s", q)
 	}
-	for i := 1; i <= 6; i++ {
+	for i := 1; i <= 7; i++ {
 		if !strings.Contains(q, fmt.Sprintf("$%d", i)) {
 			t.Errorf("missing placeholder $%d", i)
 		}
 	}
-	if strings.Contains(q, "$7") {
-		t.Errorf("unexpected placeholder $7")
+	if strings.Contains(q, "$8") {
+		t.Errorf("unexpected placeholder $8")
+	}
+}
+
+func TestStoreFindDuplicateAlertNameAliases(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	if err := store.Create(ctx, &Ticket{Source: SourceAlertManager, AlertName: "PodCrashLooping", Type: TypePodCrashloop, Tenant: "billing", Service: "api", Severity: SeverityCritical}); err != nil {
+		t.Fatal(err)
+	}
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "KubePodCrashLooping")
+	if err != nil || dup == nil {
+		t.Fatalf("expected alias to match open ticket, got %v, %v", dup, err)
+	}
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "KubePodNotReady")
+	if err != nil || dup != nil {
+		t.Fatalf("expected distinct alert not to match, got %v, %v", dup, err)
 	}
 }

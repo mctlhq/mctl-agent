@@ -451,13 +451,21 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 }
 
 // findDuplicateQuery is the (pre-rebind) FindDuplicate query. Args, in order:
-// tenant, service, type, alert_name, resolved, suppressed.
+// tenant, service, type, alert_name, alert_name alias, resolved, suppressed.
 const findDuplicateQuery = `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets
-		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status NOT IN (?, ?)
+		WHERE tenant=? AND service=? AND type=? AND alert_name IN (?, ?) AND status NOT IN (?, ?)
 		ORDER BY created_at DESC LIMIT 1`
+
+// alertNameAliases lists alert rule names that are synonyms for the identical
+// condition (an old/new rule rename kept so two chart versions stay
+// merge-order-independent). They must dedup against each other.
+var alertNameAliases = map[string]string{
+	"PodCrashLooping":     "KubePodCrashLooping",
+	"KubePodCrashLooping": "PodCrashLooping",
+}
 
 // FindDuplicate checks for an existing open ticket with the same tenant,
 // service, type and alert name. The alert name is part of the key because
@@ -467,9 +475,13 @@ func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType, 
 	t := &Ticket{}
 	var resolvedAt sql.NullTime
 	query := findDuplicateQuery
+	alias, ok := alertNameAliases[alertName]
+	if !ok {
+		alias = alertName
+	}
 
 	err := s.db.QueryRowContext(ctx, s.rebind(query),
-		tenant, service, ticketType, alertName, StatusResolved, StatusSuppressed,
+		tenant, service, ticketType, alertName, alias, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
