@@ -300,7 +300,7 @@ func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p, store := newEscalateTestPipeline(t)
-			p.telegram = notify.NewTelegram("", "", "", nil)
+			p.telegram = notify.NewTelegram("", "", nil)
 			tk := newAnalyzingTicket(t, store)
 			diag := &skill.DiagnosisResult{Diagnosis: "stub diagnosis", Confidence: ticket.ConfidenceHigh, Fixable: true}
 
@@ -328,7 +328,7 @@ func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
 // up escalated, its Analysis naming every candidate path that was tried.
 func TestHandleHighConfidenceFixSkipsOutOfAllowlistCandidate(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 
 	var requestedContentPaths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -384,7 +384,7 @@ func TestHandleHighConfidenceFixSkipsOutOfAllowlistCandidate(t *testing.T) {
 // the pipeline always made.
 func TestHandleHighConfidenceFixHappyPathReadsExactlyOnce(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 
 	var contentGETs atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -464,7 +464,7 @@ func TestHandleHighConfidenceFixHappyPathReadsExactlyOnce(t *testing.T) {
 // found and used for the PR.
 func TestHandleHighConfidenceFixProbesLaterCandidateOnMiss(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -546,7 +546,7 @@ func TestHandleHighConfidenceFixProbesLaterCandidateOnMiss(t *testing.T) {
 // was tried, so reporting a probe failure would be simply wrong.
 func TestHandleHighConfidenceFixEscalatesEmptyCandidateListDistinctly(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 	// p.github is deliberately left nil: with no candidates, the probe loop
 	// never runs and nothing touches it.
 
@@ -595,7 +595,7 @@ func TestHandleHighConfidenceFixEscalatesEmptyCandidateListDistinctly(t *testing
 // than corrupt the resolved file.
 func TestHandleHighConfidenceFixRejectsMismatchedNewContentPath(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 
 	var putCalls, pullCalls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -701,7 +701,7 @@ func TestHandleHighConfidenceFixRejectsMismatchedNewContentPath(t *testing.T) {
 // GitHub with a write.
 func TestHandleHighConfidenceFixRefusesAppProjectWhitelist(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 
 	var putCalls, pullCalls atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -784,7 +784,7 @@ func TestHandleHighConfidenceFixRefusesAppProjectWhitelist(t *testing.T) {
 // reused rather than rejected as if it were an unrelated-path hazard.
 func TestHandleHighConfidenceFixReusesNewContentWithEmptyFilePath(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 
 	var putBodyMu sync.Mutex
 	var putBody []byte
@@ -890,7 +890,7 @@ func TestHandleHighConfidenceFixStopsOnNon404FirstCandidate(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p, store := newEscalateTestPipeline(t)
-			p.telegram = notify.NewTelegram("", "", "", nil)
+			p.telegram = notify.NewTelegram("", "", nil)
 
 			var contentGETs atomic.Int64
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -982,7 +982,7 @@ func (c cancelAfterCtx) Err() error {
 // to 2.
 func TestHandleHighConfidenceFixStopsOnCancelledContext(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 
 	var contentGETs atomic.Int64
 	var cancelled atomic.Bool
@@ -1034,7 +1034,7 @@ func TestHandleHighConfidenceFixStopsOnCancelledContext(t *testing.T) {
 // escalate with the platform-service message and never touch GitHub at all.
 func TestHandleHighConfidenceFixEscalatesPlatformServiceWithoutARead(t *testing.T) {
 	p, store := newEscalateTestPipeline(t)
-	p.telegram = notify.NewTelegram("", "", "", nil)
+	p.telegram = notify.NewTelegram("", "", nil)
 	// p.github is deliberately left nil: the platform-service check must
 	// return before anything touches it.
 

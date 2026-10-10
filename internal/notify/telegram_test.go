@@ -69,7 +69,7 @@ func TestSendTextWithMockServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tg := NewTelegram("test-token", "12345", "", nil)
+	tg := NewTelegram("test-token", "12345", nil)
 	// Override the URL by replacing the httpClient with one that redirects.
 	tg.httpClient = srv.Client()
 	// We need to actually hit the mock server, so let's use a custom approach:
@@ -79,14 +79,14 @@ func TestSendTextWithMockServer(t *testing.T) {
 
 	// Unfortunately, Telegram.sendMessage hard-codes the URL.
 	// Let's test the no-config path instead.
-	tgEmpty := NewTelegram("", "", "", nil)
+	tgEmpty := NewTelegram("", "", nil)
 	if err := tgEmpty.SendText("hello"); err != nil {
 		t.Errorf("expected nil error for unconfigured telegram, got %v", err)
 	}
 }
 
 func TestSendNewTicketUnconfigured(t *testing.T) {
-	tg := NewTelegram("", "", "", nil)
+	tg := NewTelegram("", "", nil)
 	tk := &ticket.Ticket{
 		ID:       "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
 		Type:     ticket.TypePodCrashloop,
@@ -102,7 +102,7 @@ func TestSendNewTicketUnconfigured(t *testing.T) {
 }
 
 func TestSendStatusEmptyTickets(t *testing.T) {
-	tg := NewTelegram("", "", "", nil)
+	tg := NewTelegram("", "", nil)
 	if err := tg.SendStatus(nil); err != nil {
 		t.Errorf("expected nil error, got %v", err)
 	}
@@ -133,7 +133,7 @@ func TestConfidenceIcon(t *testing.T) {
 }
 
 func TestSendPRAutoMergedUnconfigured(t *testing.T) {
-	tg := NewTelegram("", "", "", nil)
+	tg := NewTelegram("", "", nil)
 	tk := &ticket.Ticket{
 		ID:      "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
 		Tenant:  "billing",
@@ -145,7 +145,7 @@ func TestSendPRAutoMergedUnconfigured(t *testing.T) {
 }
 
 func TestSendPRNeedsReviewUnconfigured(t *testing.T) {
-	tg := NewTelegram("", "", "", nil)
+	tg := NewTelegram("", "", nil)
 	tk := &ticket.Ticket{
 		ID:      "12345678-abcd-efgh-ijkl-mnopqrstuvwx",
 		Tenant:  "billing",
@@ -167,7 +167,7 @@ func TestEscapeHTML(t *testing.T) {
 }
 
 func TestCommandChatAllowed(t *testing.T) {
-	tg := NewTelegram("token", "210408407", "", map[string]string{"labs": "999"})
+	tg := NewTelegram("token", "210408407", map[string]string{"labs": "999"})
 	if !tg.CommandChatAllowed(210408407) {
 		t.Fatal("default chat should be allowed")
 	}
@@ -178,14 +178,14 @@ func TestCommandChatAllowed(t *testing.T) {
 		t.Fatal("unknown chat must be rejected")
 	}
 
-	open := NewTelegram("token", "", "", nil)
+	open := NewTelegram("token", "", nil)
 	if !open.CommandChatAllowed(1) {
 		t.Fatal("unconfigured notifier allows all chats for tests")
 	}
 }
 
 func TestChatIDForRouting(t *testing.T) {
-	tg := NewTelegram("token", "default-chat", "", map[string]string{
+	tg := NewTelegram("token", "default-chat", map[string]string{
 		"admins": "admins-chat",
 		"labs":   "labs-chat",
 	})
@@ -209,7 +209,7 @@ func TestChatIDForRouting(t *testing.T) {
 	}
 
 	// nil map should always return default (preserves pre-routing behaviour).
-	tgNoMap := NewTelegram("token", "default-only", "", nil)
+	tgNoMap := NewTelegram("token", "default-only", nil)
 	if got := tgNoMap.chatIDFor("admins"); got != "default-only" {
 		t.Errorf("chatIDFor(admins) with nil map = %q; want default-only", got)
 	}

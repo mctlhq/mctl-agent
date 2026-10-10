@@ -159,7 +159,7 @@ func TestAlertHandlerServeHTTP(t *testing.T) {
 }
 
 func TestAlertHandlerEmptyNamespaceTenantFallback(t *testing.T) {
-	// absent()-style VMRules (MctlAgentMetricsAbsent, OpenclawLlmMetricsAbsent)
+	// absent()-style VMRules (MctlAgentMetricsAbsent, ExampleMetricsAbsent)
 	// fire with no `namespace` label at all — there's no series to inherit
 	// one from. mctl-api rejects an empty tenant as a missing required
 	// field, so these tickets must get a non-empty placeholder tenant to
@@ -292,8 +292,8 @@ func TestAlertHandlerLabellessAlertsDoNotCollide(t *testing.T) {
 			},
 			{
 				Status:      "firing",
-				Labels:      map[string]string{"alertname": "OpenclawLlmMetricsAbsent"},
-				Annotations: map[string]string{"summary": "openclaw_llm_* metric series missing for 30m"},
+				Labels:      map[string]string{"alertname": "ExampleMetricsAbsent"},
+				Annotations: map[string]string{"summary": "example_* metric series missing for 30m"},
 			},
 		},
 	}
@@ -845,14 +845,14 @@ func TestAlertHandlerIgnoreServiceFilter(t *testing.T) {
 
 	callCount := 0
 	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { callCount++ })
-	handler.IgnoreService = regexp.MustCompile(`^(openclawpr\d+|hooktest-.*)$`)
+	handler.IgnoreService = regexp.MustCompile(`^(previewpr\d+|hooktest-.*)$`)
 
 	cases := []struct {
 		name        string
 		pod         string
 		wantDropped bool
 	}{
-		{"matches openclawprN", "openclawpr7-6d4b5c7f8-abc12", true},
+		{"matches previewprN", "previewpr7-6d4b5c7f8-abc12", true},
 		{"matches hooktest", "hooktest-service-6d4b5c7f8-abc12", true},
 		{"non-matching service creates ticket", "api-6d4b5c7f8-abc12", false},
 	}
@@ -1315,7 +1315,7 @@ func TestAlertHandlerMixedBatchProcessesEveryAlert(t *testing.T) {
 	handler := NewAlertHandler(store, func(tk *ticket.Ticket) {
 		received = append(received, tk)
 	})
-	handler.IgnoreService = regexp.MustCompile(`^openclawpr\d+`)
+	handler.IgnoreService = regexp.MustCompile(`^previewpr\d+`)
 
 	payload := alertManagerPayload{
 		Status: "firing",
@@ -1326,7 +1326,7 @@ func TestAlertHandlerMixedBatchProcessesEveryAlert(t *testing.T) {
 				Labels: map[string]string{
 					"alertname": "KubePodCrashLooping",
 					"namespace": "labs",
-					"pod":       "openclawpr4-base-service-6d4b5c7f8-abc12",
+					"pod":       "previewpr4-base-service-6d4b5c7f8-abc12",
 				},
 				Annotations: map[string]string{"summary": "preview crashloop"},
 			},
@@ -1477,10 +1477,10 @@ func TestAlertHandlerNonBaseServicePodUnchanged(t *testing.T) {
 // against the app name (as an operator would write it) must still match
 // after canonicalisation strips the base-service chart signature.
 //
-// The pattern is anchored (`^openclawpr\d+$`) rather than left open-ended:
-// the raw derived name "openclawpr4-base-service" does NOT match the
-// anchored pattern (it has a non-digit, non-end suffix after "openclawpr4"),
-// while the canonicalised "openclawpr4" does. An unanchored pattern would
+// The pattern is anchored (`^previewpr\d+$`) rather than left open-ended:
+// the raw derived name "previewpr4-base-service" does NOT match the
+// anchored pattern (it has a non-digit, non-end suffix after "previewpr4"),
+// while the canonicalised "previewpr4" does. An unanchored pattern would
 // match BOTH the raw and the canonical name, so it would pass whether or not
 // svcname.Resolve actually ran — this anchor is what makes the test fail if
 // canonicalisation is bypassed.
@@ -1488,7 +1488,7 @@ func TestAlertHandlerIgnoreServiceFilterMatchesCanonicalName(t *testing.T) {
 	store := newTestStore(t)
 	callCount := 0
 	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { callCount++ })
-	handler.IgnoreService = regexp.MustCompile(`^openclawpr\d+$`)
+	handler.IgnoreService = regexp.MustCompile(`^previewpr\d+$`)
 
 	payload := alertManagerPayload{
 		Status: "firing",
@@ -1496,8 +1496,8 @@ func TestAlertHandlerIgnoreServiceFilterMatchesCanonicalName(t *testing.T) {
 			Status: "firing",
 			Labels: map[string]string{
 				"alertname": "KubePodCrashLooping",
-				"namespace": "openclawpr4",
-				"pod":       "openclawpr4-base-service-6d4b5c7f8-abc12",
+				"namespace": "previewpr4",
+				"pod":       "previewpr4-base-service-6d4b5c7f8-abc12",
 			},
 			Annotations: map[string]string{"summary": "preview crashloop"},
 		}},

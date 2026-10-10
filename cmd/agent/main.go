@@ -79,7 +79,7 @@ func main() {
 	// Initialize components.
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)
 	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubTokenFile, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun, cfg.MaxPRPerHour, cfg.MaxPRPerDay, gitopspath.NewAllowlist(cfg.GitOpsPathAllowlist))
-	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.OpenClawBotUsername, cfg.TelegramTenantChatIDs)
+	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.TelegramTenantChatIDs)
 	var webhookStore *webhook.Store
 	var webhookDispatcher *webhook.Dispatcher
 	if cfg.WebhookEnabled {
