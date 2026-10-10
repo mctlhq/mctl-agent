@@ -13,6 +13,10 @@
 * **monitor:** pass blank alert name when deduping GitHub workflow tickets ([9678fdd](https://github.com/mctlhq/mctl-agent/commit/9678fdd8dd6364da831ffc3f7d25d788846b761e)), closes [#162](https://github.com/mctlhq/mctl-agent/issues/162)
 * **monitor:** pass blank alert name when deduping poller tickets ([7fbda48](https://github.com/mctlhq/mctl-agent/commit/7fbda48be36d715df014d58e720f0893c12b3a3e)), closes [#162](https://github.com/mctlhq/mctl-agent/issues/162)
 
+### Removed
+
+* **api:** remove the external-agent webhook subscription API ([#161](https://github.com/mctlhq/mctl-agent/pull/161)): `GET/POST /api/v1/webhooks`, `DELETE /api/v1/webhooks/{id}`, `POST /api/v1/tickets/{id}/external-claims`, `PATCH /api/v1/tickets/{id}/external-results`, the MCP tools `mctl_agent_list_webhooks`, `mctl_agent_register_webhook`, `mctl_agent_delete_webhook`, and the `WEBHOOK_ENABLED` / `WEBHOOK_DEFAULT_TTL` settings. This is a removal of public API, released as a patch because it was never switched on in production (`WEBHOOK_ENABLED` was never set) and its only client, mctl-openclaw, is archived. `WEBHOOK_CALLBACK_URL` (Telegram webhook base) is unchanged. The tables `webhook_endpoints`, `external_events`, `external_deliveries` and `external_claims` are left in place.
+
 ## [2.4.1](https://github.com/mctlhq/mctl-agent/compare/2.4.0...2.4.1) (2026-10-10)
 
 
