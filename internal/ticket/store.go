@@ -465,6 +465,9 @@ const findDuplicateQuery = `
 var alertNameAliases = map[string]string{
 	"PodCrashLooping":     "KubePodCrashLooping",
 	"KubePodCrashLooping": "PodCrashLooping",
+
+	"ArgoCDApplicationSyncFailed":    "ArgoCDApplicationOutOfSyncLong",
+	"ArgoCDApplicationOutOfSyncLong": "ArgoCDApplicationSyncFailed",
 }
 
 // FindDuplicate checks for an existing open ticket with the same tenant,
