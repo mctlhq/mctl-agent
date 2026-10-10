@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.4.2](https://github.com/mctlhq/mctl-agent/compare/2.4.1...2.4.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* **monitor:** dedup on alert name, exempt critical from flap cooldown ([0a5c770](https://github.com/mctlhq/mctl-agent/commit/0a5c770fda68ee0a88ae603647c1a7d3031c498c))
+* **monitor:** dedup on alert name, exempt critical from flap cooldown ([585e7ef](https://github.com/mctlhq/mctl-agent/commit/585e7efed507ca7ef2f97fe753b035a04724a904)), closes [#162](https://github.com/mctlhq/mctl-agent/issues/162)
+* **monitor:** honour severity=critical label in flap cooldown ([e405d45](https://github.com/mctlhq/mctl-agent/commit/e405d45de288bda1f5a564ecab324bc58791d4b5))
+* **monitor:** honour severity=critical label in flap cooldown ([87c9d2d](https://github.com/mctlhq/mctl-agent/commit/87c9d2d713d090e64ad8b32e571f70c74c43619e))
+* **monitor:** key alert dedup on alert name, skip flap cooldown for critical ([2abb6be](https://github.com/mctlhq/mctl-agent/commit/2abb6be9ef03f25108a37116a26c439a2d1481af)), closes [#162](https://github.com/mctlhq/mctl-agent/issues/162)
+* **monitor:** pass blank alert name when deduping GitHub workflow tickets ([9678fdd](https://github.com/mctlhq/mctl-agent/commit/9678fdd8dd6364da831ffc3f7d25d788846b761e)), closes [#162](https://github.com/mctlhq/mctl-agent/issues/162)
+* **monitor:** pass blank alert name when deduping poller tickets ([7fbda48](https://github.com/mctlhq/mctl-agent/commit/7fbda48be36d715df014d58e720f0893c12b3a3e)), closes [#162](https://github.com/mctlhq/mctl-agent/issues/162)
+
 ## [2.4.1](https://github.com/mctlhq/mctl-agent/compare/2.4.0...2.4.1) (2026-10-10)
 
 
