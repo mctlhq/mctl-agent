@@ -89,7 +89,7 @@ func TestAlertWebhookRequiresBearerWhenConfigured(t *testing.T) {
 func TestTelegramWebhookSecretAndChatAllowlist(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
-	tg := notify.NewTelegram("token", "210408407", "", nil)
+	tg := notify.NewTelegram("token", "210408407", nil)
 	router := NewRouter(Options{
 		Store:                 store,
 		Pipeline:              pipe,
@@ -131,7 +131,7 @@ func TestTelegramFailClosedWithoutChatAllowlist(t *testing.T) {
 	pipe := newTestPipeline(t, store)
 	// Production auth (webhook secret) enabled, but no chat IDs configured:
 	// commands must be dropped instead of falling back to open mode.
-	tg := notify.NewTelegram("token", "", "", nil)
+	tg := notify.NewTelegram("token", "", nil)
 	router := NewRouter(Options{
 		Store:                 store,
 		Pipeline:              pipe,
@@ -164,7 +164,7 @@ func TestTelegramFailClosedWithoutChatAllowlist(t *testing.T) {
 func TestTelegramFailClosedWithoutWebhookSecret(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
-	tg := notify.NewTelegram("token", "210408407", "", nil)
+	tg := notify.NewTelegram("token", "210408407", nil)
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
@@ -197,7 +197,7 @@ func TestTelegramFailClosedWithoutWebhookSecret(t *testing.T) {
 func TestTelegramFailsClosedWhenFullyUnconfigured(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
-	tg := notify.NewTelegram("token", "", "", nil)
+	tg := notify.NewTelegram("token", "", nil)
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,
@@ -222,7 +222,7 @@ func TestTelegramFailsClosedWhenFullyUnconfigured(t *testing.T) {
 func TestTelegramWebhookBodyTooLarge(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
-	tg := notify.NewTelegram("token", "", "", nil)
+	tg := notify.NewTelegram("token", "", nil)
 	router := NewRouter(Options{
 		Store:    store,
 		Pipeline: pipe,

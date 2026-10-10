@@ -120,7 +120,7 @@ func drain(t *testing.T, f *botstart.Forwarder) {
 func startRouter(t *testing.T, f *botstart.Forwarder) http.Handler {
 	t.Helper()
 	return NewRouter(Options{
-		Telegram:              notify.NewTelegram("bot-token", "210408407", "", nil),
+		Telegram:              notify.NewTelegram("bot-token", "210408407", nil),
 		TelegramWebhookSecret: "tg-secret",
 		BotStart:              f,
 		OnAlert:               func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
@@ -236,7 +236,7 @@ func TestTelegramStartNotForwardedWithoutWebhookSecret(t *testing.T) {
 	bridge, srv := newBridge(t, http.StatusAccepted)
 	f := newForwarder(t, srv.URL, botstart.Config{})
 	h := NewRouter(Options{
-		Telegram: notify.NewTelegram("bot-token", "210408407", "", nil),
+		Telegram: notify.NewTelegram("bot-token", "210408407", nil),
 		BotStart: f,
 		OnAlert:  func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
 	})
@@ -322,7 +322,7 @@ func TestTelegramOperatorStatusUnchanged(t *testing.T) {
 	h := NewRouter(Options{
 		Store:                 store,
 		Pipeline:              newTestPipeline(t, store),
-		Telegram:              notify.NewTelegram("bot-token", "210408407", "", nil),
+		Telegram:              notify.NewTelegram("bot-token", "210408407", nil),
 		TelegramWebhookSecret: "tg-secret",
 		BotStart:              f,
 		OnAlert:               func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },

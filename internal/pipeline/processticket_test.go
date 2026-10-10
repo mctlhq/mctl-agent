@@ -37,7 +37,7 @@ func newAsyncTestPipeline(t *testing.T, slots int) (*Pipeline, *ticket.Store) {
 	return &Pipeline{
 		store:     store,
 		registry:  skill.NewRegistry(),
-		telegram:  notify.NewTelegram("", "", "", nil),
+		telegram:  notify.NewTelegram("", "", nil),
 		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
 		sem:       make(chan struct{}, slots),
 	}, store
@@ -254,7 +254,7 @@ func TestRecordAndMirrorPRDoesNotMirrorASuppressedStatus(t *testing.T) {
 	p := &Pipeline{
 		store:     store,
 		registry:  skill.NewRegistry(),
-		telegram:  notify.NewTelegram("", "", "", nil),
+		telegram:  notify.NewTelegram("", "", nil),
 		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
 		sem:       make(chan struct{}, 1),
 	}
@@ -315,7 +315,7 @@ func TestRecordAndMirrorPRReportsAFailedWrite(t *testing.T) {
 	p := &Pipeline{
 		store:     store,
 		registry:  skill.NewRegistry(),
-		telegram:  notify.NewTelegram("", "", "", nil),
+		telegram:  notify.NewTelegram("", "", nil),
 		apiClient: mctlclient.NewClient(srv.URL, "test-token"),
 		sem:       make(chan struct{}, 1),
 	}
@@ -370,7 +370,7 @@ func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T
 		return &Pipeline{
 			store:     store,
 			registry:  skill.NewRegistry(),
-			telegram:  notify.NewTelegram("", "", "", nil),
+			telegram:  notify.NewTelegram("", "", nil),
 			apiClient: mctlclient.NewClient(srv.URL, "test-token"),
 			sem:       make(chan struct{}, 1),
 		}

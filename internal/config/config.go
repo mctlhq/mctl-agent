@@ -40,7 +40,6 @@ type Config struct {
 	TelegramBotToken            string
 	TelegramChatID              string            // global default fallback
 	TelegramTenantChatIDs       map[string]string // per-tenant routing (admins/labs/ovk → chat_id)
-	OpenClawBotUsername         string
 	PollInterval                time.Duration
 	DryRun                      bool
 	DatabaseURL                 string
@@ -178,7 +177,7 @@ func Load() Config {
 
 	// Default pattern; empty env explicitly disables the filter, so we
 	// cannot use envOr (which treats "" as "fall back to default").
-	alertIgnoreServiceRegex := `^(openclawpr\d+|.*-demo\d*|hooktest-.*|svcprobe-.*|external-agent-demo.*|auto-remediation-demo)$`
+	alertIgnoreServiceRegex := `^(.*-demo\d*|hooktest-.*|svcprobe-.*|external-agent-demo.*|auto-remediation-demo)$`
 	if v, ok := os.LookupEnv("ALERT_IGNORE_SERVICE_REGEX"); ok {
 		alertIgnoreServiceRegex = v
 	}
@@ -271,7 +270,6 @@ func Load() Config {
 		TelegramBotToken:            os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:              os.Getenv("TELEGRAM_CHAT_ID"),
 		TelegramTenantChatIDs:       parseTenantChatIDs(),
-		OpenClawBotUsername:         envOr("OPENCLAW_BOT_USERNAME", "@mctl_me_bot"),
 		PollInterval:                pollInterval,
 		DryRun:                      dryRun,
 		DatabaseURL:                 dbURL,
