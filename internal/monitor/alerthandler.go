@@ -37,7 +37,7 @@ import (
 // provoke an error (closing the database) fails every alert at once.
 type alertStore interface {
 	ResolveByTenantService(ctx context.Context, tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error)
-	FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*ticket.Ticket, error)
+	FindDuplicate(ctx context.Context, tenant, service, ticketType, alertName string) (*ticket.Ticket, error)
 	TouchWithFingerprint(ctx context.Context, id, fingerprint string) error
 	FindRecentlyResolved(ctx context.Context, tenant, service, ticketType, alertName string, window time.Duration) (*ticket.Ticket, error)
 	Create(ctx context.Context, t *ticket.Ticket) error
@@ -49,8 +49,9 @@ type AlertHandler struct {
 	store    alertStore
 	onTicket func(*ticket.Ticket)
 	// FlapCooldown suppresses creation of a new ticket for the same
-	// (tenant, service, type) if a previous ticket was resolved within
-	// this window. Zero disables the cooldown.
+	// (tenant, service, type, alertName) if a previous ticket was resolved
+	// within this window. Critical alerts are exempt. Zero disables the
+	// cooldown.
 	FlapCooldown time.Duration
 	// IgnoreService, when non-nil, drops firing alerts whose extracted
 	// service name matches the pattern. Resolved alerts still flow through
@@ -349,10 +350,10 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// without this, two different absent() alerts (e.g. MctlAgentMetricsAbsent
 	// and any other unlabelled absent() rule) would both collapse onto the
 	// identical dedup/resolve key (tenant="platform", service="",
-	// type=generic) — FindDuplicate/
-	// ResolveByTenantService key on (tenant, service, type) only, not
-	// alertName, so whichever fires first would "win" the ticket and a
-	// resolved webhook for either would incorrectly resolve the other's.
+	// type=generic) — ResolveByTenantService keys on (tenant, service, type)
+	// only, not alertName, so a resolved webhook for either would
+	// incorrectly resolve the other's ticket (and, before FindDuplicate also
+	// keyed on alertName, whichever fired first would "win" the ticket).
 	// Falling back service to alertName keeps distinct label-less alerts on
 	// distinct keys without touching alerts that already have a real
 	// service (e.g. ScrapePoolHasNoTargets, which has namespace set but no
@@ -435,8 +436,11 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 		return nil
 	}
 
-	// Dedup: check for existing open ticket.
-	existing, err := h.store.FindDuplicate(ctx, tenant, service, tType)
+	// Dedup: check for an existing open ticket for the same alert. The key
+	// includes alertName so a distinct alert that maps to the same ticket
+	// type (e.g. TenantMemoryQuotaHigh vs CPUThrottlingHigh) is not folded
+	// into an unrelated open ticket and silently dropped.
+	existing, err := h.store.FindDuplicate(ctx, tenant, service, tType, alertName)
 	if err != nil {
 		slog.Error("dedup check failed", "error", err)
 		return fmt.Errorf("dedup check for %s/%s: %w", tenant, service, err)
@@ -458,7 +462,11 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// includes alertName so that two Prometheus alerts mapped to the same
 	// ticket type (e.g. TenantCPUQuotaHigh and CPUThrottlingHigh both ->
 	// TypeResourceLimit) do not suppress each other.
-	if h.FlapCooldown > 0 {
+	//
+	// Critical alerts bypass the cooldown: a critical alert that re-fires
+	// shortly after resolving is exactly what an operator must see, and
+	// the cooldown only exists to quiet noisy lower-severity alerts.
+	if h.FlapCooldown > 0 && severity != ticket.SeverityCritical {
 		recent, err := h.store.FindRecentlyResolved(ctx, tenant, service, tType, alertName, h.FlapCooldown)
 		if err != nil {
 			slog.Error("flap cooldown check failed", "error", err)
