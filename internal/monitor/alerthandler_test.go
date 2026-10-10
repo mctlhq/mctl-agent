@@ -2007,3 +2007,90 @@ func TestAlertHandlerWarningStillSuppressedByFlapCooldown(t *testing.T) {
 		t.Errorf("expected warning alert inside the cooldown to be suppressed, got %d tickets", callCount)
 	}
 }
+
+// postAlertWithSeverity is postAlert with the rule's `severity` label set.
+func postAlertWithSeverity(t *testing.T, h *AlertHandler, status, fingerprint, alertName, severity string) {
+	t.Helper()
+	payload := alertManagerPayload{Alerts: []alert{{
+		Status:      status,
+		Fingerprint: fingerprint,
+		Labels: map[string]string{
+			"alertname": alertName,
+			"namespace": "admins",
+			"pod":       "mctl-api-7c9f8d6b5-x2k4q",
+			"severity":  severity,
+		},
+	}}}
+	body, _ := json.Marshal(payload)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	if w.Code != http.StatusOK {
+		t.Fatalf("webhook for %s/%s: want 200, got %d", alertName, status, w.Code)
+	}
+}
+
+func TestAlertHandlerCriticalLabelBypassesFlapCooldown(t *testing.T) {
+	// MctlApiDown is not in classifyAlert's switch, so by name alone it is a
+	// warning. Its rule says severity=critical, and that label must be
+	// enough to exempt it from the cooldown — otherwise a 12h cooldown hides
+	// a production outage that re-fires shortly after recovering.
+	store := newTestStore(t)
+	var created []*ticket.Ticket
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { created = append(created, tk) })
+	handler.FlapCooldown = 12 * time.Hour
+
+	postAlertWithSeverity(t, handler, "firing", "fp-apidown", "MctlApiDown", "critical")
+	postAlertWithSeverity(t, handler, "resolved", "fp-apidown", "MctlApiDown", "critical")
+	postAlertWithSeverity(t, handler, "firing", "fp-apidown", "MctlApiDown", "critical")
+
+	if len(created) != 2 {
+		t.Fatalf("expected severity=critical alert inside the cooldown to open a ticket, got %d tickets", len(created))
+	}
+	for i, tk := range created {
+		if tk.Severity != ticket.SeverityCritical {
+			t.Errorf("ticket %d: severity=critical label must be recorded as critical, got %s", i, tk.Severity)
+		}
+	}
+}
+
+func TestAlertHandlerWarningLabelStillSuppressedByFlapCooldown(t *testing.T) {
+	// Same unlisted name, labelled warning: the cooldown still applies.
+	store := newTestStore(t)
+	callCount := 0
+	handler := NewAlertHandler(store, func(*ticket.Ticket) { callCount++ })
+	handler.FlapCooldown = 12 * time.Hour
+
+	postAlertWithSeverity(t, handler, "firing", "fp-apidown", "MctlApiDown", "warning")
+	postAlertWithSeverity(t, handler, "resolved", "fp-apidown", "MctlApiDown", "warning")
+	postAlertWithSeverity(t, handler, "firing", "fp-apidown", "MctlApiDown", "warning")
+
+	if callCount != 1 {
+		t.Errorf("expected severity=warning alert inside the cooldown to be suppressed, got %d tickets", callCount)
+	}
+}
+
+func TestEffectiveSeverity(t *testing.T) {
+	cases := []struct {
+		name          string
+		nameSeverity  string
+		labelSeverity string
+		want          string
+	}{
+		{"label raises an unlisted name", ticket.SeverityWarning, "critical", ticket.SeverityCritical},
+		{"warning label keeps warning", ticket.SeverityWarning, "warning", ticket.SeverityWarning},
+		{"no label keeps name severity", ticket.SeverityWarning, "", ticket.SeverityWarning},
+		{"label never lowers a critical name", ticket.SeverityCritical, "warning", ticket.SeverityCritical},
+		{"info label keeps critical name", ticket.SeverityCritical, "info", ticket.SeverityCritical},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			labels := map[string]string{}
+			if tc.labelSeverity != "" {
+				labels["severity"] = tc.labelSeverity
+			}
+			if got := effectiveSeverity(tc.nameSeverity, labels); got != tc.want {
+				t.Errorf("effectiveSeverity(%q, severity=%q) = %q, want %q", tc.nameSeverity, tc.labelSeverity, got, tc.want)
+			}
+		})
+	}
+}

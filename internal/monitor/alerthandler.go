@@ -50,8 +50,9 @@ type AlertHandler struct {
 	onTicket func(*ticket.Ticket)
 	// FlapCooldown suppresses creation of a new ticket for the same
 	// (tenant, service, type, alertName) if a previous ticket was resolved
-	// within this window. Critical alerts are exempt. Zero disables the
-	// cooldown.
+	// within this window. Critical alerts are exempt — critical by name
+	// (classifyAlert) or by the rule's `severity: critical` label. Zero
+	// disables the cooldown.
 	FlapCooldown time.Duration
 	// IgnoreService, when non-nil, drops firing alerts whose extracted
 	// service name matches the pattern. Resolved alerts still flow through
@@ -198,6 +199,14 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	workflow := a.Labels["name"]
 
 	tType, severity := classifyAlert(alertName)
+	// The Prometheus rule's own `severity` label is authoritative for
+	// "critical": classifyAlert only knows a handful of names, so without
+	// this a severity=critical rule it does not list (MctlApiDown,
+	// PublicEndpointDown, KubeAPIDown, ...) would be filed as a warning and
+	// swallowed by the flap cooldown below. The label can only raise the
+	// severity, never lower it, so a name classifyAlert already treats as
+	// critical stays critical whatever its rule says.
+	severity = effectiveSeverity(severity, a.Labels)
 
 	tenant := namespace
 	service := extractService(pod)
@@ -466,6 +475,9 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// Critical alerts bypass the cooldown: a critical alert that re-fires
 	// shortly after resolving is exactly what an operator must see, and
 	// the cooldown only exists to quiet noisy lower-severity alerts.
+	// `severity` here is effectiveSeverity's result, so a rule labelled
+	// severity=critical is exempt even when classifyAlert does not know
+	// its name.
 	if h.FlapCooldown > 0 && severity != ticket.SeverityCritical {
 		recent, err := h.store.FindRecentlyResolved(ctx, tenant, service, tType, alertName, h.FlapCooldown)
 		if err != nil {
@@ -518,7 +530,20 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	return nil
 }
 
-// classifyAlert maps AlertManager alertname to ticket type and severity.
+// effectiveSeverity combines the name-derived severity from classifyAlert
+// with the alert's own `severity` label: the alert is critical if either
+// says so. It is the single place criticality is decided, so the flap
+// cooldown exemption and the ticket's recorded severity cannot disagree.
+func effectiveSeverity(nameSeverity string, labels map[string]string) string {
+	if labels["severity"] == ticket.SeverityCritical {
+		return ticket.SeverityCritical
+	}
+	return nameSeverity
+}
+
+// classifyAlert maps AlertManager alertname to ticket type and the severity
+// it implies by name alone. Callers combine it with the alert's `severity`
+// label through effectiveSeverity.
 func classifyAlert(alertName string) (ticketType, severity string) {
 	switch alertName {
 	case "PodCrashLooping", "KubePodCrashLooping":
