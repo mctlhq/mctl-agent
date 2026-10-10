@@ -450,19 +450,26 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 	return tickets, rows.Err()
 }
 
-// FindDuplicate checks for an existing open ticket with the same tenant, service, and type.
-func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*Ticket, error) {
-	t := &Ticket{}
-	var resolvedAt sql.NullTime
-	query := `
+// findDuplicateQuery is the (pre-rebind) FindDuplicate query. Args, in order:
+// tenant, service, type, alert_name, resolved, suppressed.
+const findDuplicateQuery = `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
 			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
 		FROM tickets
-		WHERE tenant=? AND service=? AND type=? AND status NOT IN (?, ?)
+		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status NOT IN (?, ?)
 		ORDER BY created_at DESC LIMIT 1`
 
+// FindDuplicate checks for an existing open ticket with the same tenant,
+// service, type and alert name. The alert name is part of the key because
+// several distinct alerts share one ticket type; like FindRecentlyResolved,
+// an empty name matches only tickets whose alert_name is empty.
+func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType, alertName string) (*Ticket, error) {
+	t := &Ticket{}
+	var resolvedAt sql.NullTime
+	query := findDuplicateQuery
+
 	err := s.db.QueryRowContext(ctx, s.rebind(query),
-		tenant, service, ticketType, StatusResolved, StatusSuppressed,
+		tenant, service, ticketType, alertName, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
 		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,

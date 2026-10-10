@@ -37,7 +37,7 @@ import (
 // provoke an error (closing the database) fails every alert at once.
 type alertStore interface {
 	ResolveByTenantService(ctx context.Context, tenant, service, ticketType, fingerprint string, notAfter time.Time) ([]string, error)
-	FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*ticket.Ticket, error)
+	FindDuplicate(ctx context.Context, tenant, service, ticketType, alertName string) (*ticket.Ticket, error)
 	TouchWithFingerprint(ctx context.Context, id, fingerprint string) error
 	FindRecentlyResolved(ctx context.Context, tenant, service, ticketType, alertName string, window time.Duration) (*ticket.Ticket, error)
 	Create(ctx context.Context, t *ticket.Ticket) error
@@ -50,7 +50,8 @@ type AlertHandler struct {
 	onTicket func(*ticket.Ticket)
 	// FlapCooldown suppresses creation of a new ticket for the same
 	// (tenant, service, type) if a previous ticket was resolved within
-	// this window. Zero disables the cooldown.
+	// this window. Zero disables the cooldown. Alerts classified critical
+	// are exempt and always open a ticket.
 	FlapCooldown time.Duration
 	// IgnoreService, when non-nil, drops firing alerts whose extracted
 	// service name matches the pattern. Resolved alerts still flow through
@@ -436,7 +437,7 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	}
 
 	// Dedup: check for existing open ticket.
-	existing, err := h.store.FindDuplicate(ctx, tenant, service, tType)
+	existing, err := h.store.FindDuplicate(ctx, tenant, service, tType, alertName)
 	if err != nil {
 		slog.Error("dedup check failed", "error", err)
 		return fmt.Errorf("dedup check for %s/%s: %w", tenant, service, err)
@@ -458,7 +459,7 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 	// includes alertName so that two Prometheus alerts mapped to the same
 	// ticket type (e.g. TenantCPUQuotaHigh and CPUThrottlingHigh both ->
 	// TypeResourceLimit) do not suppress each other.
-	if h.FlapCooldown > 0 {
+	if h.FlapCooldown > 0 && severity != ticket.SeverityCritical {
 		recent, err := h.store.FindRecentlyResolved(ctx, tenant, service, tType, alertName, h.FlapCooldown)
 		if err != nil {
 			slog.Error("flap cooldown check failed", "error", err)

@@ -3,6 +3,7 @@ package ticket
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -182,7 +183,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	store := newTestStore(t)
 
 	// No tickets yet — should return nil.
-	dup, err := store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +198,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	}
 
 	// Same tenant/service/type → should find duplicate.
-	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +210,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	}
 
 	// Different type → no duplicate.
-	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +225,7 @@ func TestStoreFindDuplicate(t *testing.T) {
 	if err := store.Update(ctx, tk); err != nil {
 		t.Fatal(err)
 	}
-	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop)
+	dup, err = store.FindDuplicate(ctx, "billing", "api", TypePodCrashloop, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1004,5 +1005,66 @@ func TestStoreRecordPRLinkagePersistsTheDiagnosis(t *testing.T) {
 	}
 	if got.Status != StatusFixProposed {
 		t.Errorf("status: want %q, got %q", StatusFixProposed, got.Status)
+	}
+}
+
+func TestStoreFindDuplicateKeyedByAlertName(t *testing.T) {
+	store := newTestStore(t)
+
+	named := &Ticket{Source: SourceAlertManager, AlertName: "CPUThrottlingHigh", Type: TypeResourceLimit, Tenant: "billing", Service: "api"}
+	if err := store.Create(ctx, named); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name      string
+		alertName string
+		want      *Ticket
+	}{
+		{"different alert name", "TenantMemoryQuotaHigh", nil},
+		{"same alert name", "CPUThrottlingHigh", named},
+		{"empty name vs named ticket", "", nil},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dup, err := store.FindDuplicate(ctx, "billing", "api", TypeResourceLimit, c.alertName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.want == nil && dup != nil {
+				t.Fatalf("expected nil, got ticket %s", dup.ID)
+			}
+			if c.want != nil && (dup == nil || dup.ID != c.want.ID) {
+				t.Fatalf("expected ticket %s, got %v", c.want.ID, dup)
+			}
+		})
+	}
+
+	blank := &Ticket{Source: SourceGitHub, Type: TypeGitHubActionsFailed, Tenant: "billing", Service: "api"}
+	if err := store.Create(ctx, blank); err != nil {
+		t.Fatal(err)
+	}
+	dup, err := store.FindDuplicate(ctx, "billing", "api", TypeGitHubActionsFailed, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dup == nil || dup.ID != blank.ID {
+		t.Fatalf("expected blank-name ticket to be found, got %v", dup)
+	}
+}
+
+func TestFindDuplicateQueryPostgresPlaceholders(t *testing.T) {
+	s := &Store{dialect: "postgres"}
+	q := s.rebind(findDuplicateQuery)
+	if strings.Contains(q, "?") {
+		t.Errorf("rebound query still has ? placeholders: %s", q)
+	}
+	for i := 1; i <= 6; i++ {
+		if !strings.Contains(q, fmt.Sprintf("$%d", i)) {
+			t.Errorf("missing placeholder $%d", i)
+		}
+	}
+	if strings.Contains(q, "$7") {
+		t.Errorf("unexpected placeholder $7")
 	}
 }

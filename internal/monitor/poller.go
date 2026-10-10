@@ -187,7 +187,7 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 		}
 
 		// Dedup: check for existing open ticket.
-		existing, err := p.store.FindDuplicate(ctx, team, app, ticket.TypeArgoCDDegraded)
+		existing, err := p.store.FindDuplicate(ctx, team, app, ticket.TypeArgoCDDegraded, "") // tickets from this source carry no alert name
 		if err != nil {
 			slog.Error("poller: dedup check failed", "error", err)
 			continue

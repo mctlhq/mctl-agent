@@ -688,7 +688,7 @@ func TestAlertHandlerFlapCooldown(t *testing.T) {
 	body, _ = json.Marshal(resolve)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
 
-	// Re-fire immediately — should be suppressed by cooldown.
+	// Warning-level case: re-fire immediately — should be suppressed by cooldown.
 	body, _ = json.Marshal(fire)
 	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
 
@@ -1867,9 +1867,9 @@ type blockingStore struct {
 	attempts int
 }
 
-func (s *blockingStore) FindDuplicate(ctx context.Context, tenant, service, ticketType string) (*ticket.Ticket, error) {
+func (s *blockingStore) FindDuplicate(ctx context.Context, tenant, service, ticketType, alertName string) (*ticket.Ticket, error) {
 	s.attempts++
-	return s.alertStore.FindDuplicate(ctx, tenant, service, ticketType)
+	return s.alertStore.FindDuplicate(ctx, tenant, service, ticketType, alertName)
 }
 
 func (s *blockingStore) Create(ctx context.Context, t *ticket.Ticket) error {
@@ -1921,5 +1921,55 @@ func TestAlertHandlerStopsWhenTheBatchBudgetIsGone(t *testing.T) {
 	}
 	if blocking.attempts != 1 {
 		t.Errorf("the loop must stop once the budget is gone, not keep issuing calls that cannot succeed: want 1 attempt, got %d", blocking.attempts)
+	}
+}
+
+func TestAlertHandlerDedupKeyedByAlertName(t *testing.T) {
+	store := newTestStore(t)
+	callCount := 0
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { callCount++ })
+
+	send := func(name, fp string) {
+		p := alertManagerPayload{Alerts: []alert{{
+			Status:      "firing",
+			Fingerprint: fp,
+			Labels:      map[string]string{"alertname": name, "namespace": "billing", "pod": "api-6d4b5c7f8-abc12"},
+		}}}
+		body, _ := json.Marshal(p)
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	}
+
+	send("CPUThrottlingHigh", "fp-a")
+	send("TenantMemoryQuotaHigh", "fp-b")
+	if callCount != 2 {
+		t.Fatalf("expected 2 callbacks for distinct alert names, got %d", callCount)
+	}
+	send("CPUThrottlingHigh", "fp-a")
+	if callCount != 2 {
+		t.Errorf("expected same alert name to dedup, got %d callbacks", callCount)
+	}
+}
+
+func TestAlertHandlerFlapCooldownCriticalBypass(t *testing.T) {
+	store := newTestStore(t)
+	callCount := 0
+	handler := NewAlertHandler(store, func(tk *ticket.Ticket) { callCount++ })
+	handler.FlapCooldown = 10 * time.Minute
+
+	send := func(status string) {
+		p := alertManagerPayload{Alerts: []alert{{
+			Status:      status,
+			Fingerprint: "fp-crit-1",
+			Labels:      map[string]string{"alertname": "PodCrashLooping", "namespace": "billing", "pod": "api-6d4b5c7f8-abc12"},
+		}}}
+		body, _ := json.Marshal(p)
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/v1/alerts", bytes.NewReader(body)))
+	}
+
+	send("firing")
+	send("resolved")
+	send("firing")
+	if callCount != 2 {
+		t.Errorf("expected critical re-fire to bypass flap cooldown (2 callbacks), got %d", callCount)
 	}
 }
