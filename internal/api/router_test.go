@@ -42,7 +42,7 @@ func newTestPipeline(t *testing.T, store *ticket.Store) *pipeline.Pipeline {
 		t.Fatal(err)
 	}
 
-	return pipeline.NewPipeline(store, reg, metrics, nil, nil, nil, nil, true, false, "", nil)
+	return pipeline.NewPipeline(store, reg, metrics, nil, nil, nil, nil, true, false, "")
 }
 
 func TestHealthEndpoints(t *testing.T) {
@@ -419,5 +419,42 @@ func TestSkillMetricsEndpoint(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestWebhookSubscriptionRoutesRemoved pins the removal of the outbound
+// webhook-subscription API (endpoint CRUD plus the external-agent claim and
+// result callbacks). Its only consumer, OpenClaw, is gone; an authenticated
+// caller must get 404 rather than a handler.
+func TestWebhookSubscriptionRoutesRemoved(t *testing.T) {
+	store := newTestStore(t)
+	pipe := newTestPipeline(t, store)
+	router := NewRouter(Options{
+		Store:    store,
+		Pipeline: pipe,
+		APIToken: "op-secret",
+		OnAlert: func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		},
+	})
+
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/v1/webhooks"},
+		{http.MethodPost, "/api/v1/webhooks"},
+		{http.MethodDelete, "/api/v1/webhooks/abc"},
+		{http.MethodPost, "/api/v1/tickets/abc/external-claims"},
+		{http.MethodPatch, "/api/v1/tickets/abc/external-results"},
+	}
+	for _, tt := range tests {
+		req := httptest.NewRequest(tt.method, tt.path, bytes.NewReader([]byte(`{}`)))
+		req.Header.Set("Authorization", "Bearer op-secret")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		if w.Code != http.StatusNotFound && w.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s %s: status=%d, want 404/405 (route removed)", tt.method, tt.path, w.Code)
+		}
 	}
 }

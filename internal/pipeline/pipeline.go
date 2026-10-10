@@ -37,7 +37,6 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/svcname"
 	"github.com/mctlhq/mctl-agent/internal/telemetry"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
-	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
 const (
@@ -56,7 +55,6 @@ type Pipeline struct {
 	apiClient     *mctlclient.Client
 	github        *fixer.GitHubFixer
 	telegram      *notify.Telegram
-	dispatcher    *webhook.Dispatcher
 	dryRun        bool
 	autoMerge     bool
 	escalationTag string
@@ -80,7 +78,6 @@ func NewPipeline(
 	dryRun bool,
 	autoMerge bool,
 	escalationTag string,
-	dispatcher *webhook.Dispatcher,
 ) *Pipeline {
 	return &Pipeline{
 		store:         store,
@@ -90,7 +87,6 @@ func NewPipeline(
 		apiClient:     apiClient,
 		github:        github,
 		telegram:      telegram,
-		dispatcher:    dispatcher,
 		dryRun:        dryRun,
 		autoMerge:     autoMerge,
 		escalationTag: escalationTag,
@@ -200,10 +196,8 @@ func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, from
 // already — and they previously wrote under it, discarded the error, and
 // mirrored regardless, which is the same desync this PR exists to close: the
 // local row keeps analyzing while mctl-api is told fix_proposed.
-// Returns whether the store took the transition. Callers must not announce
-// what it refused: an external EventTicketFixFailed or EventTicketEscalated
-// carrying a status neither store accepted tells consumers a resolved ticket
-// was escalated.
+// Returns whether the store took the transition; when it did not, nothing is
+// mirrored, so mctl-api is never told about a status the store refused.
 func (p *Pipeline) persistDiagnosisAndMirror(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
 	ctx, cancel := ctxutil.DetachedWrite(parent)
 	defer cancel()
@@ -257,7 +251,7 @@ func (p *Pipeline) updateAlert(t *ticket.Ticket) {
 // reason is appended to Analysis rather than replacing it: skills write their
 // diagnosis there first, and ResolveByIDFromStatus later appends its own note
 // the same way.
-func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string, diag *skill.DiagnosisResult) {
+func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string) {
 	// Captured before the mutation below: the detached write is guarded on it,
 	// so a ticket that reached a terminal state while the fix step was timing
 	// out keeps that state instead of being dragged back to escalated.
@@ -275,9 +269,9 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	// most often is a fix step (GetFileContent, CreatePR) that failed because
 	// the 15-minute diagnosis deadline expired — so ctx is already cancelled
 	// by the time we get here. Writing under it fails instantly while the rest
-	// of escalate still mirrors to mctl-api and emits the external event,
-	// leaving the ticket stuck in `analyzing` and disagreeing with everything
-	// downstream that was told it escalated.
+	// of escalate still mirrors to mctl-api, leaving the ticket stuck in
+	// `analyzing` and disagreeing with everything downstream that was told it
+	// escalated.
 	//
 	// Guarded, because detaching removes the accident that used to protect
 	// this: with the write cancelled it could not clobber anything, and now it
@@ -292,16 +286,6 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	// Mirror to mctl-api. Without this the incident there keeps the status it
 	// was published with (analyzing), which is what MCP and the dashboards read.
 	p.updateAlert(t)
-	p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
-}
-
-func (p *Pipeline) emitExternalEvent(ctx context.Context, eventType webhook.EventType, t *ticket.Ticket, diag *skill.DiagnosisResult) {
-	if p.dispatcher == nil {
-		return
-	}
-	if err := p.dispatcher.Emit(ctx, eventType, t, diag); err != nil {
-		slog.Warn("failed to emit external webhook event", "event_type", eventType, "ticket", t.ID, "error", err)
-	}
 }
 
 // Metrics returns the pipeline's metrics tracker (can be nil).
@@ -423,7 +407,6 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 
 	// Publish to mctl-api alert store.
 	p.publishAlert(t)
-	p.emitExternalEvent(ctx, webhook.EventTicketCreated, t, nil)
 
 	// Collect evidence.
 	evCtx, evSpan := telemetry.Tracer().Start(ctx, "mctl_agent.collect_evidence")
@@ -452,7 +435,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		p.escalate(ctx, t, fmt.Sprintf(
 			"Escalated: no skill matched this ticket (type=%s, alert=%s). Evidence was "+
 				"collected, but the agent has no diagnostic rule for this signal, so nothing "+
-				"was analysed. Needs a human, or a new skill.", t.Type, t.AlertName), nil)
+				"was analysed. Needs a human, or a new skill.", t.Type, t.AlertName))
 		return
 	}
 
@@ -513,7 +496,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			p.escalate(ctx, t, fmt.Sprintf(
 				"[escalated] Alert %q is on the human-review-only list: the agent diagnoses "+
 					"it but never proposes a fix, by policy. The diagnosis above is advisory.",
-				t.AlertName), diag)
+				t.AlertName))
 			return
 		}
 
@@ -529,7 +512,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 				"[escalated] Infrastructure-scope alert (tenant=%s, service=%s): auto-fix is "+
 					"disabled for infrastructure by policy, because a wrong fix here has "+
 					"cluster-wide blast radius. The diagnosis above is advisory.",
-				t.Tenant, t.Service), diag)
+				t.Tenant, t.Service))
 			return
 		}
 
@@ -552,9 +535,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			}
 			medFrom := t.Status
 			t.Status = ticket.StatusFixProposed
-			if p.persistDiagnosisAndMirror(ctx, t, medFrom) {
-				p.emitExternalEvent(ctx, webhook.EventTicketEscalated, t, diag)
-			}
+			p.persistDiagnosisAndMirror(ctx, t, medFrom)
 			return
 		}
 
@@ -566,7 +547,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 			"[escalated] Skill %s produced a %s-confidence diagnosis with fixable=%v. The "+
 				"auto-fix threshold is HIGH, or MEDIUM when the skill declares itself "+
 				"auto-merge safe, so no PR was created.",
-			rs.Skill.Name(), diag.Confidence, diag.Fixable), diag)
+			rs.Skill.Name(), diag.Confidence, diag.Fixable))
 		return
 	}
 
@@ -579,7 +560,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		"Escalated: %d matched skill(s) [%s] all failed to produce a diagnosis. This is an "+
 			"agent-side failure and does not by itself say the service is unhealthy — check "+
 			"mctl-agent logs for the per-skill errors.",
-		len(ranked), strings.Join(rankedSkillNames(ranked), ", ")), nil)
+		len(ranked), strings.Join(rankedSkillNames(ranked), ", ")))
 }
 
 // rankedSkillNames lists the skills that matched, for the escalation note and
@@ -648,9 +629,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but generation failed: "+fmt.Sprint(err))
 		failedFrom := t.Status
 		t.Status = ticket.StatusFixProposed
-		if p.persistDiagnosisAndMirror(ctx, t, failedFrom) {
-			p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
-		}
+		p.persistDiagnosisAndMirror(ctx, t, failedFrom)
 		return
 	}
 	if !fixResult.Applied {
@@ -662,7 +641,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			fmt.Sprintf("Skill %s declined to apply fix: %s", s.Name(), fixResult.Summary))
 		p.escalate(ctx, t, fmt.Sprintf(
 			"[escalated] Skill %s diagnosed the ticket but declined to apply a fix: %s. "+
-				"No PR was created.", s.Name(), fixResult.Summary), diag)
+				"No PR was created.", s.Name(), fixResult.Summary))
 		return
 	}
 	if p.metrics != nil {
@@ -684,7 +663,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		p.escalate(ctx, t, fmt.Sprintf(
 			"[escalated] %s is a platform service; its configuration is an ArgoCD Application "+
 				"under platform-gitops/bootstrap/templates/mctl-platform/ and is not patched "+
-				"automatically. Apply the fix by hand through a mctl-gitops PR.", t.Service), diag)
+				"automatically. Apply the fix by hand through a mctl-gitops PR.", t.Service))
 		return
 	}
 
@@ -753,7 +732,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			p.escalate(ctx, t, fmt.Sprintf(
 				"[escalated] No candidate GitOps path could be derived for %s/%s. "+
 					"This is an agent-side failure, not necessarily a service failure.",
-				t.Tenant, t.Service), diag)
+				t.Tenant, t.Service))
 			return
 		}
 		log.Error("failed to get file content from any candidate", "candidates", paths, "error", lastErr)
@@ -762,7 +741,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		p.escalate(ctx, t, fmt.Sprintf(
 			"[escalated] Could not read any candidate GitOps path for %s/%s. Tried: %s (last error: %v). "+
 				"This is an agent-side failure, not necessarily a service failure.",
-			t.Tenant, t.Service, strings.Join(paths, "; "), lastErr), diag)
+			t.Tenant, t.Service, strings.Join(paths, "; "), lastErr))
 		return
 	}
 	// Set only now: the repository was actually read.
@@ -826,9 +805,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 			"Fix identified but patch generation failed: "+patchErr.Error())
 		failedFrom := t.Status
 		t.Status = ticket.StatusFixProposed
-		if p.persistDiagnosisAndMirror(ctx, t, failedFrom) {
-			p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
-		}
+		p.persistDiagnosisAndMirror(ctx, t, failedFrom)
 		return
 	}
 
@@ -848,13 +825,8 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		failed("pull request creation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"PR creation failed: "+err.Error())
-		// FixFailed first, while the ticket still reads as it did when the fix
-		// failed. escalate emits its own EventTicketEscalated afterwards, so a
-		// subscriber sees "the fix failed" and then "it was handed to a human",
-		// in that order, each with a payload that matches its own event.
-		p.emitExternalEvent(ctx, webhook.EventTicketFixFailed, t, diag)
 		p.escalate(ctx, t, "[escalated] A fix was generated but the PR could not be created: "+
-			err.Error()+". Nothing was changed in the GitOps repo.", diag)
+			err.Error()+". Nothing was changed in the GitOps repo.")
 		return
 	}
 

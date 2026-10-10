@@ -12,7 +12,6 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
-	"github.com/mctlhq/mctl-agent/internal/webhook"
 )
 
 func TestControlPlaneRequiresBearerWhenConfigured(t *testing.T) {
@@ -291,32 +290,6 @@ func TestTicketListHandlerSanitizesStoreError(t *testing.T) {
 	}
 }
 
-func TestWebhookCRUDRequiresBearerWhenConfigured(t *testing.T) {
-	store := newTestStore(t)
-	pipe := newTestPipeline(t, store)
-	webhookStore, err := webhook.NewStore(store.DB(), store.Dialect())
-	if err != nil {
-		t.Fatal(err)
-	}
-	router := NewRouter(Options{
-		Store:        store,
-		Pipeline:     pipe,
-		APIToken:     "op-secret",
-		WebhookStore: webhookStore,
-		OnAlert: func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		},
-	})
-
-	body := []byte(`{"agent_id":"x","url":"https://example.com","secret":"s"}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks", bytes.NewReader(body))
-	w := httptest.NewRecorder()
-	router.ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated webhook create: status=%d, want 401", w.Code)
-	}
-}
-
 func TestMCPRequiresBearerWhenConfigured(t *testing.T) {
 	store := newTestStore(t)
 	pipe := newTestPipeline(t, store)
@@ -361,7 +334,6 @@ func TestRoutesFailClosedWhenGoverningTokenUnset(t *testing.T) {
 		{"mcp", http.MethodPost, "/mcp", []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`)},
 		{"tickets", http.MethodGet, "/api/v1/tickets", nil},
 		{"skills", http.MethodGet, "/api/v1/skills", nil},
-		{"webhooks", http.MethodGet, "/api/v1/webhooks", nil},
 	}
 
 	for _, tt := range tests {
@@ -370,10 +342,6 @@ func TestRoutesFailClosedWhenGoverningTokenUnset(t *testing.T) {
 			pipe := newTestPipeline(t, store)
 			reg := skill.NewRegistry()
 			remoteMgr := remote.NewManager(reg)
-			webhookStore, err := webhook.NewStore(store.DB(), store.Dialect())
-			if err != nil {
-				t.Fatal(err)
-			}
 
 			// APIToken and AlertWebhookToken are both left unset: the
 			// scenario this proposal fixes.
@@ -381,7 +349,6 @@ func TestRoutesFailClosedWhenGoverningTokenUnset(t *testing.T) {
 				Store:         store,
 				Pipeline:      pipe,
 				RemoteManager: remoteMgr,
-				WebhookStore:  webhookStore,
 				OnAlert: func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
 				},

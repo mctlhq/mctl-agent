@@ -123,7 +123,7 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token | — | No |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID | — | No |
 | `TELEGRAM_WEBHOOK_SECRET` | Telegram `secret_token` for inbound webhook | — | Prod |
-| `AGENT_API_TOKEN` | Bearer token for tickets/skills/MCP/webhook CRUD | — | Prod |
+| `AGENT_API_TOKEN` | Bearer token for tickets/skills/MCP | — | Prod |
 | `ALERTMANAGER_WEBHOOK_TOKEN` | Bearer token for `POST /api/v1/alerts` | — | Prod |
 | `GITHUB_WEBHOOK_SECRET` | HMAC secret for GitHub workflow webhooks | — | If used |
 | `BOT_START_FORWARD_URL` | mctl-telegram bot-start bridge (`POST /internal/bot-start-observations`); private `/start` is forwarded there | — (disabled) | For #679 |

@@ -35,7 +35,6 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
-	"github.com/mctlhq/mctl-agent/internal/webhook"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
@@ -51,10 +50,8 @@ type Options struct {
 	Telegram      *notify.Telegram
 	GitHub        *fixer.GitHubFixer
 	RemoteManager *remote.Manager
-	WebhookStore  *webhook.Store
-	WebhookTTL    time.Duration
 	// APIToken, when set, is required as Authorization: Bearer on operator
-	// control-plane routes (tickets, skills, MCP, webhook CRUD).
+	// control-plane routes (tickets, skills, MCP).
 	APIToken string
 	// TelegramWebhookSecret, when set, must match X-Telegram-Bot-Api-Secret-Token.
 	TelegramWebhookSecret string
@@ -112,13 +109,6 @@ func NewRouter(opts Options) http.Handler {
 	// Telegram webhook (secret_token + allowlisted chat).
 	r.Post("/api/v1/telegram", telegramWebhookHandler(opts))
 
-	// External-agent callbacks keep their per-delivery HMAC/bearer; they
-	// must stay reachable on the public callback URL.
-	if opts.WebhookStore != nil {
-		r.Post("/api/v1/tickets/{id}/external-claims", externalClaimHandler(opts.Store, opts.WebhookStore, int(opts.WebhookTTL.Seconds())))
-		r.Patch("/api/v1/tickets/{id}/external-results", externalResultHandler(opts.Store, opts.WebhookStore, opts.Telegram))
-	}
-
 	r.Group(func(r chi.Router) {
 		r.Use(requireBearer(opts.APIToken))
 
@@ -132,14 +122,8 @@ func NewRouter(opts Options) http.Handler {
 			r.Get("/api/v1/skills/remote", remoteSkillListHandler(opts.RemoteManager))
 		}
 
-		mcpServer := mcp.NewServer(opts.Pipeline, opts.WebhookStore)
+		mcpServer := mcp.NewServer(opts.Pipeline)
 		r.Post("/mcp", mcpServer.ServeHTTP)
-
-		if opts.WebhookStore != nil {
-			r.Get("/api/v1/webhooks", webhookListHandler(opts.WebhookStore))
-			r.Post("/api/v1/webhooks", webhookCreateHandler(opts.WebhookStore))
-			r.Delete("/api/v1/webhooks/{id}", webhookDeleteHandler(opts.WebhookStore))
-		}
 	})
 
 	return r
