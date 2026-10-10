@@ -34,7 +34,7 @@ Skills are resolved in three tiers:
 
 | Category | Details |
 |----------|---------|
-| Language | Go 1.26.6 |
+| Language | Go 1.26.9 |
 | Router | go-chi/chi v5.3.1 |
 | GitHub client | google/go-github v68 |
 | Database | SQLite via modernc.org/sqlite (pure Go, CGO-free) |
