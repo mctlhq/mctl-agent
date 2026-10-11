@@ -383,6 +383,18 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		span.End()
 	}()
 
+	// Correlation (mctlhq/mctl-agent#97): every line below carries the root
+	// span's trace_id/span_id as JSON fields, and the ticket keeps the trace
+	// id. Both are empty when tracing is off or the span is unsampled, and the
+	// trace id write is best effort: telemetry never gates processing.
+	log = log.With(telemetry.LogAttrs(ctx)...)
+	if traceID := telemetry.TraceID(ctx); traceID != "" {
+		t.TraceID = traceID
+		if err := p.store.SetTraceID(ctx, t.ID, traceID); err != nil {
+			log.Warn("failed to record ticket trace id", "error", err)
+		}
+	}
+
 	// Notify about new ticket.
 	if shouldNotifyNewTicket(t) {
 		if err := p.telegram.SendNewTicket(t); err != nil {

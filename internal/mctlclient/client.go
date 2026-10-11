@@ -225,6 +225,12 @@ func (c *Client) PublishAlert(t *ticket.Ticket) {
 	if t.ResolvedAt != nil {
 		body["resolved_at"] = t.ResolvedAt
 	}
+	// The trace of the run that is processing the incident (#97), so a caller
+	// can pivot from the incident to its spans and logs. Omitted, not sent
+	// empty, when the run was not traced.
+	if t.TraceID != "" {
+		body["trace_id"] = t.TraceID
+	}
 
 	var evidence []map[string]interface{}
 	for _, ev := range t.Evidence {
