@@ -32,6 +32,7 @@ import (
 
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/telemetry"
+	"github.com/mctlhq/mctl-agent/internal/telemetry/telemetrytest"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
@@ -217,5 +218,72 @@ func TestProcessTicketCompletesWhenTheExporterFails(t *testing.T) {
 	}
 	if len(got.TraceID) != 32 {
 		t.Errorf("trace_id = %q", got.TraceID)
+	}
+}
+
+// The helpers that log through package-level slog run only on a failed store
+// write or a lost race, which the happy-path test above never reaches. Each
+// is driven here under a sampled span, and its line must carry that span's
+// trace.
+//
+// Mutation check: drop the LogAttrs binding from any one of these slog calls
+// and its case fails.
+func TestFailurePathLinesCarryTheTrace(t *testing.T) {
+	telemetrytest.RecordSpans(t)
+	for name, tc := range map[string]struct {
+		msg string
+		run func(ctx context.Context, p *Pipeline, store *ticket.Store, tk *ticket.Ticket)
+	}{
+		"record PR linkage fails": {"failed to record PR linkage", func(ctx context.Context, p *Pipeline, store *ticket.Store, tk *ticket.Ticket) {
+			_ = store.Close()
+			p.recordPRLinkage(ctx, tk, ticket.StatusAnalyzing)
+		}},
+		"PR linkage loses the race": {"PR recorded but status not advanced: ticket moved on concurrently", func(ctx context.Context, p *Pipeline, _ *ticket.Store, tk *ticket.Ticket) {
+			tk.Status = ticket.StatusFixProposed
+			p.recordPRLinkage(ctx, tk, ticket.StatusOpen)
+		}},
+		"diagnosis write fails": {"failed to persist diagnosis outcome", func(ctx context.Context, p *Pipeline, store *ticket.Store, tk *ticket.Ticket) {
+			_ = store.Close()
+			p.persistDiagnosisAndMirror(ctx, tk, ticket.StatusAnalyzing)
+		}},
+		"diagnosis loses the race": {"diagnosis outcome not persisted: ticket moved on concurrently", func(ctx context.Context, p *Pipeline, _ *ticket.Store, tk *ticket.Ticket) {
+			p.persistDiagnosisAndMirror(ctx, tk, ticket.StatusOpen)
+		}},
+		"escalation write fails": {"failed to persist escalated ticket", func(ctx context.Context, p *Pipeline, store *ticket.Store, tk *ticket.Ticket) {
+			_ = store.Close()
+			p.persistEscalation(ctx, tk, ticket.StatusAnalyzing)
+		}},
+		"escalation loses the race": {"escalation skipped: ticket reached a terminal state concurrently", func(ctx context.Context, p *Pipeline, _ *ticket.Store, tk *ticket.Ticket) {
+			tk.Status = ticket.StatusOpen // stale: the stored row is analyzing
+			p.escalate(ctx, tk, "r")
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logsFor := captureLogs(t)
+			p, store := newAsyncTestPipeline(t, 1)
+			tk := &ticket.Ticket{Source: ticket.SourceAlertManager, Type: ticket.TypePodCrashloop, Tenant: "billing", Service: "api", Status: ticket.StatusAnalyzing}
+			if err := store.Create(context.Background(), tk); err != nil {
+				t.Fatal(err)
+			}
+			ctx, span := telemetry.Tracer().Start(context.Background(), "test")
+			defer span.End()
+			want := span.SpanContext().TraceID().String()
+
+			tc.run(ctx, p, store, tk)
+
+			var found bool
+			for _, l := range logsFor(tk.ID) {
+				if l["msg"] != tc.msg {
+					continue
+				}
+				found = true
+				if l[telemetry.LogKeyTraceID] != want {
+					t.Errorf("%q: trace_id = %v, want %s", tc.msg, l[telemetry.LogKeyTraceID], want)
+				}
+			}
+			if !found {
+				t.Fatalf("the path did not log %q; the case no longer exercises it", tc.msg)
+			}
+		})
 	}
 }

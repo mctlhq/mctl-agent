@@ -164,11 +164,11 @@ func (p *Pipeline) recordPRLinkage(parent context.Context, t *ticket.Ticket, fro
 	defer cancel()
 	advanced, err := p.store.RecordPRLinkage(ctx, t, fromStatus)
 	if err != nil {
-		slog.Error("failed to record PR linkage", "ticket", t.ID, "pr", t.PRURL, "error", err)
+		slog.With(telemetry.LogAttrs(ctx)...).Error("failed to record PR linkage", "ticket", t.ID, "pr", t.PRURL, "error", err)
 		return false
 	}
 	if !advanced {
-		slog.Info("PR recorded but status not advanced: ticket moved on concurrently",
+		slog.With(telemetry.LogAttrs(ctx)...).Info("PR recorded but status not advanced: ticket moved on concurrently",
 			"ticket", t.ID, "pr", t.PRURL, "wanted", t.Status, "from_status", fromStatus)
 	}
 	return advanced
@@ -203,11 +203,11 @@ func (p *Pipeline) persistDiagnosisAndMirror(parent context.Context, t *ticket.T
 	defer cancel()
 	applied, err := p.store.SetDiagnosisFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence, t.ProposedFix)
 	if err != nil {
-		slog.Error("failed to persist diagnosis outcome", "ticket", t.ID, "status", t.Status, "error", err)
+		slog.With(telemetry.LogAttrs(ctx)...).Error("failed to persist diagnosis outcome", "ticket", t.ID, "status", t.Status, "error", err)
 		return false
 	}
 	if !applied {
-		slog.Info("diagnosis outcome not persisted: ticket moved on concurrently",
+		slog.With(telemetry.LogAttrs(ctx)...).Info("diagnosis outcome not persisted: ticket moved on concurrently",
 			"ticket", t.ID, "wanted", t.Status, "from_status", fromStatus)
 		return false
 	}
@@ -224,7 +224,7 @@ func (p *Pipeline) persistEscalation(parent context.Context, t *ticket.Ticket, f
 	defer cancel()
 	applied, err := p.store.SetDiagnosisFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence, t.ProposedFix)
 	if err != nil {
-		slog.Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
+		slog.With(telemetry.LogAttrs(ctx)...).Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
 		return false
 	}
 	return applied
@@ -279,7 +279,7 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	// overwritten by this stale escalated status and its stale nil
 	// resolved_at, reopening a closed incident.
 	if !p.persistEscalation(ctx, t, fromStatus) {
-		slog.Info("escalation skipped: ticket reached a terminal state concurrently",
+		slog.With(telemetry.LogAttrs(ctx)...).Info("escalation skipped: ticket reached a terminal state concurrently",
 			"ticket", t.ID, "from_status", fromStatus)
 		return
 	}
@@ -385,7 +385,10 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 
 	// Correlation (mctlhq/mctl-agent#97): every line below carries the root
 	// span's trace_id/span_id as JSON fields, and the ticket keeps the trace
-	// id. Both are empty when tracing is off or the span is unsampled, and the
+	// id. span_id is the root's, bound once for the run, not the stage span a
+	// line is emitted in: navigation goes by trace_id. Helpers that log through
+	// package-level slog bind telemetry.LogAttrs(ctx) themselves, so the
+	// failure lines are correlated too. Both are empty when tracing is off or the span is unsampled, and the
 	// trace id write is best effort: telemetry never gates processing.
 	log = log.With(telemetry.LogAttrs(ctx)...)
 	if traceID := telemetry.TraceID(ctx); traceID != "" {
@@ -863,7 +866,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		// stays open for review instead, which is recoverable.
 		shouldAutoMerge := p.autoMerge && !p.dryRun && proposedPersisted
 		if p.autoMerge && !p.dryRun && !proposedPersisted {
-			slog.Warn("skipping auto-merge: the fix_proposed transition was not persisted",
+			log.Warn("skipping auto-merge: the fix_proposed transition was not persisted",
 				"ticket", t.ID, "pr", prURL)
 		}
 		if shouldAutoMerge {

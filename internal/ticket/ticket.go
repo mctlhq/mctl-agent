@@ -94,10 +94,10 @@ type Ticket struct {
 	// TraceID is the OpenTelemetry trace of the ticket's latest processing
 	// run, when that run was sampled (mctlhq/mctl-agent#97). Only the trace
 	// id is kept: a span id names one transient attempt, not the incident.
-	TraceID string `json:"trace_id,omitempty"`
-	CreatedAt        time.Time  `json:"created_at"`
-	UpdatedAt        time.Time  `json:"updated_at"`
-	ResolvedAt       *time.Time `json:"resolved_at,omitempty"`
+	TraceID    string     `json:"trace_id,omitempty"`
+	CreatedAt  time.Time  `json:"created_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	ResolvedAt *time.Time `json:"resolved_at,omitempty"`
 }
 
 // Evidence attached to a ticket.

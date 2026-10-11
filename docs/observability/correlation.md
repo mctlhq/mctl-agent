@@ -27,9 +27,14 @@ value. That one filter matches both producers' formats:
 
 | Producer | How the IDs appear in a log line |
 |---|---|
-| `mctl-agent` | JSON fields `"trace_id":"…","span_id":"…"` on every line logged while a ticket is being processed |
+| `mctl-agent` | JSON fields `"trace_id":"…","span_id":"…"` on every line the pipeline (`internal/pipeline`) logs for a ticket while processing it, including the store-failure and lost-race lines. Here `span_id` is always the **root** processing span (`mctl_agent.process_ticket`), not the stage span a line was emitted in. Lines from other packages (fixer, skills, mctl-api client) carry no IDs. |
 | `mctl-agents` worker | a ` trace_id=… span_id=…` suffix on lines logged inside a recording span |
 | `mctl-agents` agent pods | one anchor line: `[trace] trace_id=… span_id=<pod root> argo_workflow=<name>` |
+
+`span_id` is not interchangeable between the two producers. The `mctl-agents`
+worker logs the span that is current when the line is written; `mctl-agent` logs
+its root span for the whole run. Navigate by `trace_id`, and use the span tree
+plus the time window to narrow down to a stage.
 
 In every case a line names a trace only if the span was **sampled**. An unsampled
 span is never exported, and a line pointing at it would send the reader to a trace
@@ -39,7 +44,7 @@ that no backend has.
 
 | Entry point | Durable identity | Where the trace id lives |
 |---|---|---|
-| Incident (`mctl-agent` ticket) | ticket `id` (= the mctl-api incident id) | the ticket's `trace_id`, stored in the agent's database and sent as `trace_id` when the incident is published to mctl-api. It belongs to the latest processing run. |
+| Incident (`mctl-agent` ticket) | ticket `id` (= the mctl-api incident id) | the ticket's `trace_id`, stored in the agent's database and sent as `trace_id` on the incident publish and on each status update to mctl-api. Locally it belongs to the latest processing run; whether mctl-api keeps it is up to mctl-api, which ignores the field today. |
 | DevLoop run | Temporal `workflow_id` + `run_id` | derived from the run (`sha256(workflow_id, run_id)`). It is passed to each Argo step as the `traceparent` operation parameter. |
 | Argo step | Argo workflow name | the `traceparent` in the mctl-api audit record for that submit |
 | Execution evidence | `evidence_id` | `execution.trace_id`; mctl-api can query by it (`GET /api/v1/evidence?trace_id=`) |

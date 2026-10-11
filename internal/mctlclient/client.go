@@ -278,6 +278,11 @@ func (c *Client) UpdateAlert(t *ticket.Ticket) {
 		"pr_commit_sha": t.PRCommitSHA,
 		"confidence":    t.Confidence,
 	}
+	// Same rule as PublishAlert: a re-processed ticket's newer trace reaches
+	// mctl-api on the status update too, not only on the first publish.
+	if t.TraceID != "" {
+		body["trace_id"] = t.TraceID
+	}
 
 	if err := c.doPatch("/api/v1/incidents/"+t.ID, body); err != nil {
 		slog.Error("failed to update alert in mctl-api", "id", t.ID, "error", err)

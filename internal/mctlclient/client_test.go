@@ -139,11 +139,12 @@ func TestResolveAlertSwallowsServerError(t *testing.T) {
 	c.ResolveAlert("ticket-abc-123", "reason") // must not panic, must not block.
 }
 
-// PublishAlert carries the ticket's trace id when it has one and omits the
-// key entirely when it does not, so mctl-api never stores an empty id that
+// PublishAlert and UpdateAlert carry the ticket's trace id when it has one
+// and omit the key entirely when it does not, so mctl-api never stores an empty id that
 // reads like data (mctlhq/mctl-agent#97).
 //
-// Mutation check: send trace_id unconditionally, or drop it, and this fails.
+// Mutation check: send trace_id unconditionally, or drop it, from either
+// call and this fails.
 func TestPublishAlertTraceID(t *testing.T) {
 	for name, tc := range map[string]struct {
 		traceID string
@@ -161,14 +162,17 @@ func TestPublishAlertTraceID(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			NewClient(srv.URL, "test-token").PublishAlert(&ticket.Ticket{ID: "tk-1", TraceID: tc.traceID})
-
-			got, ok := body["trace_id"]
-			if ok != tc.present || got != tc.want {
-				t.Errorf("trace_id = %v (present %v), want %v (present %v)", got, ok, tc.want, tc.present)
-			}
-			if _, ok := body["span_id"]; ok {
-				t.Error("span_id must not be published")
+			c := NewClient(srv.URL, "test-token")
+			for call, send := range map[string]func(*ticket.Ticket){"PublishAlert": c.PublishAlert, "UpdateAlert": c.UpdateAlert} {
+				body = nil
+				send(&ticket.Ticket{ID: "tk-1", TraceID: tc.traceID})
+				got, ok := body["trace_id"]
+				if ok != tc.present || got != tc.want {
+					t.Errorf("%s: trace_id = %v (present %v), want %v (present %v)", call, got, ok, tc.want, tc.present)
+				}
+				if _, ok := body["span_id"]; ok {
+					t.Errorf("%s: span_id must not be published", call)
+				}
 			}
 		})
 	}
