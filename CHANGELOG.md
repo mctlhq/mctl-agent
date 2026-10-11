@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.5.0](https://github.com/mctlhq/mctl-agent/compare/2.4.2...2.5.0) (2026-10-11)
+
+
+### Features
+
+* **observability:** correlate tickets and logs with their trace ([03e5a4e](https://github.com/mctlhq/mctl-agent/commit/03e5a4e83dd9744a15d3d80c4ab780cffe7fd656))
+* **observability:** correlate tickets and logs with their trace ([a0f9862](https://github.com/mctlhq/mctl-agent/commit/a0f98623c754def415a84dddca1f9b640b8225f9))
+
+
+### Bug Fixes
+
+* **observability:** correlate the pipeline's failure-path log lines ([e302209](https://github.com/mctlhq/mctl-agent/commit/e3022096043d61bb485b13dd5caf5a5ed6ee3828))
+
 ## [2.4.2](https://github.com/mctlhq/mctl-agent/compare/2.4.1...2.4.2) (2026-10-10)
 
 
