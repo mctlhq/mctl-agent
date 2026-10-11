@@ -179,6 +179,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := s.ensureColumn(ctx, "tickets", "alert_fingerprint", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := s.ensureColumn(ctx, "tickets", "trace_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 	if err := s.ensureIndex(ctx, "idx_tickets_alert_fingerprint", "tickets", "alert_fingerprint"); err != nil {
 		return err
 	}
@@ -281,6 +284,16 @@ func (s *Store) SetDiagnosisFromStatus(ctx context.Context, id, fromStatus, stat
 	return n > 0, nil
 }
 
+// SetTraceID records the trace of the ticket's current processing run
+// (mctlhq/mctl-agent#97). A narrow write, like SetDiagnosisFromStatus, and
+// for the same reason: Update rewrites every column from an in-memory copy,
+// and the copies other paths hold must not be able to blank the trace id.
+// Neither Create nor Update writes the column, so this is its only writer.
+func (s *Store) SetTraceID(ctx context.Context, id, traceID string) error {
+	_, err := s.db.ExecContext(ctx, s.rebind(`UPDATE tickets SET trace_id=? WHERE id=?`), traceID, id)
+	return err
+}
+
 // RecordPRLinkage stores the PR a fix produced and reports whether the status
 // advanced.
 //
@@ -334,11 +347,11 @@ func (s *Store) Get(ctx context.Context, id string) (*Ticket, error) {
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, trace_id, created_at, updated_at, resolved_at
 		FROM tickets WHERE id=?`
 
 	err := s.db.QueryRowContext(ctx, s.rebind(query), id).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint, &t.TraceID,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err != nil {
@@ -376,7 +389,7 @@ func (s *Store) ListAll(ctx context.Context) ([]*Ticket, error) {
 func (s *Store) ListByFilters(ctx context.Context, status, tenant, service string, limit int) ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, trace_id, created_at, updated_at, resolved_at
 		FROM tickets`
 	var clauses []string
 	var args []interface{}
@@ -412,7 +425,7 @@ func (s *Store) ListByFilters(ctx context.Context, status, tenant, service strin
 func (s *Store) listByStatus(ctx context.Context, statuses ...string) ([]*Ticket, error) {
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, trace_id, created_at, updated_at, resolved_at
 		FROM tickets WHERE status IN (`
 	args := make([]interface{}, len(statuses))
 	for i, st := range statuses {
@@ -439,7 +452,7 @@ func (s *Store) scanTickets(rows *sql.Rows) ([]*Ticket, error) {
 		var resolvedAt sql.NullTime
 		if err := rows.Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary,
 			&t.Severity, &t.Status, &t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA,
-			&t.Confidence, &t.AlertFingerprint, &t.CreatedAt, &t.UpdatedAt, &resolvedAt); err != nil {
+			&t.Confidence, &t.AlertFingerprint, &t.TraceID, &t.CreatedAt, &t.UpdatedAt, &resolvedAt); err != nil {
 			return nil, err
 		}
 		if resolvedAt.Valid {
@@ -464,7 +477,7 @@ func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType, 
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, trace_id, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status NOT IN (?, ?)
 		ORDER BY created_at DESC LIMIT 1`
@@ -472,7 +485,7 @@ func (s *Store) FindDuplicate(ctx context.Context, tenant, service, ticketType, 
 	err := s.db.QueryRowContext(ctx, s.rebind(query),
 		tenant, service, ticketType, alertName, StatusResolved, StatusSuppressed,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint, &t.TraceID,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err == sql.ErrNoRows {
@@ -551,7 +564,7 @@ func (s *Store) FindSimilar(ctx context.Context, ticketType, excludeID string, l
 	since := time.Now().UTC().Add(-90 * 24 * time.Hour)
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, trace_id, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE type=? AND status=? AND id != ? AND created_at > ?
 		ORDER BY created_at DESC LIMIT ?`
@@ -588,7 +601,7 @@ func (s *Store) FindRecentlyResolved(ctx context.Context, tenant, service, ticke
 	var resolvedAt sql.NullTime
 	query := `
 		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
-			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, created_at, updated_at, resolved_at
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, trace_id, created_at, updated_at, resolved_at
 		FROM tickets
 		WHERE tenant=? AND service=? AND type=? AND alert_name=? AND status=? AND resolved_at > ?
 		ORDER BY resolved_at DESC LIMIT 1`
@@ -596,7 +609,7 @@ func (s *Store) FindRecentlyResolved(ctx context.Context, tenant, service, ticke
 	err := s.db.QueryRowContext(ctx, s.rebind(query),
 		tenant, service, ticketType, alertName, StatusResolved, since,
 	).Scan(&t.ID, &t.Source, &t.AlertName, &t.Type, &t.Tenant, &t.Service, &t.Summary, &t.Severity, &t.Status,
-		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint,
+		&t.Analysis, &t.ProposedFix, &t.PRURL, &t.PRNumber, &t.PRRepo, &t.PRBranch, &t.PRCommitSHA, &t.Confidence, &t.AlertFingerprint, &t.TraceID,
 		&t.CreatedAt, &t.UpdatedAt, &resolvedAt,
 	)
 	if err == sql.ErrNoRows {

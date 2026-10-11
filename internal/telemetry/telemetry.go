@@ -165,3 +165,35 @@ func buildRevision() string {
 	}
 	return ""
 }
+
+// Structured log field names for trace correlation (mctlhq/mctl-agent#97).
+// They match the mctl-agents worker's `trace_id=`/`span_id=` suffix, so one
+// Loki line filter finds both services. They are JSON fields, never stream
+// labels: a per-trace label would mint a stream per ticket.
+const (
+	LogKeyTraceID = "trace_id"
+	LogKeySpanID  = "span_id"
+)
+
+// LogAttrs returns the trace_id/span_id log attributes of the span in ctx,
+// as slog key/value pairs, or nil. Only a valid, sampled span qualifies: an
+// unsampled span is never exported, and a log line naming it would point at
+// a trace no backend has.
+func LogAttrs(ctx context.Context) []any {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() || !sc.IsSampled() {
+		return nil
+	}
+	return []any{LogKeyTraceID, sc.TraceID().String(), LogKeySpanID, sc.SpanID().String()}
+}
+
+// TraceID returns the hex trace id of the sampled span in ctx, or "" under
+// the same rule as LogAttrs. It is the durable identity a ticket keeps; the
+// span id is not, since it names one transient processing attempt.
+func TraceID(ctx context.Context) string {
+	sc := trace.SpanContextFromContext(ctx)
+	if !sc.IsValid() || !sc.IsSampled() {
+		return ""
+	}
+	return sc.TraceID().String()
+}

@@ -19,6 +19,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
 // TestServiceJSONDecodesAppFromNameField verifies that mctl-api's
@@ -135,4 +137,43 @@ func TestResolveAlertSwallowsServerError(t *testing.T) {
 
 	c := NewClient(srv.URL, "test-token")
 	c.ResolveAlert("ticket-abc-123", "reason") // must not panic, must not block.
+}
+
+// PublishAlert and UpdateAlert carry the ticket's trace id when it has one
+// and omit the key entirely when it does not, so mctl-api never stores an empty id that
+// reads like data (mctlhq/mctl-agent#97).
+//
+// Mutation check: send trace_id unconditionally, or drop it, from either
+// call and this fails.
+func TestPublishAlertTraceID(t *testing.T) {
+	for name, tc := range map[string]struct {
+		traceID string
+		want    any
+		present bool
+	}{
+		"traced":   {"164ac97d8d7264326c406240d263dcc1", "164ac97d8d7264326c406240d263dcc1", true},
+		"untraced": {"", nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var body map[string]any
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				_, _ = w.Write([]byte(`{}`))
+			}))
+			defer srv.Close()
+
+			c := NewClient(srv.URL, "test-token")
+			for call, send := range map[string]func(*ticket.Ticket){"PublishAlert": c.PublishAlert, "UpdateAlert": c.UpdateAlert} {
+				body = nil
+				send(&ticket.Ticket{ID: "tk-1", TraceID: tc.traceID})
+				got, ok := body["trace_id"]
+				if ok != tc.present || got != tc.want {
+					t.Errorf("%s: trace_id = %v (present %v), want %v (present %v)", call, got, ok, tc.want, tc.present)
+				}
+				if _, ok := body["span_id"]; ok {
+					t.Errorf("%s: span_id must not be published", call)
+				}
+			}
+		})
+	}
 }

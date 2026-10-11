@@ -225,6 +225,12 @@ func (c *Client) PublishAlert(t *ticket.Ticket) {
 	if t.ResolvedAt != nil {
 		body["resolved_at"] = t.ResolvedAt
 	}
+	// The trace of the run that is processing the incident (#97), so a caller
+	// can pivot from the incident to its spans and logs. Omitted, not sent
+	// empty, when the run was not traced.
+	if t.TraceID != "" {
+		body["trace_id"] = t.TraceID
+	}
 
 	var evidence []map[string]interface{}
 	for _, ev := range t.Evidence {
@@ -271,6 +277,11 @@ func (c *Client) UpdateAlert(t *ticket.Ticket) {
 		"pr_branch":     t.PRBranch,
 		"pr_commit_sha": t.PRCommitSHA,
 		"confidence":    t.Confidence,
+	}
+	// Same rule as PublishAlert: a re-processed ticket's newer trace reaches
+	// mctl-api on the status update too, not only on the first publish.
+	if t.TraceID != "" {
+		body["trace_id"] = t.TraceID
 	}
 
 	if err := c.doPatch("/api/v1/incidents/"+t.ID, body); err != nil {
