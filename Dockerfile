@@ -1,7 +1,7 @@
 # Digest resolved 2026-10-10 via Docker Registry HTTP API v2 manifest list
 # lookup against registry-1.docker.io for golang:1.26.9-alpine (matches the
 # go 1.26.9 directive in go.mod).
-FROM golang:1.26.9-alpine@sha256:cdfd4fe2da6b225d8b40c6b7a105736e548e83ff56d5d8f9394446eeb5eb84e0 AS builder
+FROM golang:1.27.0-alpine@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS builder
 
 WORKDIR /app
 
