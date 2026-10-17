@@ -284,8 +284,8 @@ func TestAllSkillsRegistered(t *testing.T) {
 	RegisterAll(reg, "test-key")
 
 	infos := reg.List()
-	if len(infos) != 12 {
-		t.Fatalf("expected 12 skills, got %d", len(infos))
+	if len(infos) != 13 {
+		t.Fatalf("expected 13 skills, got %d", len(infos))
 	}
 
 	names := map[string]bool{}
@@ -302,7 +302,7 @@ func TestAllSkillsRegistered(t *testing.T) {
 	expected := []string{
 		"oomkilled", "imagepull", "post_deploy_rollback", "argocd_drift",
 		"argocd_sync_failed", "llm_diagnosis", "probe_fix", "cpu_throttle",
-		"quota_adjust", "scale_up", "github_actions", "workflow_fixer",
+		"quota_adjust", "scale_up", "github_actions", "workflow_fixer", "telegram_session_borrow",
 	}
 	for _, name := range expected {
 		if !names[name] {
@@ -619,5 +619,30 @@ func TestWorkflowFixerSkillFixDeclinesAppProjectWhitelist(t *testing.T) {
 	}
 	if !strings.Contains(fix.Summary, "platform-gitops/bootstrap/templates/projects/project-apps.yaml") {
 		t.Errorf("expected summary to name the AppProject manifest location, got: %q", fix.Summary)
+	}
+}
+
+func TestTelegramSessionBorrowSkill(t *testing.T) {
+	s := NewTelegramSessionBorrowSkill()
+	ctx := context.Background()
+
+	if m := s.Match(ctx, &ticket.Ticket{AlertName: "Other"}, skill.EvidenceSet{}); m.Matched {
+		t.Fatal("must not match other alerts")
+	}
+	tk := &ticket.Ticket{AlertName: "MctlTelegramSessionBorrowFastBurn"}
+	if m := s.Match(ctx, tk, skill.EvidenceSet{}); !m.Matched {
+		t.Fatal("expected match")
+	}
+
+	clean := skill.NewEvidenceSet([]ticket.Evidence{{Type: "logs", Content: `{"level":"INFO","msg":"mcp tool call","status":"ok"}`}})
+	d, err := s.Diagnose(ctx, tk, clean)
+	if err != nil || d.Confidence != ticket.ConfidenceLow || !strings.Contains(d.Diagnosis, "mctl-telegram-slo.yaml") {
+		t.Fatalf("clean logs: %+v %v", d, err)
+	}
+
+	bad := skill.NewEvidenceSet([]ticket.Evidence{{Type: "logs", Content: `{"level":"ERROR","msg":"pool borrow failed"}`}})
+	d, err = s.Diagnose(ctx, tk, bad)
+	if err != nil || d.Confidence != ticket.ConfidenceMedium || d.Fixable {
+		t.Fatalf("error logs: %+v %v", d, err)
 	}
 }

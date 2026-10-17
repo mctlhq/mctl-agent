@@ -36,6 +36,7 @@ func RegisterAll(reg *skill.Registry, anthropicKey string) {
 	reg.Register(NewScaleUpSkill())
 	reg.Register(NewGitHubActionsSkill())
 	reg.Register(NewWorkflowFixerSkill())
+	reg.Register(NewTelegramSessionBorrowSkill())
 
 	if os.Getenv("DISABLE_LLM_DIAGNOSIS") != "true" {
 		reg.Register(NewLLMDiagnosisSkill(anthropicKey))
