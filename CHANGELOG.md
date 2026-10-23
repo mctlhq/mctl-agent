@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.5.1](https://github.com/mctlhq/mctl-agent/compare/2.5.0...2.5.1) (2026-10-23)
+
+
+### Bug Fixes
+
+* **deps:** bump Go to 1.26.10 for GO-2026-6809 ([bd20b96](https://github.com/mctlhq/mctl-agent/commit/bd20b96e1b28195f0626e971673ccb10b0d80c83))
+* **deps:** bump Go to 1.26.10 for GO-2026-6809 ([dc29825](https://github.com/mctlhq/mctl-agent/commit/dc298253b6f106431b947ce21ec335e7c468ab38))
+
 ## [2.5.0](https://github.com/mctlhq/mctl-agent/compare/2.4.2...2.5.0) (2026-10-11)
 
 
