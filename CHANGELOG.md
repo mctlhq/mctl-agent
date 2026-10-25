@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.6.0](https://github.com/mctlhq/mctl-agent/compare/2.5.2...2.6.0) (2026-10-25)
+
+
+### Features
+
+* **alerts:** stay quiet on unmatched alerts already paged to humans ([af9a32b](https://github.com/mctlhq/mctl-agent/commit/af9a32bab0f3acdc5ae61b74ea1fb3763164d4a0))
+* **alerts:** stay quiet on unmatched alerts already paged to humans ([5582d51](https://github.com/mctlhq/mctl-agent/commit/5582d51fdac0c39ad81c8211e9515d160288e3e2))
+
 ## [2.5.2](https://github.com/mctlhq/mctl-agent/compare/2.5.1...2.5.2) (2026-10-25)
 
 
