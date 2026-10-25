@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.5.2](https://github.com/mctlhq/mctl-agent/compare/2.5.1...2.5.2) (2026-10-25)
+
+
+### Bug Fixes
+
+* **notify:** keep a held header when its send fails ([de18ffc](https://github.com/mctlhq/mctl-agent/commit/de18ffc1b54f292ebcd0cf3d5840e5c38a209866))
+* **notify:** one Telegram message per incident ([d56b430](https://github.com/mctlhq/mctl-agent/commit/d56b4308a0b36bc19f7a52923032385384f90369))
+* **notify:** one Telegram message per incident ([98e5ae9](https://github.com/mctlhq/mctl-agent/commit/98e5ae980ce1b18e8b5bf49acfcc820ca534d08f))
+
 ## [2.5.1](https://github.com/mctlhq/mctl-agent/compare/2.5.0...2.5.1) (2026-10-23)
 
 
