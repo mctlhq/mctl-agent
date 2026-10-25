@@ -398,11 +398,20 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		}
 	}
 
-	// Notify about new ticket.
+	// Announce the ticket with the first message that says what the agent
+	// made of it, not on its own: a bare "new ticket" line followed seconds
+	// later by its diagnosis was half of the chat. Whatever path returns
+	// below, the deferred flush announces a ticket nothing else reported.
+	// held, not t: t is reassigned by the reload below and is nil when that
+	// fails, which is exactly the path that most needs the flush.
 	if shouldNotifyNewTicket(t) {
-		if err := p.telegram.SendNewTicket(t); err != nil {
-			log.Error("failed to send new ticket notification", "error", err)
-		}
+		held := t
+		p.telegram.HoldNewTicket(held)
+		defer func() {
+			if err := p.telegram.FlushNewTicket(held); err != nil {
+				log.Error("failed to send new ticket notification", "error", err)
+			}
+		}()
 	} else {
 		log.Info("suppressing new ticket notification", "alert_name", t.AlertName)
 	}
@@ -590,11 +599,30 @@ func rankedSkillNames(ranked []skill.RankedSkill) []string {
 }
 
 func shouldNotifyNewTicket(t *ticket.Ticket) bool {
-	return !isQuietAlert(t)
+	return !isQuietAlert(t) && !isDigestOnlyAlert(t)
 }
 
 func shouldNotifyDiagnosis(t *ticket.Ticket) bool {
-	return !isQuietAlert(t)
+	return !isQuietAlert(t) && !isDigestOnlyAlert(t)
+}
+
+// isDigestOnlyAlert reports a warning the agent only diagnoses and that
+// nobody acts on as it fires: CPU throttling, a StatefulSet mid-rollout, a
+// slow Job. They still become tickets, are escalated and listed in the daily
+// digest; they just do not post to the chat each time. Critical severity, and
+// KubePersistentVolumeFillingUp (data loss if ignored), still post.
+func isDigestOnlyAlert(t *ticket.Ticket) bool {
+	if t == nil || t.Severity != ticket.SeverityWarning {
+		return false
+	}
+	switch t.AlertName {
+	case "CPUThrottlingHigh",
+		"KubeJobNotCompleted",
+		"KubeStatefulSetReplicasMismatch":
+		return true
+	default:
+		return false
+	}
 }
 
 func isQuietAlert(t *ticket.Ticket) bool {

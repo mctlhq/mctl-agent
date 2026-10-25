@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf16"
 
@@ -36,6 +37,14 @@ type Telegram struct {
 	chatID        string            // global default fallback
 	tenantChatIDs map[string]string // per-tenant routing (admins/labs/ovk → chat_id)
 	httpClient    *http.Client
+	apiBase       string
+
+	// pending holds the header of a ticket announced with HoldNewTicket and
+	// not yet sent, keyed by ticket ID. The next message about that ticket
+	// carries it, so an incident is one message instead of a "new ticket"
+	// line followed seconds later by its diagnosis.
+	mu      sync.Mutex
+	pending map[string]string
 }
 
 // NewTelegram creates a new Telegram notifier.
@@ -52,7 +61,16 @@ func NewTelegram(botToken, chatID string, tenantChatIDs map[string]string) *Tele
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
+		apiBase: "https://api.telegram.org",
+		pending: map[string]string{},
 	}
+}
+
+// WithAPIBase points the notifier at another Bot API root. Tests use it to
+// read what would have been sent.
+func (tg *Telegram) WithAPIBase(base string) *Telegram {
+	tg.apiBase = strings.TrimRight(base, "/")
+	return tg
 }
 
 // chatIDFor returns the chat ID to use for a notification originating from
@@ -75,16 +93,68 @@ type TelegramCommand struct {
 	Reason   string
 }
 
+// ticketHeader is the "new ticket" line: what fired, where, and the alert's
+// own summary.
+func ticketHeader(t *ticket.Ticket) string {
+	return fmt.Sprintf("%s %s in %s/%s [%s]\n%s",
+		severityIcon(t.Severity), t.Type, t.Tenant, t.Service, t.Severity,
+		escapeHTML(t.Summary))
+}
+
 // SendNewTicket notifies about a new ticket.
 func (tg *Telegram) SendNewTicket(t *ticket.Ticket) error {
-	icon := severityIcon(t.Severity)
-	msg := fmt.Sprintf(`%s %s in %s/%s [%s]
-%s
-ID: <code>%s</code>`,
-		icon, t.Type, t.Tenant, t.Service, t.Severity,
-		escapeHTML(t.Summary), t.ID[:8])
-
+	msg := fmt.Sprintf("%s\nID: <code>%s</code>", ticketHeader(t), t.ID[:8])
 	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg)
+}
+
+// HoldNewTicket records the ticket's header instead of sending it: the next
+// Send* about the same ticket leads with it. The caller must pair it with
+// FlushNewTicket, which sends the header alone if nothing carried it, so a
+// header is never held past the ticket's processing.
+func (tg *Telegram) HoldNewTicket(t *ticket.Ticket) {
+	tg.mu.Lock()
+	defer tg.mu.Unlock()
+	if tg.pending == nil {
+		tg.pending = map[string]string{}
+	}
+	tg.pending[t.ID] = ticketHeader(t)
+}
+
+// FlushNewTicket sends a held header that no later message carried, as the
+// plain new-ticket notification. A ticket whose processing stopped early is
+// still announced.
+func (tg *Telegram) FlushNewTicket(t *ticket.Ticket) error {
+	if _, ok := tg.takeHeader(t.ID); !ok {
+		return nil
+	}
+	return tg.SendNewTicket(t)
+}
+
+func (tg *Telegram) takeHeader(id string) (string, bool) {
+	tg.mu.Lock()
+	defer tg.mu.Unlock()
+	h, ok := tg.pending[id]
+	delete(tg.pending, id)
+	return h, ok
+}
+
+// sendWithHeader sends msg about t, led by the ticket's held header if there
+// is one. A send that fails puts the header back, so the deferred flush still
+// announces the ticket: the call sites discard these errors.
+func (tg *Telegram) sendWithHeader(t *ticket.Ticket, msg string) error {
+	h, held := tg.takeHeader(t.ID)
+	if held {
+		msg = h + "\n\n" + msg
+	}
+	err := tg.doSendTo(tg.chatIDFor(t.Tenant), msg)
+	if err != nil && held {
+		tg.mu.Lock()
+		if _, again := tg.pending[t.ID]; !again {
+			tg.pending[t.ID] = h
+		}
+		tg.mu.Unlock()
+	}
+	return err
 }
 
 // SendDiagnosis notifies about a completed diagnosis.
@@ -97,7 +167,7 @@ ID: <code>%s</code>`,
 		t.Tenant, t.Service, confIcon, confidence,
 		escapeHTML(diagnosis), action, t.ID[:8])
 
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg)
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendPRCreated notifies about a PR being created.
@@ -109,14 +179,14 @@ func (tg *Telegram) SendPRCreated(t *ticket.Ticket, prURL, summary string) error
 <code>/approve %s</code> | <code>/reject %s reason</code>`,
 		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8], t.ID[:8])
 
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg)
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendPRAutoMerged notifies that a PR was auto-merged (informational, no action needed).
 func (tg *Telegram) SendPRAutoMerged(t *ticket.Ticket, prURL, summary string) error {
 	msg := fmt.Sprintf("✅ AUTO-MERGED %s/%s\n%s\n%s\nID: <code>%s</code>",
 		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8])
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg)
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendPRNeedsReview notifies that a PR needs human review, tagging the escalation contact.
@@ -127,7 +197,7 @@ func (tg *Telegram) SendPRNeedsReview(t *ticket.Ticket, prURL, summary, escalati
 		msg += "\n" + escapeHTML(reason)
 	}
 	msg += fmt.Sprintf("\n\n<code>/approve %s</code> | <code>/reject %s reason</code>", t.ID[:8], t.ID[:8])
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), msg)
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendStatus sends a summary of open tickets.
@@ -371,7 +441,7 @@ func (tg *Telegram) SetWebhook(ctx context.Context, publicBaseURL, secretToken s
 	if err != nil {
 		return fmt.Errorf("telegram setWebhook: encode: %w", err)
 	}
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/setWebhook", tg.botToken)
+	url := fmt.Sprintf("%s/bot%s/setWebhook", tg.apiBase, tg.botToken)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("telegram setWebhook: build request: %w", err)
@@ -415,7 +485,7 @@ func (tg *Telegram) doSendTo(chatID, text string) error {
 	}
 	body, _ := json.Marshal(payload)
 
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", tg.botToken)
+	url := fmt.Sprintf("%s/bot%s/sendMessage", tg.apiBase, tg.botToken)
 	resp, err := tg.httpClient.Post(url, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("telegram send: %w", err)
