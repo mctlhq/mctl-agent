@@ -94,7 +94,11 @@ type Ticket struct {
 	// TraceID is the OpenTelemetry trace of the ticket's latest processing
 	// run, when that run was sampled (mctlhq/mctl-agent#97). Only the trace
 	// id is kept: a span id names one transient attempt, not the incident.
-	TraceID    string     `json:"trace_id,omitempty"`
+	TraceID string `json:"trace_id,omitempty"`
+	// HumanPaged is set when AlertManager delivered the alert on a route that
+	// also pages the operators' chat directly (`?paged=1` on the webhook).
+	// Not persisted: only the processing run started by that delivery reads it.
+	HumanPaged bool       `json:"-"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 	ResolvedAt *time.Time `json:"resolved_at,omitempty"`

@@ -2094,3 +2094,38 @@ func TestEffectiveSeverity(t *testing.T) {
 		})
 	}
 }
+
+// AlertManager marks deliveries on routes that already page the operators'
+// chat with ?paged=1; the ticket carries that to the pipeline. Without the
+// query parameter it stays false.
+//
+// Mutation check: drop the HumanPaged assignment in processAlert and the
+// paged case fails.
+func TestAlertHandlerCarriesHumanPaged(t *testing.T) {
+	for _, tc := range []struct {
+		url  string
+		want bool
+	}{
+		{"/api/v1/alerts?paged=1", true},
+		{"/api/v1/alerts", false},
+		{"/api/v1/alerts?paged=0", false},
+	} {
+		t.Run(tc.url, func(t *testing.T) {
+			var received []*ticket.Ticket
+			handler := NewAlertHandler(newTestStore(t), func(tk *ticket.Ticket) { received = append(received, tk) })
+			body, _ := json.Marshal(alertManagerPayload{Status: "firing", Alerts: []alert{{
+				Status:      "firing",
+				Labels:      map[string]string{"alertname": "MctlAliceUpstreamErrorRatioHigh", "severity": "warning"},
+				Annotations: map[string]string{"summary": "mctl-alice: 100% of Yandex quasar calls are failing"},
+			}}})
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, httptest.NewRequest(http.MethodPost, tc.url, bytes.NewReader(body)))
+			if w.Code != http.StatusOK || len(received) != 1 {
+				t.Fatalf("want 200 and one ticket, got %d and %d", w.Code, len(received))
+			}
+			if received[0].HumanPaged != tc.want {
+				t.Fatalf("HumanPaged = %v, want %v", received[0].HumanPaged, tc.want)
+			}
+		})
+	}
+}
