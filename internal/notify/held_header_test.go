@@ -84,3 +84,43 @@ func TestFlushOfAnUncarriedHeader(t *testing.T) {
 		t.Fatalf("flush should send the plain new-ticket message once, got %q", got)
 	}
 }
+
+// A message that fails to send does not take the header with it: the flush
+// still announces the ticket. Mutation check: drop the put-back in
+// sendWithHeader and the flush sends nothing.
+func TestFailedSendKeepsTheHeader(t *testing.T) {
+	var mu sync.Mutex
+	var texts []string
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			Text string `json:"text"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		texts = append(texts, body.Text)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	t.Cleanup(srv.Close)
+	tg := NewTelegram("token", "1", nil).WithAPIBase(srv.URL)
+	tk := heldTicket()
+
+	tg.HoldNewTicket(tk)
+	if err := tg.SendDiagnosis(tk, "d", ticket.ConfidenceLow, "a"); err == nil {
+		t.Fatal("the first send should fail")
+	}
+	if err := tg.FlushNewTicket(tk); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(texts) != 1 || !strings.Contains(texts[0], "pod restarted 6 times") {
+		t.Fatalf("flush should announce the ticket after a failed send, got %q", texts)
+	}
+}

@@ -138,13 +138,23 @@ func (tg *Telegram) takeHeader(id string) (string, bool) {
 	return h, ok
 }
 
-// withHeader prefixes msg with the ticket's held header, if there is one, and
-// releases it.
-func (tg *Telegram) withHeader(t *ticket.Ticket, msg string) string {
-	if h, ok := tg.takeHeader(t.ID); ok {
-		return h + "\n\n" + msg
+// sendWithHeader sends msg about t, led by the ticket's held header if there
+// is one. A send that fails puts the header back, so the deferred flush still
+// announces the ticket: the call sites discard these errors.
+func (tg *Telegram) sendWithHeader(t *ticket.Ticket, msg string) error {
+	h, held := tg.takeHeader(t.ID)
+	if held {
+		msg = h + "\n\n" + msg
 	}
-	return msg
+	err := tg.doSendTo(tg.chatIDFor(t.Tenant), msg)
+	if err != nil && held {
+		tg.mu.Lock()
+		if _, again := tg.pending[t.ID]; !again {
+			tg.pending[t.ID] = h
+		}
+		tg.mu.Unlock()
+	}
+	return err
 }
 
 // SendDiagnosis notifies about a completed diagnosis.
@@ -157,7 +167,7 @@ ID: <code>%s</code>`,
 		t.Tenant, t.Service, confIcon, confidence,
 		escapeHTML(diagnosis), action, t.ID[:8])
 
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), tg.withHeader(t, msg))
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendPRCreated notifies about a PR being created.
@@ -169,14 +179,14 @@ func (tg *Telegram) SendPRCreated(t *ticket.Ticket, prURL, summary string) error
 <code>/approve %s</code> | <code>/reject %s reason</code>`,
 		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8], t.ID[:8])
 
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), tg.withHeader(t, msg))
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendPRAutoMerged notifies that a PR was auto-merged (informational, no action needed).
 func (tg *Telegram) SendPRAutoMerged(t *ticket.Ticket, prURL, summary string) error {
 	msg := fmt.Sprintf("✅ AUTO-MERGED %s/%s\n%s\n%s\nID: <code>%s</code>",
 		t.Tenant, t.Service, escapeHTML(summary), prURL, t.ID[:8])
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), tg.withHeader(t, msg))
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendPRNeedsReview notifies that a PR needs human review, tagging the escalation contact.
@@ -187,7 +197,7 @@ func (tg *Telegram) SendPRNeedsReview(t *ticket.Ticket, prURL, summary, escalati
 		msg += "\n" + escapeHTML(reason)
 	}
 	msg += fmt.Sprintf("\n\n<code>/approve %s</code> | <code>/reject %s reason</code>", t.ID[:8], t.ID[:8])
-	return tg.doSendTo(tg.chatIDFor(t.Tenant), tg.withHeader(t, msg))
+	return tg.sendWithHeader(t, msg)
 }
 
 // SendStatus sends a summary of open tickets.
