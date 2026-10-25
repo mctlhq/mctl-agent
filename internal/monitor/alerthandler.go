@@ -135,6 +135,11 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer batchCancel()
 
+	// AlertManager appends ?paged=1 on the receiver for routes that already
+	// page the operators' chat, so the agent does not repeat an alert it has
+	// nothing to add to.
+	paged := r.URL.Query().Get("paged") == "1"
+
 	var firstErr error
 	processed := 0
 	for _, a := range payload.Alerts {
@@ -170,7 +175,7 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err := func() error {
 			ctx, cancel := context.WithTimeout(batchCtx, ctxutil.WriteTimeout)
 			defer cancel()
-			return h.processAlert(ctx, a)
+			return h.processAlert(ctx, a, paged)
 		}()
 		processed++
 		if err != nil && firstErr == nil {
@@ -192,7 +197,7 @@ func (h *AlertHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // an error only for failures that a retry could fix — i.e. store failures —
 // so ServeHTTP can ask AlertManager to redeliver. Everything else is handled
 // in place.
-func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
+func (h *AlertHandler) processAlert(ctx context.Context, a alert, paged bool) error {
 	alertName := a.Labels["alertname"]
 	namespace := a.Labels["namespace"]
 	pod := a.Labels["pod"]
@@ -506,6 +511,7 @@ func (h *AlertHandler) processAlert(ctx context.Context, a alert) error {
 		Summary:          summary,
 		Severity:         severity,
 		AlertFingerprint: a.Fingerprint,
+		HumanPaged:       paged,
 	}
 
 	if err := h.store.Create(ctx, t); err != nil {

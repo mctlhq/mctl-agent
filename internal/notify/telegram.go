@@ -130,6 +130,12 @@ func (tg *Telegram) FlushNewTicket(t *ticket.Ticket) error {
 	return tg.SendNewTicket(t)
 }
 
+// DropNewTicket discards a held header unsent, for a ticket that turned out to
+// have nothing to report.
+func (tg *Telegram) DropNewTicket(t *ticket.Ticket) {
+	tg.takeHeader(t.ID)
+}
+
 func (tg *Telegram) takeHeader(id string) (string, bool) {
 	tg.mu.Lock()
 	defer tg.mu.Unlock()

@@ -80,6 +80,47 @@ func TestUndiagnosedTicketIsOneMessage(t *testing.T) {
 	}
 }
 
+// An alert AlertManager already paged to the operators' chat, that no skill
+// matches, posts nothing: the chat has it, and "no skill matched" adds
+// nothing. The ticket is still processed and escalated. Not paged, the same
+// ticket still posts its one message (TestUndiagnosedTicketIsOneMessage).
+//
+// Mutation check: drop the humanPaged branch and this sees one message;
+// keep the branch but remove DropNewTicket and the deferred flush still
+// sends the bare header.
+func TestHumanPagedUndiagnosedTicketIsSilent(t *testing.T) {
+	p, store := newAsyncTestPipeline(t, 1)
+	tg, bot := newRecordingTelegram(t)
+	p.telegram = tg
+
+	tk := &ticket.Ticket{
+		Source:     ticket.SourceAlertManager,
+		AlertName:  "MctlAliceUpstreamErrorRatioHigh",
+		Type:       ticket.TypeGeneric,
+		Tenant:     "platform",
+		Service:    "MctlAliceUpstreamErrorRatioHigh",
+		Summary:    "mctl-alice: 100% of Yandex quasar calls are failing",
+		Severity:   ticket.SeverityWarning,
+		Status:     ticket.StatusOpen,
+		HumanPaged: true,
+	}
+	if err := store.Create(context.Background(), tk); err != nil {
+		t.Fatal(err)
+	}
+	p.processTicketSync(context.Background(), tk)
+
+	if got := bot.sent(); len(got) != 0 {
+		t.Fatalf("an alert already paged to humans should post nothing, got %q", got)
+	}
+	stored, err := store.Get(context.Background(), tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status == ticket.StatusOpen || stored.Status == ticket.StatusAnalyzing {
+		t.Fatalf("the ticket should still be processed and escalated, status %q", stored.Status)
+	}
+}
+
 // Warning-level alerts that are diagnosed only (CPU throttling, a StatefulSet
 // mid-rollout) stay out of the chat; the ticket still exists for the digest.
 // The same alert at critical severity still posts.

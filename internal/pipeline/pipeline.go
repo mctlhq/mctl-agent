@@ -404,6 +404,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	// below, the deferred flush announces a ticket nothing else reported.
 	// held, not t: t is reassigned by the reload below and is nil when that
 	// fails, which is exactly the path that most needs the flush.
+	humanPaged := t.HumanPaged
 	if shouldNotifyNewTicket(t) {
 		held := t
 		p.telegram.HoldNewTicket(held)
@@ -453,7 +454,13 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	mSpan.End()
 	if len(ranked) == 0 {
 		log.Info("no skills matched ticket")
-		if shouldNotifyDiagnosis(t) {
+		if humanPaged {
+			// The operators' chat already has this alert from AlertManager;
+			// "no skill matched" adds nothing to it. The ticket is still
+			// escalated below and listed in the digest.
+			log.Info("suppressing no-skill notification for an alert already paged to humans")
+			p.telegram.DropNewTicket(t)
+		} else if shouldNotifyDiagnosis(t) {
 			_ = p.telegram.SendDiagnosis(t, "No skill matched this ticket type. Manual review required.", ticket.ConfidenceLow, "No auto-diagnosis available")
 		}
 		p.escalate(ctx, t, fmt.Sprintf(
