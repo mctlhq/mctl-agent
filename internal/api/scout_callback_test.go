@@ -4,15 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/google/go-github/v68/github"
 
+	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/gitopspath"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/scoutspike"
 )
@@ -24,7 +28,7 @@ type scoutGH struct {
 	search  func() (*github.IssuesSearchResult, error)
 }
 
-func (g *scoutGH) RepoAccessible(context.Context, string) (int, error) {
+func (g *scoutGH) RepoAccessible(context.Context, string, string) (int, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.calls++
@@ -39,7 +43,7 @@ func (g *scoutGH) SearchIssues(context.Context, string, int) (*github.IssuesSear
 	}
 	return &github.IssuesSearchResult{Total: github.Ptr(0)}, nil
 }
-func (g *scoutGH) CreateIssue(_ context.Context, repo, _, _ string, _ []string) (int, string, error) {
+func (g *scoutGH) CreateIssue(_ context.Context, _, repo, _, _ string, _ []string) (int, string, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.calls++
@@ -63,12 +67,16 @@ func (s *tgStub) handler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(`{"ok":true}`))
 }
 
-func scoutSetup(t *testing.T, owner int64, secret string, gh *scoutGH) (http.Handler, *tgStub) {
+func scoutSetup(t *testing.T, owner int64, secret string, gh scoutspike.GitHub) (http.Handler, *tgStub) {
+	return scoutSetupChat(t, "555", owner, secret, gh)
+}
+
+func scoutSetupChat(t *testing.T, chatID string, owner int64, secret string, gh scoutspike.GitHub) (http.Handler, *tgStub) {
 	t.Helper()
 	stub := &tgStub{}
 	srv := httptest.NewServer(http.HandlerFunc(stub.handler))
 	t.Cleanup(srv.Close)
-	tg := notify.NewTelegram("bot-token", "555", nil).WithAPIBase(srv.URL).WithOwnerUserID(owner)
+	tg := notify.NewTelegram("bot-token", chatID, nil).WithAPIBase(srv.URL).WithOwnerUserID(owner)
 	return NewRouter(Options{
 		Telegram:              tg,
 		TelegramWebhookSecret: secret,
@@ -144,25 +152,94 @@ func TestScoutCallbackHappyPathThenSecondTap(t *testing.T) {
 }
 
 func TestScoutCallbackAuthRefusals(t *testing.T) {
-	// Pins each auth guard: no GitHub call, and no Telegram call to strangers.
+	// Pins each auth guard: no GitHub call, no Telegram call to strangers,
+	// and no chat or user id in the logs.
+	buf := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
 	cases := map[string]struct {
-		owner         int64
-		secret        string
-		chat, user    int64
-		wantTelegram0 bool
+		allowlist  string
+		owner      int64
+		secret     string
+		chat, user int64
 	}{
-		"other chat":   {77, "s", 999, 77, true},
-		"other user":   {77, "s", 555, 78, true},
-		"owner unset":  {0, "s", 555, 77, true},
-		"secret unset": {77, "", 555, 77, true},
+		"other chat":      {"555123", 77777, "s", 999888, 77777},
+		"other user":      {"555123", 77777, "s", 555123, 78787},
+		"owner unset":     {"555123", 0, "s", 555123, 77777},
+		"secret unset":    {"555123", 77777, "", 555123, 77777},
+		"empty allowlist": {"", 77777, "s", 555123, 77777},
 	}
 	for name, c := range cases {
+		buf.Reset()
 		gh := &scoutGH{}
-		h, stub := scoutSetup(t, c.owner, c.secret, gh)
+		h, stub := scoutSetupChat(t, c.allowlist, c.owner, c.secret, gh)
 		w := post(h, c.secret, callbackBody(t, c.chat, c.user, "scout:create:1", goodDraft()))
-		if (w.Code != 200 && w.Code != 401) || gh.calls != 0 || len(stub.methods) != 0 {
+		if (w.Code != 200 && w.Code != 401) || gh.calls != 0 || gh.creates != 0 || len(stub.methods) != 0 {
 			t.Errorf("%s: code=%d gh=%d tg=%v", name, w.Code, gh.calls, stub.methods)
 		}
+		logs := buf.String()
+		for _, id := range []int64{c.chat, c.user} {
+			if strings.Contains(logs, strconv.FormatInt(id, 10)) {
+				t.Errorf("%s: log contains id %d: %s", name, id, logs)
+			}
+		}
+	}
+}
+
+// githubStub is an httptest GitHub API that records what the real fixer sends.
+type githubStub struct {
+	mu      sync.Mutex
+	queries []string
+	creates []string // "<path> <labels>"
+}
+
+func (g *githubStub) handler(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	switch {
+	case r.Method == http.MethodGet && r.URL.Path == "/repos/mctlhq/mctl-api":
+		_, _ = w.Write([]byte(`{"name":"mctl-api"}`))
+	case r.Method == http.MethodGet && r.URL.Path == "/search/issues":
+		g.queries = append(g.queries, r.URL.Query().Get("q"))
+		_, _ = w.Write([]byte(`{"total_count":0,"incomplete_results":false,"items":[]}`))
+	case r.Method == http.MethodPost && r.URL.Path == "/repos/mctlhq/mctl-api/issues":
+		var req struct {
+			Labels []string `json:"labels"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		g.creates = append(g.creates, r.URL.Path+" "+strings.Join(req.Labels, ","))
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"number":9,"html_url":"https://github.com/mctlhq/mctl-api/issues/9"}`))
+	default:
+		http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusTeapot)
+	}
+}
+
+func TestScoutCallbackCreatesThroughGitHubAPI(t *testing.T) {
+	// T9 at the HTTP layer: one POST /repos/mctlhq/<repo>/issues with only
+	// spike:scout, even though the draft asks for other labels and the fixer
+	// is configured for another owner.
+	gs := &githubStub{}
+	srv := httptest.NewServer(http.HandlerFunc(gs.handler))
+	t.Cleanup(srv.Close)
+	f := fixer.NewGitHubFixer("tok", "", "someone-else", "mctl-gitops", nil, false, 0, 0, gitopspath.Allowlist{})
+	if err := f.SetBaseURL(srv.URL + "/"); err != nil {
+		t.Fatal(err)
+	}
+	h, stub := scoutSetup(t, 77, "s", f)
+	q := url.Values{"title": {"spike: x"}, "body": {"Source: https://a.example/p"}, "labels": {"bug,urgent"}}
+	post(h, "s", callbackBody(t, 555, 77, "scout:create:1", "https://github.com/mctlhq/mctl-api/issues/new?"+q.Encode()))
+	if len(gs.creates) != 1 || gs.creates[0] != "/repos/mctlhq/mctl-api/issues spike:scout" {
+		t.Fatalf("creates %v", gs.creates)
+	}
+	if len(gs.queries) != 1 || gs.queries[0] != `org:mctlhq is:issue label:"spike:scout"` {
+		t.Fatalf("queries %v", gs.queries)
+	}
+	if len(stub.bodies) == 0 || stub.bodies[0]["text"] != "Created mctl-api#9" {
+		t.Fatalf("answer %v", stub.bodies)
 	}
 }
 
