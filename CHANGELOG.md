@@ -1,5 +1,19 @@
 # Changelog
 
+## [2.7.0](https://github.com/mctlhq/mctl-agent/compare/2.6.0...2.7.0) (2026-10-26)
+
+
+### Features
+
+* **agents:** issue-185-feat-telegram-one-tap-create-spike-butto ([ca4d3b1](https://github.com/mctlhq/mctl-agent/commit/ca4d3b12d426125add3f7c66f6cdd20ea4d4f982))
+* **agents:** issue-185-feat-telegram-one-tap-create-spike-butto ([ffaa798](https://github.com/mctlhq/mctl-agent/commit/ffaa79860bcec1e9e45896331e16b56f6f39257c))
+
+
+### Bug Fixes
+
+* **scoutspike:** match Python dedupe key and close race windows ([71e8f54](https://github.com/mctlhq/mctl-agent/commit/71e8f542fddfef6b93b9b2bba61514374aa8f119))
+* **scoutspike:** match Python dedupe key and close race windows ([770c4ab](https://github.com/mctlhq/mctl-agent/commit/770c4abd96d94ded8071fd223b0660ea5e1c7c67))
+
 ## [2.6.0](https://github.com/mctlhq/mctl-agent/compare/2.5.2...2.6.0) (2026-10-25)
 
 
