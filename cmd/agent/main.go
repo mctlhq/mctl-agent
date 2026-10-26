@@ -39,6 +39,7 @@ import (
 	"github.com/mctlhq/mctl-agent/internal/monitor"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
+	"github.com/mctlhq/mctl-agent/internal/scoutspike"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/skill/builtin"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
@@ -78,7 +79,16 @@ func main() {
 	// Initialize components.
 	mctlClient := mctlclient.NewClient(cfg.MctlAPIURL, cfg.MctlAPIToken)
 	githubFixer := fixer.NewGitHubFixer(cfg.GitHubToken, cfg.GitHubTokenFile, cfg.GitHubOwner, cfg.GitHubRepo, store, cfg.DryRun, cfg.MaxPRPerHour, cfg.MaxPRPerDay, gitopspath.NewAllowlist(cfg.GitOpsPathAllowlist))
-	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.TelegramTenantChatIDs)
+	if cfg.ScoutSpikeConfigErr != nil {
+		slog.Error("invalid scout spike config", "error", cfg.ScoutSpikeConfigErr)
+		os.Exit(1)
+	}
+	telegram := notify.NewTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, cfg.TelegramTenantChatIDs).
+		WithOwnerUserID(cfg.TelegramOwnerUserID)
+	scoutSpikes := scoutspike.NewService(githubFixer, cfg.ScoutSpikeRepos)
+	slog.Info("scout spike callbacks",
+		"scout_spike_enabled", scoutSpikes.Enabled() && telegram.OwnerConfigured(),
+		"scout_spike_repos", scoutSpikes.RepoCount())
 
 	// Initialize skill registry.
 	registry := skill.NewRegistry()
@@ -169,6 +179,7 @@ func main() {
 		AlertWebhookToken:     cfg.AlertWebhookToken,
 		OnAlert:               alertHandler.ServeHTTP,
 		BotStart:              botStartForwarder,
+		ScoutSpikes:           scoutSpikes,
 	}
 	if ghWebhookHandler != nil {
 		routerOpts.OnGitHubWebhook = ghWebhookHandler.ServeHTTP

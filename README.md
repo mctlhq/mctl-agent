@@ -122,6 +122,8 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 | `GITHUB_REPO` | GitOps repository name | `mctl-gitops` | No |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token | — | No |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID | — | No |
+| `TELEGRAM_OWNER_USER_ID` | Telegram user id allowed to press scout `Create spike N` buttons; unset refuses every press | — | No |
+| `SCOUT_SPIKE_REPOS` | Comma-separated `mctlhq` repo allowlist for scout spike issues; empty refuses every press | — | No |
 | `TELEGRAM_WEBHOOK_SECRET` | Telegram `secret_token` for inbound webhook | — | Prod |
 | `AGENT_API_TOKEN` | Bearer token for tickets/skills/MCP | — | Prod |
 | `ALERTMANAGER_WEBHOOK_TOKEN` | Bearer token for `POST /api/v1/alerts` | — | Prod |

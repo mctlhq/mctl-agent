@@ -15,8 +15,11 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -76,6 +79,16 @@ type Config struct {
 	// same secret mctl-telegram reads as BOT_START_BRIDGE_TOKEN. Env:
 	// BOT_START_FORWARD_TOKEN. Never log it.
 	BotStartForwardToken string
+
+	// TelegramOwnerUserID is the one Telegram user id allowed to press
+	// scout:create buttons (TELEGRAM_OWNER_USER_ID). 0 = feature refused.
+	TelegramOwnerUserID int64
+	// ScoutSpikeRepos is the mctlhq repo allowlist for scout spike issues
+	// (SCOUT_SPIKE_REPOS, comma separated). Empty = feature refused.
+	ScoutSpikeRepos []string
+	// ScoutSpikeConfigErr is set when either value above is malformed; the
+	// caller must refuse to start.
+	ScoutSpikeConfigErr error
 }
 
 func Load() Config {
@@ -240,7 +253,13 @@ func Load() Config {
 		mctlAPIToken = githubToken
 	}
 
+	ownerID, ownerErr := ParseOwnerUserID(os.Getenv("TELEGRAM_OWNER_USER_ID"))
+	spikeRepos, spikeErr := ParseScoutSpikeRepos(os.Getenv("SCOUT_SPIKE_REPOS"))
+
 	return Config{
+		TelegramOwnerUserID:         ownerID,
+		ScoutSpikeRepos:             spikeRepos,
+		ScoutSpikeConfigErr:         errors.Join(ownerErr, spikeErr),
 		Port:                        envOr("PORT", "8081"),
 		MctlAPIURL:                  envOr("MCTL_API_URL", "http://mctl-api.mctl-api.svc:8080"),
 		MctlAPIToken:                mctlAPIToken,
@@ -281,6 +300,38 @@ func Load() Config {
 		BotStartForwardToken:        strings.TrimSpace(os.Getenv("BOT_START_FORWARD_TOKEN")),
 	}
 }
+
+// ParseOwnerUserID parses TELEGRAM_OWNER_USER_ID. Empty means unset (0).
+func ParseOwnerUserID(v string) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	id, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || id <= 0 {
+		return 0, fmt.Errorf("TELEGRAM_OWNER_USER_ID must be a positive integer")
+	}
+	return id, nil
+}
+
+// ParseScoutSpikeRepos parses SCOUT_SPIKE_REPOS: comma-separated repo names,
+// each matching [A-Za-z0-9._-]+ and not "." or "..". Empty means disabled.
+func ParseScoutSpikeRepos(v string) ([]string, error) {
+	var out []string
+	for _, r := range strings.Split(v, ",") {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		if r == "." || r == ".." || !scoutRepoRe.MatchString(r) {
+			return nil, fmt.Errorf("SCOUT_SPIKE_REPOS has an invalid repo name")
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+var scoutRepoRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {

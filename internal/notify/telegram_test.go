@@ -214,3 +214,22 @@ func TestChatIDForRouting(t *testing.T) {
 		t.Errorf("chatIDFor(admins) with nil map = %q; want default-only", got)
 	}
 }
+
+func TestCallbackQueryUnmarshalAndOwner(t *testing.T) {
+	raw := `{"update_id":1,"callback_query":{"id":"c","from":{"id":7},"data":"scout:create:2","message":{"message_id":5,"date":0,"chat":{"id":9,"type":"private"}}}}`
+	var u TelegramUpdate
+	if err := json.Unmarshal([]byte(raw), &u); err != nil {
+		t.Fatal(err)
+	}
+	cq := u.CallbackQuery
+	if cq == nil || cq.From.ID != 7 || cq.Data != "scout:create:2" || cq.Message.Date != 0 || cq.Message.Chat.ID != 9 {
+		t.Fatalf("%+v", cq)
+	}
+	if NewTelegram("t", "1", nil).OwnerUserAllowed(7) {
+		t.Error("unset owner must allow nobody")
+	}
+	tg := NewTelegram("t", "1", nil).WithOwnerUserID(7)
+	if !tg.OwnerUserAllowed(7) || tg.OwnerUserAllowed(8) {
+		t.Error("owner match must be exact")
+	}
+}
