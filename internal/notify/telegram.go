@@ -38,6 +38,7 @@ type Telegram struct {
 	tenantChatIDs map[string]string // per-tenant routing (admins/labs/ovk → chat_id)
 	httpClient    *http.Client
 	apiBase       string
+	ownerUserID   int64 // Telegram user id allowed to press scout callbacks; 0 = none
 
 	// pending holds the header of a ticket announced with HoldNewTicket and
 	// not yet sent, keyed by ticket ID. The next message about that ticket
@@ -355,6 +356,107 @@ type TelegramUpdate struct {
 		} `json:"chat"`
 		Entities []TelegramMessageEntity `json:"entities"`
 	} `json:"message"`
+	CallbackQuery *TelegramCallbackQuery `json:"callback_query"`
+}
+
+// TelegramCallbackQuery is an inline-keyboard button press. Message is the
+// bot's own message the button sits on; Date == 0 marks an inaccessible one.
+type TelegramCallbackQuery struct {
+	ID   string `json:"id"`
+	From struct {
+		ID int64 `json:"id"`
+	} `json:"from"`
+	Data    string                   `json:"data"`
+	Message *TelegramCallbackMessage `json:"message"`
+}
+
+// TelegramCallbackMessage is the message a callback query was pressed on.
+type TelegramCallbackMessage struct {
+	MessageID int64 `json:"message_id"`
+	Date      int64 `json:"date"`
+	Chat      struct {
+		ID   int64  `json:"id"`
+		Type string `json:"type"`
+	} `json:"chat"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup"`
+}
+
+// InlineKeyboardMarkup is a Bot API inline keyboard.
+type InlineKeyboardMarkup struct {
+	InlineKeyboard [][]InlineKeyboardButton `json:"inline_keyboard"`
+}
+
+// InlineKeyboardButton is one inline keyboard button.
+type InlineKeyboardButton struct {
+	Text         string `json:"text"`
+	URL          string `json:"url,omitempty"`
+	CallbackData string `json:"callback_data,omitempty"`
+}
+
+// WithOwnerUserID sets the Telegram user id allowed to press scout callbacks.
+func (tg *Telegram) WithOwnerUserID(id int64) *Telegram {
+	tg.ownerUserID = id
+	return tg
+}
+
+// OwnerUserAllowed reports whether userID is the configured owner. There is
+// no open mode: an unset owner allows nobody.
+func (tg *Telegram) OwnerUserAllowed(userID int64) bool {
+	return tg != nil && tg.ownerUserID != 0 && userID == tg.ownerUserID
+}
+
+// OwnerConfigured reports whether an owner user id is set.
+func (tg *Telegram) OwnerConfigured() bool {
+	return tg != nil && tg.ownerUserID != 0
+}
+
+// callAPI posts a JSON payload to a Bot API method. It is a no-op without a
+// bot token. Errors never contain the token or the response body.
+func (tg *Telegram) callAPI(ctx context.Context, method string, payload any) error {
+	if tg == nil || tg.botToken == "" {
+		return nil
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("telegram %s: marshal: %w", method, err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("%s/bot%s/%s", tg.apiBase, tg.botToken, method), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("telegram %s: request failed", method)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tg.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("telegram %s: request failed", method)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("telegram %s returned %d", method, resp.StatusCode)
+	}
+	return nil
+}
+
+// AnswerCallbackQuery answers a callback query; empty text just stops the
+// client spinner.
+func (tg *Telegram) AnswerCallbackQuery(ctx context.Context, id, text string) error {
+	if r := []rune(text); len(r) > 200 {
+		text = string(r[:200])
+	}
+	return tg.callAPI(ctx, "answerCallbackQuery", map[string]any{
+		"callback_query_id": id,
+		"text":              text,
+	})
+}
+
+// EditMessageReplyMarkup replaces the inline keyboard of a message.
+func (tg *Telegram) EditMessageReplyMarkup(ctx context.Context, chatID, messageID int64, markup InlineKeyboardMarkup) error {
+	return tg.callAPI(ctx, "editMessageReplyMarkup", map[string]any{
+		"chat_id":      chatID,
+		"message_id":   messageID,
+		"reply_markup": markup,
+	})
 }
 
 // TelegramMessageEntity is one entity of a message. Offset and Length are

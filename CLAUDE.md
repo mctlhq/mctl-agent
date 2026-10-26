@@ -64,7 +64,7 @@ The agent uses a modular **skills architecture**:
 
 ## API Endpoints
 - `POST /api/v1/alerts` — AlertManager webhook (`ALERTMANAGER_WEBHOOK_TOKEN` bearer when set)
-- `POST /api/v1/telegram` — Telegram bot webhook (`TELEGRAM_WEBHOOK_SECRET` header when set); a private `/start` is consumed before the chat allowlist and forwarded to mctl-telegram by `internal/botstart` (`BOT_START_FORWARD_URL` + `BOT_START_FORWARD_TOKEN`)
+- `POST /api/v1/telegram` — Telegram bot webhook (`TELEGRAM_WEBHOOK_SECRET` header when set); a private `/start` is consumed before the chat allowlist and forwarded to mctl-telegram by `internal/botstart` (`BOT_START_FORWARD_URL` + `BOT_START_FORWARD_TOKEN`); a `callback_query` `scout:create:N` creates a spike issue via `internal/scoutspike` and requires the webhook secret, a chat allowlist, `TELEGRAM_OWNER_USER_ID` and `SCOUT_SPIKE_REPOS` (fail closed when any is unset)
 - `GET /api/v1/tickets` — List tickets (`AGENT_API_TOKEN` bearer when set)
 - `GET /api/v1/skills` — List all skills (bearer when set)
 - `GET /api/v1/skills/{name}/metrics` — Skill metrics (bearer when set)

@@ -17,6 +17,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -33,6 +34,7 @@ import (
 	_ "github.com/mctlhq/mctl-agent/internal/metrics"
 	"github.com/mctlhq/mctl-agent/internal/notify"
 	"github.com/mctlhq/mctl-agent/internal/pipeline"
+	"github.com/mctlhq/mctl-agent/internal/scoutspike"
 	"github.com/mctlhq/mctl-agent/internal/skill/remote"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -65,6 +67,8 @@ type Options struct {
 	// BotStart forwards a private /start to mctl-telegram's bot-start
 	// bridge. Nil (or disabled) still consumes the /start.
 	BotStart *botstart.Forwarder
+	// ScoutSpikes handles scout:create callbacks. Nil refuses them.
+	ScoutSpikes *scoutspike.Service
 }
 
 // NewRouter creates the HTTP router.
@@ -170,6 +174,12 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 		var update notify.TelegramUpdate
 		if err := json.Unmarshal(body, &update); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		if update.CallbackQuery != nil {
+			handleTelegramCallback(r.Context(), update.CallbackQuery, opts)
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 
@@ -434,5 +444,85 @@ func remoteSkillListHandler(mgr *remote.Manager) http.HandlerFunc {
 			"items": regs,
 			"count": len(regs),
 		})
+	}
+}
+
+// handleTelegramCallback handles an inline-button press. Refusals log only a
+// reason and chat type, never chat or user ids. A press from a chat or user
+// that is not allowed gets no Telegram call at all.
+func handleTelegramCallback(ctx context.Context, cq *notify.TelegramCallbackQuery, opts Options) {
+	refuse := func(reason string, chatType string) {
+		slog.Warn("telegram callback refused", "reason", reason, "chat_type", chatType)
+	}
+	if opts.TelegramWebhookSecret == "" || !opts.Telegram.HasChatAllowlist() || !opts.Telegram.OwnerConfigured() {
+		refuse("scout callbacks not configured", "")
+		return
+	}
+	if cq.Message == nil {
+		refuse("no message", "")
+		return
+	}
+	chatType := cq.Message.Chat.Type
+	if !opts.Telegram.CommandChatAllowed(cq.Message.Chat.ID) {
+		refuse("chat not allowlisted", chatType)
+		return
+	}
+	if !opts.Telegram.OwnerUserAllowed(cq.From.ID) {
+		refuse("user not owner", chatType)
+		return
+	}
+
+	n, ok := scoutspike.ParseCallbackData(cq.Data)
+	if !ok {
+		// Stop the client spinner; create nothing.
+		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "")
+		return
+	}
+	if !opts.ScoutSpikes.Enabled() {
+		refuse("scout spikes disabled", chatType)
+		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "")
+		return
+	}
+
+	msg := cq.Message
+	if msg.Date == 0 || msg.ReplyMarkup == nil {
+		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "Failed: message unavailable")
+		return
+	}
+
+	cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	res, err := opts.ScoutSpikes.Create(cctx, *msg.ReplyMarkup, n)
+	if err != nil {
+		reason := "create failed"
+		switch {
+		case errors.Is(err, scoutspike.ErrDraftNotFound),
+			errors.Is(err, scoutspike.ErrTargetNotAllowed),
+			errors.Is(err, scoutspike.ErrDraftRejected),
+			errors.Is(err, scoutspike.ErrRepoNotAccessible),
+			errors.Is(err, scoutspike.ErrSearchFailed),
+			errors.Is(err, scoutspike.ErrCreateFailed):
+			reason = err.Error()
+		}
+		slog.Warn("scout spike create failed", "reason", reason)
+		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "Failed: "+reason)
+		return
+	}
+
+	text := fmt.Sprintf("Created %s#%d", res.Repo, res.Number)
+	if res.Existed {
+		text = fmt.Sprintf("Already exists: %s#%d", res.Repo, res.Number)
+	}
+	if err := opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, text); err != nil {
+		slog.Warn("scout spike answer failed", "error", err)
+	}
+
+	kb := make([][]notify.InlineKeyboardButton, len(msg.ReplyMarkup.InlineKeyboard))
+	copy(kb, msg.ReplyMarkup.InlineKeyboard)
+	if res.Row >= 0 && res.Row < len(kb) {
+		kb[res.Row] = []notify.InlineKeyboardButton{{Text: fmt.Sprintf("#%d ->", res.Number), URL: res.HTMLURL}}
+	}
+	if err := opts.Telegram.EditMessageReplyMarkup(ctx, msg.Chat.ID, msg.MessageID, notify.InlineKeyboardMarkup{InlineKeyboard: kb}); err != nil {
+		slog.Warn("scout spike keyboard edit failed", "error", err)
 	}
 }
