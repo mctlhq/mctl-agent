@@ -267,8 +267,8 @@ func (f *GitHubFixer) GetFileContent(ctx context.Context, path, ref string) (str
 
 // RepoAccessible reports the HTTP status of GET /repos/{owner}/{repo} so a
 // caller can refuse to search a repo the token cannot see into.
-func (f *GitHubFixer) RepoAccessible(ctx context.Context, repo string) (int, error) {
-	_, resp, err := f.client.Repositories.Get(ctx, f.owner, repo)
+func (f *GitHubFixer) RepoAccessible(ctx context.Context, owner, repo string) (int, error) {
+	_, resp, err := f.client.Repositories.Get(ctx, owner, repo)
 	if resp != nil {
 		return resp.StatusCode, err
 	}
@@ -285,8 +285,8 @@ func (f *GitHubFixer) SearchIssues(ctx context.Context, query string, page int) 
 
 // CreateIssue opens an issue in owner/repo. It is not gated by dryRun: it
 // only runs on an explicit human request.
-func (f *GitHubFixer) CreateIssue(ctx context.Context, repo, title, body string, labels []string) (int, string, error) {
-	issue, _, err := f.client.Issues.Create(ctx, f.owner, repo, &github.IssueRequest{
+func (f *GitHubFixer) CreateIssue(ctx context.Context, owner, repo, title, body string, labels []string) (int, string, error) {
+	issue, _, err := f.client.Issues.Create(ctx, owner, repo, &github.IssueRequest{
 		Title:  &title,
 		Body:   &body,
 		Labels: &labels,

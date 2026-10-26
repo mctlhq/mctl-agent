@@ -1,10 +1,13 @@
 package notify
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -231,5 +234,31 @@ func TestCallbackQueryUnmarshalAndOwner(t *testing.T) {
 	tg := NewTelegram("t", "1", nil).WithOwnerUserID(7)
 	if !tg.OwnerUserAllowed(7) || tg.OwnerUserAllowed(8) {
 		t.Error("owner match must be exact")
+	}
+}
+
+func TestAnswerCallbackQueryTruncatesAndReportsErrors(t *testing.T) {
+	// Telegram caps callback answers at 200 characters; the cut must land on
+	// a rune boundary, and a non-200 reply must surface as an error.
+	var got map[string]any
+	status := http.StatusOK
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.WriteHeader(status)
+	}))
+	defer srv.Close()
+	tg := NewTelegram("tok", "1", nil).WithAPIBase(srv.URL)
+
+	if err := tg.AnswerCallbackQuery(context.Background(), "cq", strings.Repeat("я", 250)); err != nil {
+		t.Fatal(err)
+	}
+	text, _ := got["text"].(string)
+	if !utf8.ValidString(text) || utf8.RuneCountInString(text) != 200 || got["callback_query_id"] != "cq" {
+		t.Fatalf("text runes=%d valid=%v id=%v", utf8.RuneCountInString(text), utf8.ValidString(text), got["callback_query_id"])
+	}
+
+	status = http.StatusBadRequest
+	if err := tg.AnswerCallbackQuery(context.Background(), "cq", "x"); err == nil || strings.Contains(err.Error(), "tok") {
+		t.Fatalf("want non-200 error without the token, got %v", err)
 	}
 }
