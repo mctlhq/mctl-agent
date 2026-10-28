@@ -1,5 +1,21 @@
 # Changelog
 
+## [2.8.0](https://github.com/mctlhq/mctl-agent/compare/2.7.0...2.8.0) (2026-10-28)
+
+
+### Features
+
+* add spike issue form with intake labels ([f8c319a](https://github.com/mctlhq/mctl-agent/commit/f8c319aa298c2eac9dd6be85ef50874566945d38))
+* add spike issue form with intake labels ([dc51287](https://github.com/mctlhq/mctl-agent/commit/dc5128785fd37026e61c28a58493d576ab0c45da))
+* **agents:** issue-191-spike-can-github-copilot-server-to-serve ([a1eedf0](https://github.com/mctlhq/mctl-agent/commit/a1eedf08d3cbed69296e255ada995e19e252abe9))
+* **agents:** issue-191-spike-can-github-copilot-server-to-serve ([d92126e](https://github.com/mctlhq/mctl-agent/commit/d92126e3acaf82b971349570f78239f24e60a381))
+
+
+### Bug Fixes
+
+* **api:** log every Telegram callback press ([c6037c7](https://github.com/mctlhq/mctl-agent/commit/c6037c7794ebf5bb3bb5fa3336fe2dd23ac7abeb))
+* **api:** log every Telegram callback press ([0bfbb01](https://github.com/mctlhq/mctl-agent/commit/0bfbb013a11ea58428ace16490b1e10dd2604045))
+
 ## [2.7.0](https://github.com/mctlhq/mctl-agent/compare/2.6.0...2.7.0) (2026-10-26)
 
 
