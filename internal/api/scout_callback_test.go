@@ -277,3 +277,49 @@ func TestScoutCallbackNeverTouchesWebhookMethods(t *testing.T) {
 		t.Errorf("bad secret code %d", w.Code)
 	}
 }
+
+func TestScoutCallbackEveryPressIsLogged(t *testing.T) {
+	// A press that changes nothing on screen must still leave a log line, or
+	// it cannot be told apart from one Telegram never delivered.
+	buf := &bytes.Buffer{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	noMarkup := func() []byte {
+		var m map[string]any
+		_ = json.Unmarshal(callbackBody(t, 555, 77, "scout:create:1", goodDraft()), &m)
+		delete(m["callback_query"].(map[string]any)["message"].(map[string]any), "reply_markup")
+		b, _ := json.Marshal(m)
+		return b
+	}
+	cases := map[string]struct {
+		body []byte
+		want string
+	}{
+		"unrecognised data": {callbackBody(t, 555, 77, "garbage", goodDraft()), `reason="unrecognised callback data"`},
+		"no keyboard":       {noMarkup(), `reason="message unavailable"`},
+		"created":           {callbackBody(t, 555, 77, "scout:create:1", goodDraft()), `msg="scout spike created" repo=mctl-api number=9`},
+	}
+	for name, c := range cases {
+		buf.Reset()
+		h, _ := scoutSetup(t, 77, "s", &scoutGH{})
+		post(h, "s", c.body)
+		logs := buf.String()
+		if !strings.Contains(logs, `msg="telegram callback received"`) {
+			t.Errorf("%s: no arrival line: %s", name, logs)
+		}
+		if !strings.Contains(logs, c.want) {
+			t.Errorf("%s: want %s in %s", name, c.want, logs)
+		}
+	}
+}
+
+func TestCallbackDataForLogIsBounded(t *testing.T) {
+	if got := callbackDataForLog("scout:create:1"); got != "scout:create:1" {
+		t.Errorf("short data changed: %q", got)
+	}
+	if got := callbackDataForLog(strings.Repeat("x", 200)); len(got) != 64+len("...(truncated)") {
+		t.Errorf("long data not bounded: %d", len(got))
+	}
+}

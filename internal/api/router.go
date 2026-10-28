@@ -450,10 +450,31 @@ func remoteSkillListHandler(mgr *remote.Manager) http.HandlerFunc {
 // handleTelegramCallback handles an inline-button press. Refusals log only a
 // reason and chat type, never chat or user ids. A press from a chat or user
 // that is not allowed gets no Telegram call at all.
+// callbackDataForLog bounds callback data for logging. The Bot API caps it at
+// 64 bytes, so anything longer did not come from a real button.
+func callbackDataForLog(data string) string {
+	const max = 64
+	if len(data) > max {
+		return data[:max] + "...(truncated)"
+	}
+	return data
+}
+
+// answerCallback stops the client spinner and logs a failed answer, which
+// would otherwise leave the press looking like it did nothing.
+func answerCallback(ctx context.Context, opts Options, id, text string) {
+	if err := opts.Telegram.AnswerCallbackQuery(ctx, id, text); err != nil {
+		slog.Warn("telegram callback answer failed", "error", err)
+	}
+}
+
 func handleTelegramCallback(ctx context.Context, cq *notify.TelegramCallbackQuery, opts Options) {
 	refuse := func(reason string, chatType string) {
 		slog.Warn("telegram callback refused", "reason", reason, "chat_type", chatType)
 	}
+	// Every press is logged on arrival, so a tap that produces no visible
+	// result can be told apart from one Telegram never delivered.
+	slog.Info("telegram callback received", "data", callbackDataForLog(cq.Data), "has_message", cq.Message != nil)
 	if opts.TelegramWebhookSecret == "" || !opts.Telegram.HasChatAllowlist() || !opts.Telegram.OwnerConfigured() {
 		refuse("scout callbacks not configured", "")
 		return
@@ -474,19 +495,21 @@ func handleTelegramCallback(ctx context.Context, cq *notify.TelegramCallbackQuer
 
 	n, ok := scoutspike.ParseCallbackData(cq.Data)
 	if !ok {
+		refuse("unrecognised callback data", chatType)
 		// Stop the client spinner; create nothing.
-		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "")
+		answerCallback(ctx, opts, cq.ID, "")
 		return
 	}
 	if !opts.ScoutSpikes.Enabled() {
 		refuse("scout spikes disabled", chatType)
-		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "")
+		answerCallback(ctx, opts, cq.ID, "")
 		return
 	}
 
 	msg := cq.Message
 	if msg.Date == 0 || msg.ReplyMarkup == nil {
-		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "Failed: message unavailable")
+		refuse("message unavailable", chatType)
+		answerCallback(ctx, opts, cq.ID, "Failed: message unavailable")
 		return
 	}
 
@@ -505,10 +528,11 @@ func handleTelegramCallback(ctx context.Context, cq *notify.TelegramCallbackQuer
 			reason = err.Error()
 		}
 		slog.Warn("scout spike create failed", "reason", reason)
-		_ = opts.Telegram.AnswerCallbackQuery(ctx, cq.ID, "Failed: "+reason)
+		answerCallback(ctx, opts, cq.ID, "Failed: "+reason)
 		return
 	}
 
+	slog.Info("scout spike created", "repo", res.Repo, "number", res.Number, "existed", res.Existed)
 	text := fmt.Sprintf("Created %s#%d", res.Repo, res.Number)
 	if res.Existed {
 		text = fmt.Sprintf("Already exists: %s#%d", res.Repo, res.Number)
