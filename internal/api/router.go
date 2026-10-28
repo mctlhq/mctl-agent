@@ -447,9 +447,6 @@ func remoteSkillListHandler(mgr *remote.Manager) http.HandlerFunc {
 	}
 }
 
-// handleTelegramCallback handles an inline-button press. Refusals log only a
-// reason and chat type, never chat or user ids. A press from a chat or user
-// that is not allowed gets no Telegram call at all.
 // callbackDataForLog bounds callback data for logging. The Bot API caps it at
 // 64 bytes, so anything longer did not come from a real button.
 func callbackDataForLog(data string) string {
@@ -468,6 +465,9 @@ func answerCallback(ctx context.Context, opts Options, id, text string) {
 	}
 }
 
+// handleTelegramCallback handles an inline-button press. Refusals log only a
+// reason and chat type, never chat or user ids. A press from a chat or user
+// that is not allowed gets no Telegram call at all.
 func handleTelegramCallback(ctx context.Context, cq *notify.TelegramCallbackQuery, opts Options) {
 	refuse := func(reason string, chatType string) {
 		slog.Warn("telegram callback refused", "reason", reason, "chat_type", chatType)
