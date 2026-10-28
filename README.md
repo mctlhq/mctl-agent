@@ -117,7 +117,7 @@ The image uses a non-root user (`app`, uid 1000) and persists the SQLite databas
 | `MCTL_API_URL` | mctl API endpoint | `http://mctl-api.mctl-api.svc:8080` | No |
 | `MCTL_API_TOKEN` | API authentication token | — | Yes |
 | `ANTHROPIC_API_KEY` | Claude API key | — | Yes |
-| `GITHUB_TOKEN` | GitHub token for PR creation | — | Yes |
+| `GITHUB_TOKEN` | GitHub token for PR creation (see [Copilot S2S spike](docs/spikes/copilot-s2s-auth.md)) | — | Yes |
 | `GITHUB_OWNER` | GitHub organization | `mctlhq` | No |
 | `GITHUB_REPO` | GitOps repository name | `mctl-gitops` | No |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token | — | No |
