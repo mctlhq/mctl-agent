@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.9.0](https://github.com/mctlhq/mctl-agent/compare/2.8.0...2.9.0) (2026-10-30)
+
+
+### Features
+
+* **scoutspike:** add the spike scaffold to drafts that omit it ([0559660](https://github.com/mctlhq/mctl-agent/commit/05596604c46c317edc462d31c66ac8359a3853fe))
+* **scoutspike:** add the spike scaffold to drafts that omit it ([41e5f3d](https://github.com/mctlhq/mctl-agent/commit/41e5f3daec9d47f881d3bbe67bd499463cff3f98))
+
 ## [2.8.0](https://github.com/mctlhq/mctl-agent/compare/2.7.0...2.8.0) (2026-10-28)
 
 
