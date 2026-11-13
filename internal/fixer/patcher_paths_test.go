@@ -266,6 +266,14 @@ autoscaling:
 		"current value differs": {YAMLField: "autoscaling.maxReplicas", CurrentValue: "30", SuggestedValue: "10"},
 		"leaf-only field name":  {YAMLField: "maxReplicas", CurrentValue: "5", SuggestedValue: "10"},
 		"missing current value": {YAMLField: "autoscaling.maxReplicas", SuggestedValue: "10"},
+		"suggested value adds a line": {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5",
+			SuggestedValue: "10\nhostNetwork: true"},
+		"suggested value carriage return":  {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10\rx"},
+		"suggested value nests a mapping":  {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "a: b"},
+		"suggested value starts a comment": {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10 # x"},
+		"suggested value is a flow map":    {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "{a: 1}"},
+		"suggested value is an alias":      {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "*ref"},
+		"suggested value has padding":      {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: `" 10"`},
 	}
 	for name, d := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -277,6 +285,24 @@ autoscaling:
 				t.Errorf("content changed on error")
 			}
 		})
+	}
+}
+
+func TestGenerateFromDiagnosisQuotedValue(t *testing.T) {
+	content := `image:
+  tag: "1.4.0"`
+	ok := &DiagnosisCompat{YAMLField: "image.tag", CurrentValue: "1.4.0", SuggestedValue: "1.4.1"}
+	out, _, err := GenerateFromDiagnosis(content, ok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := changedLines(t, content, out); len(got) != 1 || got[0] != `  tag: "1.4.0" ->   tag: "1.4.1"` {
+		t.Fatalf("changed lines: %q", got)
+	}
+	// A quote inside the value would close the scalar early.
+	bad := &DiagnosisCompat{YAMLField: "image.tag", CurrentValue: "1.4.0", SuggestedValue: `1.4.1" # x`}
+	if out, _, err := GenerateFromDiagnosis(content, bad); err == nil {
+		t.Fatalf("expected an error, got:\n%s", out)
 	}
 }
 

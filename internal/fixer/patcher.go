@@ -164,8 +164,12 @@ func GenerateFromDiagnosis(content string, diag *DiagnosisCompat) (string, strin
 	if sc.value != unquote(diag.CurrentValue) {
 		return content, "", fmt.Errorf("field %s holds %q, not the diagnosed current value %q", diag.YAMLField, sc.value, diag.CurrentValue)
 	}
-	lines[idx] = sc.render(unquote(diag.SuggestedValue))
-	summary := fmt.Sprintf("Update %s from %s to %s", diag.YAMLField, sc.value, unquote(diag.SuggestedValue))
+	suggested := unquote(diag.SuggestedValue)
+	if err := checkPlainValue(suggested, sc.quote); err != nil {
+		return content, "", fmt.Errorf("suggested value for %s: %w", diag.YAMLField, err)
+	}
+	lines[idx] = sc.render(suggested)
+	summary := fmt.Sprintf("Update %s from %s to %s", diag.YAMLField, sc.value, suggested)
 	return strings.Join(lines, "\n"), summary, nil
 }
 
@@ -297,6 +301,33 @@ func parseScalarLine(line string) scalarLine {
 
 func (s scalarLine) render(value string) string {
 	return s.prefix + " " + s.quote + value + s.quote + s.comment
+}
+
+// checkPlainValue rejects a value that, spliced into a scalar line with the
+// given quoting, could be read as anything other than that one scalar: extra
+// lines, a comment, a nested mapping, a flow collection, an anchor or alias,
+// or a tag. A diagnosis value is LLM output built partly from pod logs, so it
+// is untrusted, and refusing is safer than escaping it.
+func checkPlainValue(v, quote string) error {
+	if v == "" || strings.TrimSpace(v) != v {
+		return fmt.Errorf("%q is empty or has surrounding whitespace", v)
+	}
+	for _, r := range v {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("%q contains a control character", v)
+		}
+	}
+	if quote != "" {
+		if strings.Contains(v, quote) || (quote == `"` && strings.Contains(v, `\`)) {
+			return fmt.Errorf("%q cannot be placed inside %s quotes as is", v, quote)
+		}
+		return nil
+	}
+	if strings.ContainsAny(v[:1], "-?:,[]{}#&*!|>'\"%@`") ||
+		strings.Contains(v, ": ") || strings.Contains(v, " #") || strings.HasSuffix(v, ":") {
+		return fmt.Errorf("%q would not stay a plain YAML scalar", v)
+	}
+	return nil
 }
 
 func unquote(v string) string {
