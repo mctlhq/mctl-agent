@@ -275,8 +275,8 @@ autoscaling:
 		"suggested value is an alias":      {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "*ref"},
 		"suggested value has padding":      {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: `" 10"`},
 		"suggested value has NEL":          {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10\u0085hostNetwork:\u0085true"},
-		"suggested value has LS":           {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10 hostNetwork: true"},
-		"suggested value has PS":           {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10 x"},
+		"suggested value has LS":           {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10\u2028hostNetwork:\u2028true"},
+		"suggested value has PS":           {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10\u2029x"},
 		"suggested value equals current":   {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: `"5"`},
 	}
 	for name, d := range cases {
