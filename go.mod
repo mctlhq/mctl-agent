@@ -1,6 +1,6 @@
 module github.com/mctlhq/mctl-agent
 
-go 1.26.10
+go 1.26.11
 
 require (
 	github.com/go-chi/chi/v5 v5.3.2
