@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.9.1](https://github.com/mctlhq/mctl-agent/compare/2.9.0...2.9.1) (2026-11-13)
+
+
+### Bug Fixes
+
+* **fixer:** patch only the YAML path a fix names ([f6674a3](https://github.com/mctlhq/mctl-agent/commit/f6674a3f2b8ae824214d166cc5a0089f1ad5db61))
+* **fixer:** patch only the YAML path a fix names ([8f91420](https://github.com/mctlhq/mctl-agent/commit/8f91420d60f75e03a13e66ba228ec32566e66f4b))
+* **fixer:** refuse diagnosis values that would not stay one scalar ([ca6beca](https://github.com/mctlhq/mctl-agent/commit/ca6becafe46944b52f555b998559f7afbcecd047))
+* **fixer:** refuse no-op diagnoses and Unicode line breaks ([42cce34](https://github.com/mctlhq/mctl-agent/commit/42cce3453dd2a43559ff63f491b801cfd0903d95))
+
 ## [2.9.0](https://github.com/mctlhq/mctl-agent/compare/2.8.0...2.9.0) (2026-10-30)
 
 
