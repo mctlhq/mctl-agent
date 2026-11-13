@@ -18,10 +18,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -420,15 +422,9 @@ func (tg *Telegram) callAPI(ctx context.Context, method string, payload any) err
 	if err != nil {
 		return fmt.Errorf("telegram %s: marshal: %w", method, err)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/bot%s/%s", tg.apiBase, tg.botToken, method), bytes.NewReader(body))
+	resp, err := tg.post(ctx, method, body)
 	if err != nil {
-		return fmt.Errorf("telegram %s: request failed", method)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := tg.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("telegram %s: request failed", method)
+		return err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
@@ -549,20 +545,13 @@ func (tg *Telegram) SetWebhook(ctx context.Context, publicBaseURL, secretToken s
 	if err != nil {
 		return fmt.Errorf("telegram setWebhook: encode: %w", err)
 	}
-	url := fmt.Sprintf("%s/bot%s/setWebhook", tg.apiBase, tg.botToken)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	resp, err := tg.post(ctx, "setWebhook", body)
 	if err != nil {
-		return fmt.Errorf("telegram setWebhook: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := tg.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("telegram setWebhook: %w", err)
+		return err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telegram setWebhook returned %d: %s", resp.StatusCode, string(respBody))
+		return tg.statusError("setWebhook", resp)
 	}
 	return nil
 }
@@ -593,20 +582,72 @@ func (tg *Telegram) doSendTo(chatID, text string) error {
 	}
 	body, _ := json.Marshal(payload)
 
-	url := fmt.Sprintf("%s/bot%s/sendMessage", tg.apiBase, tg.botToken)
-	resp, err := tg.httpClient.Post(url, "application/json", bytes.NewReader(body))
+	resp, err := tg.post(context.Background(), "sendMessage", body)
 	if err != nil {
-		return fmt.Errorf("telegram send: %w", err)
+		return err
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("telegram returned %d: %s", resp.StatusCode, string(respBody))
+		return tg.statusError("sendMessage", resp)
 	}
 
 	return nil
 }
+
+// post sends a JSON body to a Bot API method. It is the only place that puts
+// the bot token into a URL, and every error it returns has been through
+// redactErr: net/http reports transport and URL-parse failures as a
+// *url.Error whose text is the full request URL, token included, and that
+// text used to reach the startup log whenever setWebhook timed out.
+func (tg *Telegram) post(ctx context.Context, method string, body []byte) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		tg.apiBase+"/bot"+tg.botToken+"/"+method, bytes.NewReader(body))
+	if err != nil {
+		return nil, tg.redactErr(method, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := tg.httpClient.Do(req)
+	if err != nil {
+		return nil, tg.redactErr(method, err)
+	}
+	return resp, nil
+}
+
+// statusError reports a non-200 reply with at most 512 bytes of its body,
+// redacted like any other error.
+func (tg *Telegram) statusError(method string, resp *http.Response) error {
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+	return &redactedError{msg: tg.redact(fmt.Sprintf("telegram %s returned %d: %s", method, resp.StatusCode, b))}
+}
+
+// redactErr drops the URL from a *url.Error and scrubs the token from what is
+// left, keeping the cause reachable for errors.Is (context deadline, etc.).
+func (tg *Telegram) redactErr(method string, err error) error {
+	cause := err
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		cause = ue.Err
+	}
+	return &redactedError{msg: tg.redact(fmt.Sprintf("telegram %s: %v", method, cause)), cause: cause}
+}
+
+func (tg *Telegram) redact(s string) string {
+	if tg.botToken == "" {
+		return s
+	}
+	return strings.ReplaceAll(s, tg.botToken, "<redacted>")
+}
+
+// redactedError carries a message that is safe to log. Unwrap exposes only
+// the cause below the *url.Error, never the URL itself.
+type redactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+func (e *redactedError) Unwrap() error { return e.cause }
 
 func severityIcon(s string) string {
 	switch s {
