@@ -16,8 +16,10 @@ package fixer
 
 import (
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // DiagnosisCompat provides the fields needed by GenerateFromDiagnosis,
@@ -99,37 +101,16 @@ func CandidatePaths(tenant string, services []string) []string {
 	return paths
 }
 
-// GenerateMemoryBump creates a patch that increases memory limit by 50%.
+// GenerateMemoryBump creates a patch that increases the chart-level memory
+// limit (top-level resources.limits.memory) by 50%.
+//
+// Only that one scalar is rewritten. Values files also carry
+// resources.requests.memory, sidecar resources under extraContainers, and
+// resources of containers embedded in extraObjects; matching every
+// "memory:" line used to raise all of them under a summary that named only
+// the last one (mctl-gitops#2067, #2129, #2463).
 func GenerateMemoryBump(content string) (string, string, error) {
-	// Find memory limit line and bump by 50%.
-	lines := strings.Split(content, "\n")
-	var modified []string
-	var summary string
-
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "memory:") && strings.Contains(content, "limits:") {
-			// Extract current value.
-			parts := strings.SplitN(trimmed, ":", 2)
-			if len(parts) == 2 {
-				current := strings.TrimSpace(parts[1])
-				newVal := bumpMemory(current)
-				if newVal != current {
-					indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-					modified = append(modified, indent+"memory: "+newVal)
-					summary = fmt.Sprintf("Bump memory limit from %s to %s", current, newVal)
-					continue
-				}
-			}
-		}
-		modified = append(modified, line)
-	}
-
-	if summary == "" {
-		return content, "", fmt.Errorf("could not find memory limit to bump")
-	}
-
-	return strings.Join(modified, "\n"), summary, nil
+	return bumpChartLimit(content, "memory", bumpMemory, "memory limit")
 }
 
 // GenerateImageRollback creates a patch that rolls back the chart-level
@@ -159,60 +140,206 @@ func GenerateImageRollback(content, previousTag string) (string, string, error) 
 }
 
 // GenerateFromDiagnosis applies a Claude-suggested fix.
+//
+// diag.YAMLField is a dotted path from the document root
+// ("resources.limits.memory", "autoscaling.maxReplicas"). Only the scalar at
+// that path is rewritten, and only when it currently holds
+// diag.CurrentValue: replacing the first textual occurrence of the value
+// anywhere in the file used to rewrite unrelated keys that happened to share
+// it (replicas: 30 instead of probe timeoutSeconds: 30).
 func GenerateFromDiagnosis(content string, diag *DiagnosisCompat) (string, string, error) {
 	if diag.YAMLField == "" || diag.SuggestedValue == "" {
 		return content, "", fmt.Errorf("diagnosis missing yaml_field or suggested_value")
 	}
-
-	// Simple field replacement for common paths.
-	if diag.CurrentValue != "" {
-		newContent := strings.Replace(content, diag.CurrentValue, diag.SuggestedValue, 1)
-		if newContent != content {
-			summary := fmt.Sprintf("Update %s from %s to %s", diag.YAMLField, diag.CurrentValue, diag.SuggestedValue)
-			return newContent, summary, nil
-		}
+	if diag.CurrentValue == "" {
+		return content, "", fmt.Errorf("diagnosis for %s has no current_value to verify against", diag.YAMLField)
 	}
 
-	return content, "", fmt.Errorf("could not apply suggested fix for field %s", diag.YAMLField)
+	path := strings.Split(diag.YAMLField, ".")
+	lines := strings.Split(content, "\n")
+	idx, err := findScalarLine(lines, path)
+	if err != nil {
+		return content, "", fmt.Errorf("could not apply suggested fix for field %s: %w", diag.YAMLField, err)
+	}
+	sc := parseScalarLine(lines[idx])
+	if sc.value != unquote(diag.CurrentValue) {
+		return content, "", fmt.Errorf("field %s holds %q, not the diagnosed current value %q", diag.YAMLField, sc.value, diag.CurrentValue)
+	}
+	suggested := unquote(diag.SuggestedValue)
+	if err := checkPlainValue(suggested, sc.quote); err != nil {
+		return content, "", fmt.Errorf("suggested value for %s: %w", diag.YAMLField, err)
+	}
+	if suggested == sc.value {
+		return content, "", fmt.Errorf("suggested value for %s equals the current value %q; nothing to change", diag.YAMLField, sc.value)
+	}
+	lines[idx] = sc.render(suggested)
+	summary := fmt.Sprintf("Update %s from %s to %s", diag.YAMLField, sc.value, suggested)
+	return strings.Join(lines, "\n"), summary, nil
 }
 
-// GenerateCPUBump creates a patch that increases CPU limit by 50%.
+// GenerateCPUBump creates a patch that increases the chart-level CPU limit
+// (top-level resources.limits.cpu) by 50%. See GenerateMemoryBump for why
+// only that one scalar is touched.
 func GenerateCPUBump(content string) (string, string, error) {
+	return bumpChartLimit(content, "cpu", bumpCPU, "CPU limit")
+}
+
+// bumpChartLimit rewrites the scalar at resources.limits.<resource> with
+// bump(current). It fails rather than guessing when the path is absent, the
+// value is not one bump understands, or the file is not block-style YAML.
+func bumpChartLimit(content, resource string, bump func(string) string, label string) (string, string, error) {
 	lines := strings.Split(content, "\n")
-	var modified []string
-	var summary string
+	idx, err := findScalarLine(lines, []string{"resources", "limits", resource})
+	if err != nil {
+		return content, "", fmt.Errorf("could not find %s to bump: %w", label, err)
+	}
+	sc := parseScalarLine(lines[idx])
+	next := bump(sc.value)
+	if next == sc.value {
+		return content, "", fmt.Errorf("could not bump %s: unsupported value %q", label, sc.value)
+	}
+	lines[idx] = sc.render(next)
+	summary := fmt.Sprintf("Bump %s from %s to %s", label, sc.value, next)
+	return strings.Join(lines, "\n"), summary, nil
+}
 
-	inLimits := false
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "limits:") {
-			inLimits = true
-		} else if inLimits && trimmed != "" && !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
-			inLimits = false
+// findScalarLine returns the index of the line holding the scalar at path,
+// where path[0] is a key at column 0 and every later element is a direct
+// child mapping key of the one before it. Intermediate keys must open a
+// block mapping (nothing but an optional comment after the colon); the last
+// key must carry a value. Sequences, flow mappings and anchors are not
+// followed: the caller gets an error and escalates instead of a guess.
+func findScalarLine(lines []string, path []string) (int, error) {
+	if len(path) == 0 {
+		return -1, fmt.Errorf("empty path")
+	}
+	start, end, parentIndent := 0, len(lines), -1
+	for depth, key := range path {
+		if key == "" {
+			return -1, fmt.Errorf("empty segment in path %q", strings.Join(path, "."))
 		}
-
-		if inLimits && strings.HasPrefix(trimmed, "cpu:") {
-			parts := strings.SplitN(trimmed, ":", 2)
-			if len(parts) == 2 {
-				current := strings.TrimSpace(parts[1])
-				current = strings.Trim(current, "\"'")
-				newVal := bumpCPU(current)
-				if newVal != current {
-					indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
-					modified = append(modified, indent+"cpu: "+newVal)
-					summary = fmt.Sprintf("Bump CPU limit from %s to %s", current, newVal)
-					continue
-				}
+		childIndent := -1
+		if depth == 0 {
+			childIndent = 0 // path[0] is a document-root key
+		}
+		found := -1
+		for i := start; i < end; i++ {
+			trimmed := strings.TrimSpace(lines[i])
+			if trimmed == "" || isCommentLine(trimmed) {
+				continue
+			}
+			ind := len(indentOf(lines[i]))
+			if ind <= parentIndent {
+				end = i // the parent block ended
+				break
+			}
+			if childIndent < 0 {
+				childIndent = ind
+			}
+			if ind != childIndent {
+				continue // deeper line belonging to a sibling's block
+			}
+			if k, ok := mappingKey(trimmed); ok && k == key {
+				found = i
+				break
 			}
 		}
-		modified = append(modified, line)
+		if found < 0 {
+			return -1, fmt.Errorf("key %q not found", strings.Join(path[:depth+1], "."))
+		}
+		value, _ := splitInlineComment(lineValue(lines[found]))
+		value = strings.TrimSpace(value)
+		last := depth == len(path)-1
+		if last {
+			if value == "" {
+				return -1, fmt.Errorf("%q is a block, not a scalar", strings.Join(path, "."))
+			}
+			return found, nil
+		}
+		if value != "" {
+			return -1, fmt.Errorf("%q is not a block mapping", strings.Join(path[:depth+1], "."))
+		}
+		start, parentIndent = found+1, childIndent
 	}
+	return -1, fmt.Errorf("key %q not found", strings.Join(path, "."))
+}
 
-	if summary == "" {
-		return content, "", fmt.Errorf("could not find CPU limit to bump")
+// mappingKey returns the key of a trimmed "key: value" or "key:" line. A
+// sequence item ("- name: x") is not a mapping key at this level.
+func mappingKey(trimmed string) (string, bool) {
+	if strings.HasPrefix(trimmed, "-") {
+		return "", false
 	}
+	k, rest, ok := strings.Cut(trimmed, ":")
+	if !ok || (rest != "" && rest[0] != ' ' && rest[0] != '\t') {
+		return "", false // "http://x" or similar, not a key
+	}
+	return strings.Trim(strings.TrimSpace(k), "\"'"), true
+}
 
-	return strings.Join(modified, "\n"), summary, nil
+// lineValue returns everything after the first ": " separator of a line.
+func lineValue(line string) string {
+	_, rest, _ := strings.Cut(line, ":")
+	return rest
+}
+
+// scalarLine is a parsed "key: value  # comment" line, kept so a rewrite
+// preserves indentation, quoting style and the trailing comment.
+type scalarLine struct {
+	prefix  string // indentation, key and colon, e.g. "    memory:"
+	value   string // unquoted value
+	quote   string // "" or the quote character the value was written with
+	comment string // trailing comment with its leading whitespace, or ""
+}
+
+func parseScalarLine(line string) scalarLine {
+	key, rest, _ := strings.Cut(line, ":")
+	v, comment := splitInlineComment(rest)
+	v = strings.TrimSpace(v)
+	q := ""
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		q = v[:1]
+	}
+	return scalarLine{prefix: key + ":", value: unquote(v), quote: q, comment: comment}
+}
+
+func (s scalarLine) render(value string) string {
+	return s.prefix + " " + s.quote + value + s.quote + s.comment
+}
+
+// checkPlainValue rejects a value that, spliced into a scalar line with the
+// given quoting, could be read as anything other than that one scalar: extra
+// lines, a comment, a nested mapping, a flow collection, an anchor or alias,
+// or a tag. A diagnosis value is LLM output built partly from pod logs, so it
+// is untrusted, and refusing is safer than escaping it.
+func checkPlainValue(v, quote string) error {
+	if v == "" || strings.TrimSpace(v) != v {
+		return fmt.Errorf("%q is empty or has surrounding whitespace", v)
+	}
+	for _, r := range v {
+		if !unicode.IsPrint(r) && r != ' ' {
+			return fmt.Errorf("%q contains a non-printable character or line break", v)
+		}
+	}
+	if quote != "" {
+		if strings.Contains(v, quote) || (quote == `"` && strings.Contains(v, `\`)) {
+			return fmt.Errorf("%q cannot be placed inside %s quotes as is", v, quote)
+		}
+		return nil
+	}
+	if strings.ContainsAny(v[:1], "-?:,[]{}#&*!|>'\"%@`") ||
+		strings.Contains(v, ": ") || strings.Contains(v, " #") || strings.HasSuffix(v, ":") {
+		return fmt.Errorf("%q would not stay a plain YAML scalar", v)
+	}
+	return nil
+}
+
+func unquote(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		return v[1 : len(v)-1]
+	}
+	return v
 }
 
 // probeKinds maps a diagnosis YAMLField onto the probe kinds it refers to.
@@ -431,11 +558,16 @@ func GenerateProbeFix(content string, probeField string) (string, string, error)
 	return strings.Join(lines, "\n"), summary, nil
 }
 
-// GenerateWorkflowParamFix replaces 'default:' with 'value:' in workflow arguments.
+// workflowDefaultKey matches a "default:" mapping key, optionally as the
+// first key of a sequence item, and nothing that merely ends in "default:"
+// (isdefault:, x-default:) or is a plain scalar like "default:x".
+var workflowDefaultKey = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]+)?)default:([ \t\r]|$)`)
+
+// GenerateWorkflowParamFix replaces 'default:' keys with 'value:' in workflow arguments.
 func GenerateWorkflowParamFix(content string) (string, string, error) {
-	newContent := strings.ReplaceAll(content, "default:", "value:")
+	newContent := workflowDefaultKey.ReplaceAllString(content, "${1}value:${2}")
 	if newContent == content {
-		return content, "", fmt.Errorf("no 'default:' found in template")
+		return content, "", fmt.Errorf("no 'default:' key found in template")
 	}
 	return newContent, "Replace 'default:' with 'value:' in ClusterWorkflowTemplate", nil
 }

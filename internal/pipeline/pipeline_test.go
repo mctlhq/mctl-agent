@@ -520,7 +520,7 @@ func TestHandleHighConfidenceFixProbesLaterCandidateOnMiss(t *testing.T) {
 	// paper over).
 	diag := &skill.DiagnosisResult{
 		Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true,
-		YAMLField: "replicas", CurrentValue: "replicas: 1", SuggestedValue: "replicas: 2",
+		YAMLField: "replicas", CurrentValue: "1", SuggestedValue: "2",
 	}
 	s := stubSkill{fix: &skill.FixResult{
 		Applied:  true,
