@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.9.2](https://github.com/mctlhq/mctl-agent/compare/2.9.1...2.9.2) (2026-11-13)
+
+
+### Bug Fixes
+
+* **notify:** keep the Telegram bot token out of errors ([f91d762](https://github.com/mctlhq/mctl-agent/commit/f91d76267bae42c8d9c9e1178f2bf7f20365e468))
+* **notify:** keep the Telegram bot token out of errors ([afde427](https://github.com/mctlhq/mctl-agent/commit/afde427154f9b50fff6f0649d73490fee310e137))
+
 ## [2.9.1](https://github.com/mctlhq/mctl-agent/compare/2.9.0...2.9.1) (2026-11-13)
 
 
