@@ -19,6 +19,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // DiagnosisCompat provides the fields needed by GenerateFromDiagnosis,
@@ -168,6 +169,9 @@ func GenerateFromDiagnosis(content string, diag *DiagnosisCompat) (string, strin
 	if err := checkPlainValue(suggested, sc.quote); err != nil {
 		return content, "", fmt.Errorf("suggested value for %s: %w", diag.YAMLField, err)
 	}
+	if suggested == sc.value {
+		return content, "", fmt.Errorf("suggested value for %s equals the current value %q; nothing to change", diag.YAMLField, sc.value)
+	}
 	lines[idx] = sc.render(suggested)
 	summary := fmt.Sprintf("Update %s from %s to %s", diag.YAMLField, sc.value, suggested)
 	return strings.Join(lines, "\n"), summary, nil
@@ -313,8 +317,8 @@ func checkPlainValue(v, quote string) error {
 		return fmt.Errorf("%q is empty or has surrounding whitespace", v)
 	}
 	for _, r := range v {
-		if r < 0x20 || r == 0x7f {
-			return fmt.Errorf("%q contains a control character", v)
+		if !unicode.IsPrint(r) && r != ' ' {
+			return fmt.Errorf("%q contains a non-printable character or line break", v)
 		}
 	}
 	if quote != "" {
@@ -556,12 +560,12 @@ func GenerateProbeFix(content string, probeField string) (string, string, error)
 
 // workflowDefaultKey matches a "default:" mapping key, optionally as the
 // first key of a sequence item, and nothing that merely ends in "default:"
-// (isdefault:, x-default:).
-var workflowDefaultKey = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]+)?)default:`)
+// (isdefault:, x-default:) or is a plain scalar like "default:x".
+var workflowDefaultKey = regexp.MustCompile(`(?m)^([ \t]*(?:-[ \t]+)?)default:([ \t\r]|$)`)
 
 // GenerateWorkflowParamFix replaces 'default:' keys with 'value:' in workflow arguments.
 func GenerateWorkflowParamFix(content string) (string, string, error) {
-	newContent := workflowDefaultKey.ReplaceAllString(content, "${1}value:")
+	newContent := workflowDefaultKey.ReplaceAllString(content, "${1}value:${2}")
 	if newContent == content {
 		return content, "", fmt.Errorf("no 'default:' key found in template")
 	}

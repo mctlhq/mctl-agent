@@ -274,6 +274,10 @@ autoscaling:
 		"suggested value is a flow map":    {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "{a: 1}"},
 		"suggested value is an alias":      {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "*ref"},
 		"suggested value has padding":      {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: `" 10"`},
+		"suggested value has NEL":          {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10\u0085hostNetwork:\u0085true"},
+		"suggested value has LS":           {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10 hostNetwork: true"},
+		"suggested value has PS":           {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: "10 x"},
+		"suggested value equals current":   {YAMLField: "autoscaling.maxReplicas", CurrentValue: "5", SuggestedValue: `"5"`},
 	}
 	for name, d := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -314,9 +318,14 @@ func TestGenerateWorkflowParamFixOnlyRewritesDefaultKeys(t *testing.T) {
         default: ""
       - default: main
         name: branch
+      - name: region
+        default:
+          eu
   metadata:
     isdefault: y
-    x-default: z`
+    x-default: z
+    notes:
+      - default:plain-scalar`
 	out, _, err := GenerateWorkflowParamFix(content)
 	if err != nil {
 		t.Fatal(err)
@@ -325,6 +334,7 @@ func TestGenerateWorkflowParamFixOnlyRewritesDefaultKeys(t *testing.T) {
 	want := []string{
 		`        default: "" ->         value: ""`,
 		"      - default: main ->       - value: main",
+		"        default: ->         value:",
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("changed lines:\n%s", strings.Join(got, "\n"))
@@ -332,5 +342,22 @@ func TestGenerateWorkflowParamFixOnlyRewritesDefaultKeys(t *testing.T) {
 
 	if _, _, err := GenerateWorkflowParamFix("isdefault: y\n"); err == nil {
 		t.Error("expected an error when no default: key exists")
+	}
+
+	crlf := "- name: a\r\n  default:\r\n    x\r\n"
+	out, _, err = GenerateWorkflowParamFix(crlf)
+	if err != nil || out != "- name: a\r\n  value:\r\n    x\r\n" {
+		t.Errorf("CRLF: out=%q err=%v", out, err)
+	}
+}
+
+// The bump paths must refuse a value they cannot raise rather than return an
+// unchanged document as a successful patch.
+func TestResourceBumpRefusesNoOp(t *testing.T) {
+	content := `resources:
+  limits:
+    memory: 0Mi`
+	if out, s, err := GenerateMemoryBump(content); err == nil {
+		t.Fatalf("expected an error, got %q:\n%s", s, out)
 	}
 }
