@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.9.3](https://github.com/mctlhq/mctl-agent/compare/2.9.2...2.9.3) (2026-11-14)
+
+
+### Bug Fixes
+
+* **audit:** decode mctl-api's audit schema and match deploys exactly ([4a201d8](https://github.com/mctlhq/mctl-agent/commit/4a201d864a21468a4fe9cc4f6b2157de3955188d))
+* **audit:** decode mctl-api's audit schema and match deploys exactly ([219ca35](https://github.com/mctlhq/mctl-agent/commit/219ca357a9f67b8557c78f9b37d0aa7e2a936698))
+* **metrics:** read the average duration as a float and surface errors ([7e30c6a](https://github.com/mctlhq/mctl-agent/commit/7e30c6aaa3306c2c9a026aab19c7a812bfd2d9fc))
+* **metrics:** read the average duration as a float and surface errors ([b4db903](https://github.com/mctlhq/mctl-agent/commit/b4db903cb0cf09d60e01c4179e67b388a9c6802b))
+
 ## [2.9.2](https://github.com/mctlhq/mctl-agent/compare/2.9.1...2.9.2) (2026-11-13)
 
 
