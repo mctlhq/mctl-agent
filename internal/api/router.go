@@ -264,7 +264,7 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 		slog.Warn("telegram command from chat without a tenant scope", "command", cmd.Command)
 		return
 	}
-	if !scope.operator && operatorOnlyCommands[cmd.Command] {
+	if !scope.operator && !tenantCommands[cmd.Command] {
 		_ = opts.Telegram.SendText("/" + cmd.Command + " is only available in the operator chat")
 		return
 	}
@@ -374,12 +374,17 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 	}
 }
 
-// operatorOnlyCommands act on the whole agent rather than on one tenant's
-// tickets, so a tenant chat must not run them.
-var operatorOnlyCommands = map[string]bool{
-	"pause":  true,
-	"resume": true,
-	"digest": true,
+// tenantCommands are the commands a tenant chat may run: each acts on one
+// ticket or lists tickets, and is confined to the chat's tenant below.
+// Everything else (pause, resume, digest, and any command added later) acts
+// on the whole agent and is operator-only. An allow-list, so a new command
+// is operator-only until someone decides it is tenant-safe.
+var tenantCommands = map[string]bool{
+	"status":  true,
+	"ticket":  true,
+	"approve": true,
+	"reject":  true,
+	"ignore":  true,
 }
 
 // commandScope is what the chat a command came from may act on: everything

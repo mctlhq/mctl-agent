@@ -32,6 +32,7 @@ type commandHarness struct {
 	store  *ticket.Store
 	pipe   *pipeline.Pipeline
 	router http.Handler
+	opts   Options
 
 	mu      sync.Mutex
 	replies []string
@@ -79,14 +80,15 @@ func newCommandHarness(t *testing.T) *commandHarness {
 		"other": fmt.Sprint(guardOtherChat),
 	}).WithAPIBase(bot.URL)
 
-	h.router = NewRouter(Options{
+	h.opts = Options{
 		Store:                 h.store,
 		Pipeline:              h.pipe,
 		Telegram:              tg,
 		GitHub:                gf,
 		TelegramWebhookSecret: "tg-secret",
 		OnAlert:               func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) },
-	})
+	}
+	h.router = NewRouter(h.opts)
 	return h
 }
 
@@ -213,6 +215,16 @@ func TestTelegramTenantChatCannotPausePipeline(t *testing.T) {
 	if h.pipe.IsPaused() {
 		t.Fatal("a tenant chat paused the pipeline")
 	}
+	h.pipe.Pause()
+	h.send(guardAcmeChat, "/resume")
+	if !h.pipe.IsPaused() {
+		t.Fatal("a tenant chat resumed the pipeline")
+	}
+	h.send(guardAcmeChat, "/digest")
+	if r := h.lastReply(); !strings.Contains(r, "only available in the operator chat") {
+		t.Fatalf("tenant /digest reply %q, want operator-only refusal", r)
+	}
+	h.pipe.Resume()
 	h.send(guardOperatorChat, "/pause")
 	if !h.pipe.IsPaused() {
 		t.Fatal("the operator chat could not pause the pipeline")
@@ -229,5 +241,16 @@ func TestTelegramStatusScopedToChatTenant(t *testing.T) {
 	r := h.lastReply()
 	if !strings.Contains(r, mine.ID[:8]) || strings.Contains(r, theirs.ID[:8]) {
 		t.Fatalf("tenant /status reply %q: want %s and not %s", r, mine.ID[:8], theirs.ID[:8])
+	}
+}
+
+// The tenant command list is an allow-list: a command nobody has classified
+// yet is operator-only, not open to tenant chats by default.
+func TestTelegramUnclassifiedCommandIsOperatorOnly(t *testing.T) {
+	h := newCommandHarness(t)
+	handleTelegramCommand(context.Background(), &notify.TelegramCommand{Command: "some-future-command"}, h.opts,
+		commandScope{tenant: "acme"})
+	if r := h.lastReply(); !strings.Contains(r, "only available in the operator chat") {
+		t.Fatalf("reply %q, want operator-only refusal", r)
 	}
 }
