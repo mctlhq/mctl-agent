@@ -17,7 +17,6 @@ package builtin
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/fixer"
@@ -75,34 +74,58 @@ func (s *PostDeployRollbackSkill) Fix(_ context.Context, t *ticket.Ticket, _ *sk
 	}, nil
 }
 
-// hasRecentDeploy checks audit JSON for a deploy within the last 30 minutes.
+// deployOperation is mctl-api's operation name for a service release. Its
+// audit row carries the service as parameters team_name and component_name.
+const deployOperation = "deploy-service"
+
+// deployWindow is how recent a deploy must be to blame a crash-loop on it.
+const deployWindow = 30 * time.Minute
+
+// hasRecentDeploy reports whether the audit evidence holds a deploy of
+// exactly this service within deployWindow.
+//
+// The evidence is the JSON of []mctlclient.AuditEntry, so the field names are
+// mctl-api's: operation and parameters. A row counts only when
+//   - its operation is deploy-service (a scale, a config read or a rollback
+//     is not a deploy),
+//   - team_name and component_name equal the ticket's tenant and service
+//     exactly (a deploy of "api-gateway" is not a deploy of "api"), and
+//   - its status shows the workflow was submitted: a denied or failed
+//     request never reached the cluster.
 func hasRecentDeploy(tenant, service, auditJSON string) bool {
-	if auditJSON == "" {
+	if auditJSON == "" || tenant == "" || service == "" {
 		return false
 	}
 
-	var entries []struct {
-		Action    string    `json:"action"`
-		Target    string    `json:"target"`
-		Timestamp time.Time `json:"timestamp"`
+	type entry struct {
+		Operation  string            `json:"operation"`
+		Parameters map[string]string `json:"parameters"`
+		Status     string            `json:"status"`
+		Timestamp  time.Time         `json:"timestamp"`
 	}
+	var entries []entry
 	if err := json.Unmarshal([]byte(auditJSON), &entries); err != nil {
-		// Try wrapped format.
+		// The raw API response wraps the list in {"items": [...]}.
 		var wrapped struct {
-			Items json.RawMessage `json:"items"`
+			Items []entry `json:"items"`
 		}
 		if err := json.Unmarshal([]byte(auditJSON), &wrapped); err != nil {
 			return false
 		}
-		if err := json.Unmarshal(wrapped.Items, &entries); err != nil {
-			return false
-		}
+		entries = wrapped.Items
 	}
 
-	cutoff := time.Now().UTC().Add(-30 * time.Minute)
-	target := tenant + "/" + service
+	cutoff := time.Now().UTC().Add(-deployWindow)
 	for _, e := range entries {
-		if e.Timestamp.After(cutoff) && strings.Contains(e.Target, target) {
+		if e.Operation != deployOperation || !e.Timestamp.After(cutoff) {
+			continue
+		}
+		switch e.Status {
+		case "submitted", "succeeded":
+		default:
+			continue
+		}
+		if e.Parameters["team_name"] == tenant && e.Parameters["component_name"] == service {
 			return true
 		}
 	}
