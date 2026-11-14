@@ -84,7 +84,10 @@ func (s *Server) registerSkillStatus() {
 			return nil, fmt.Errorf("metrics not enabled")
 		}
 
-		snap := m.GetSnapshot(name)
+		snap, err := m.GetSnapshot(name)
+		if err != nil {
+			return nil, err
+		}
 		return jsonResult(snap)
 	})
 }
@@ -185,7 +188,10 @@ func (s *Server) registerSkillMetricsAll() {
 			return nil, fmt.Errorf("metrics not enabled")
 		}
 
-		snaps := m.GetAllSnapshots()
+		snaps, err := m.GetAllSnapshots()
+		if err != nil {
+			return nil, err
+		}
 		return jsonResult(map[string]interface{}{
 			"skills": snaps,
 			"count":  len(snaps),

@@ -51,7 +51,10 @@ func TestMetricsRecordAndSnapshot(t *testing.T) {
 	m.RecordFix("oomkilled", "ticket-2", false, 50*time.Millisecond, "patch failed")
 	m.RecordResolution("oomkilled", "ticket-2", false)
 
-	snap := m.GetSnapshot("oomkilled")
+	snap, err := m.GetSnapshot("oomkilled")
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if snap.TotalMatches != 2 {
 		t.Errorf("expected 2 matches, got %d", snap.TotalMatches)
@@ -154,8 +157,57 @@ func TestMetricsGetAllSnapshots(t *testing.T) {
 	m.RecordMatch("skill-a", "t1")
 	m.RecordMatch("skill-b", "t2")
 
-	snaps := m.GetAllSnapshots()
+	snaps, err := m.GetAllSnapshots()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(snaps) != 2 {
 		t.Errorf("expected 2 snapshots, got %d", len(snaps))
+	}
+}
+
+// AVG(duration_ms) is fractional. The old code scanned it into an int64 and
+// dropped the error, so any non-integer average (and every average on
+// Postgres, where AVG returns numeric) read as 0.
+func TestSnapshotAvgDurationFractional(t *testing.T) {
+	db := setupTestDB(t)
+	m, err := NewMetrics(db, 0.3, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.RecordDiagnosis("probe", "t1", true, 100*time.Millisecond, "")
+	m.RecordDiagnosis("probe", "t2", true, 201*time.Millisecond, "")
+
+	snap, err := m.GetSnapshot("probe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.AvgDurationMs != 150 {
+		t.Fatalf("AvgDurationMs = %d, want 150 (mean of 100 and 201, truncated)", snap.AvgDurationMs)
+	}
+}
+
+// A failed read is an error, never a zero-valued snapshot or a shorter list.
+func TestSnapshotReadErrorsPropagate(t *testing.T) {
+	db := setupTestDB(t)
+	m, err := NewMetrics(db, 0.3, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.RecordMatch("probe", "t1")
+
+	// Break only the column the AVG reads: every other query in the
+	// snapshot, the circuit-breaker read included, still succeeds, so the
+	// error can only come from the average.
+	if _, err := db.Exec(`ALTER TABLE skill_executions RENAME COLUMN duration_ms TO duration_gone`); err != nil {
+		t.Fatal(err)
+	}
+	if snap, err := m.GetSnapshot("probe"); err == nil {
+		t.Fatalf("GetSnapshot with an unreadable average returned %+v and no error", snap)
+	}
+
+	_ = db.Close()
+	if snaps, err := m.GetAllSnapshots(); err == nil {
+		t.Fatalf("GetAllSnapshots on a closed DB returned %v and no error", snaps)
 	}
 }

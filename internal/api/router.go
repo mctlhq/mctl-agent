@@ -402,7 +402,12 @@ func skillMetricsHandler(pipe *pipeline.Pipeline) http.HandlerFunc {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "metrics not enabled"})
 			return
 		}
-		snap := m.GetSnapshot(name)
+		snap, err := m.GetSnapshot(name)
+		if err != nil {
+			slog.Error("reading skill metrics failed", "skill", name, "error", err)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to read skill metrics"})
+			return
+		}
 		writeJSON(w, http.StatusOK, snap)
 	}
 }

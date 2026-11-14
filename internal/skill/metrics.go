@@ -163,17 +163,33 @@ func (m *Metrics) record(skillName, ticketID, event string, success bool, durati
 }
 
 // GetSnapshot returns aggregated metrics for a skill.
-func (m *Metrics) GetSnapshot(skillName string) MetricsSnapshot {
+//
+// Every read is checked. A query that fails returns an error rather than a
+// snapshot with that field left at zero: a zero here is indistinguishable
+// from "no executions", and the old code reported avg_duration_ms=0 for
+// every skill on Postgres because the AVG scan failed silently.
+func (m *Metrics) GetSnapshot(skillName string) (MetricsSnapshot, error) {
 	snap := MetricsSnapshot{SkillName: skillName}
 
-	_ = m.db.QueryRow(m.rebind(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='match'`),
-		skillName).Scan(&snap.TotalMatches)
+	scan := func(field string, dest any, query string, args ...any) error {
+		if err := m.db.QueryRow(m.rebind(query), args...).Scan(dest); err != nil {
+			return fmt.Errorf("reading %s for skill %q: %w", field, skillName, err)
+		}
+		return nil
+	}
 
-	_ = m.db.QueryRow(m.rebind(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='diagnose'`),
-		skillName).Scan(&snap.TotalDiagnoses)
-
-	_ = m.db.QueryRow(m.rebind(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='fix'`),
-		skillName).Scan(&snap.TotalFixes)
+	if err := scan("total_matches", &snap.TotalMatches,
+		`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='match'`, skillName); err != nil {
+		return MetricsSnapshot{}, err
+	}
+	if err := scan("total_diagnoses", &snap.TotalDiagnoses,
+		`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='diagnose'`, skillName); err != nil {
+		return MetricsSnapshot{}, err
+	}
+	if err := scan("total_fixes", &snap.TotalFixes,
+		`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='fix'`, skillName); err != nil {
+		return MetricsSnapshot{}, err
+	}
 
 	// In Postgres success=1 might not work if it is a real BOOLEAN, better use boolean literals or adapt per dialect
 	successCond := "success=1"
@@ -183,53 +199,99 @@ func (m *Metrics) GetSnapshot(skillName string) MetricsSnapshot {
 		failureCond = "success=FALSE"
 	}
 
-	_ = m.db.QueryRow(m.rebind(fmt.Sprintf(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND %s`, successCond)),
-		skillName).Scan(&snap.Successes)
-
-	_ = m.db.QueryRow(m.rebind(fmt.Sprintf(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND %s`, failureCond)),
-		skillName).Scan(&snap.Failures)
+	if err := scan("successes", &snap.Successes,
+		fmt.Sprintf(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND %s`, successCond), skillName); err != nil {
+		return MetricsSnapshot{}, err
+	}
+	if err := scan("failures", &snap.Failures,
+		fmt.Sprintf(`SELECT COUNT(*) FROM skill_executions WHERE skill_name=? AND event='resolution' AND %s`, failureCond), skillName); err != nil {
+		return MetricsSnapshot{}, err
+	}
 
 	total := snap.Successes + snap.Failures
 	if total > 0 {
 		snap.SuccessRate = float64(snap.Successes) / float64(total)
 	}
 
-	_ = m.db.QueryRow(m.rebind(`SELECT COALESCE(AVG(duration_ms), 0) FROM skill_executions WHERE skill_name=? AND event='diagnose' AND duration_ms > 0`),
-		skillName).Scan(&snap.AvgDurationMs)
+	// AVG is fractional: SQLite returns REAL and Postgres returns numeric,
+	// which the driver hands over as a decimal string such as "150.5000".
+	// Neither converts to int64, so it is read as float64 and truncated to
+	// whole milliseconds.
+	var avgMs float64
+	if err := scan("avg_duration_ms", &avgMs,
+		`SELECT COALESCE(AVG(duration_ms), 0) FROM skill_executions WHERE skill_name=? AND event='diagnose' AND duration_ms > 0`, skillName); err != nil {
+		return MetricsSnapshot{}, err
+	}
+	snap.AvgDurationMs = int64(avgMs)
 
 	var lastAt sql.NullString
-	_ = m.db.QueryRow(m.rebind(`SELECT MAX(created_at) FROM skill_executions WHERE skill_name=?`), skillName).Scan(&lastAt)
+	if err := scan("last_executed_at", &lastAt,
+		`SELECT MAX(created_at) FROM skill_executions WHERE skill_name=?`, skillName); err != nil {
+		return MetricsSnapshot{}, err
+	}
 	if lastAt.Valid {
 		snap.LastExecutedAt = lastAt.String
 	}
 
-	snap.CircuitOpen = m.IsCircuitOpen(skillName)
+	open, err := m.circuitOpen(skillName)
+	if err != nil {
+		return MetricsSnapshot{}, err
+	}
+	snap.CircuitOpen = open
 
-	return snap
+	return snap, nil
 }
 
 // GetAllSnapshots returns metrics for all skills that have execution records.
-func (m *Metrics) GetAllSnapshots() []MetricsSnapshot {
+// A failed listing, row or per-skill read is an error, never a shorter list.
+func (m *Metrics) GetAllSnapshots() ([]MetricsSnapshot, error) {
 	rows, err := m.db.Query(`SELECT DISTINCT skill_name FROM skill_executions ORDER BY skill_name`)
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("listing skills with executions: %w", err)
 	}
-	defer rows.Close() //nolint:errcheck
-
-	var snapshots []MetricsSnapshot
+	var names []string
 	for rows.Next() {
 		var name string
 		if err := rows.Scan(&name); err != nil {
-			continue
+			_ = rows.Close()
+			return nil, fmt.Errorf("reading skill name: %w", err)
 		}
-		snapshots = append(snapshots, m.GetSnapshot(name))
+		names = append(names, name)
 	}
-	return snapshots
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("listing skills with executions: %w", err)
+	}
+	// Close before the per-skill queries: with a single-connection pool
+	// (SQLite :memory:) an open cursor would block them.
+	_ = rows.Close()
+
+	snapshots := make([]MetricsSnapshot, 0, len(names))
+	for _, name := range names {
+		snap, err := m.GetSnapshot(name)
+		if err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, snap)
+	}
+	return snapshots, nil
 }
 
 // IsCircuitOpen checks if a skill's circuit breaker is tripped
 // (success rate below threshold in the last N resolutions).
+//
+// A failed read leaves the circuit closed — a database blip must not disable
+// every skill — but it is logged, so "closed because unreadable" is visible.
 func (m *Metrics) IsCircuitOpen(skillName string) bool {
+	open, err := m.circuitOpen(skillName)
+	if err != nil {
+		slog.Error("circuit breaker check failed; leaving circuit closed", "skill", skillName, "error", err)
+		return false
+	}
+	return open
+}
+
+func (m *Metrics) circuitOpen(skillName string) (bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -249,16 +311,18 @@ func (m *Metrics) IsCircuitOpen(skillName string) bool {
 			ORDER BY created_at DESC LIMIT ?
 		) sub`, successCond)
 
-	_ = m.db.QueryRow(m.rebind(query),
+	if err := m.db.QueryRow(m.rebind(query),
 		skillName, m.circuitWindow,
-	).Scan(&successes, &total)
+	).Scan(&successes, &total); err != nil {
+		return false, fmt.Errorf("reading circuit window for skill %q: %w", skillName, err)
+	}
 
 	if total < m.circuitWindow {
-		return false // Not enough data to trip circuit.
+		return false, nil // Not enough data to trip circuit.
 	}
 
 	rate := float64(successes) / float64(total)
-	return rate < m.circuitThreshold
+	return rate < m.circuitThreshold, nil
 }
 
 // CheckAndDisable checks circuit breakers for all skills and disables tripped ones.
