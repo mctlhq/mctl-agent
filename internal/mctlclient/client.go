@@ -96,12 +96,22 @@ type ResourceUsage struct {
 	Used      map[string]string `json:"used"`
 }
 
-// AuditEntry represents an audit log entry.
+// AuditEntry is one row of GET /api/v1/audit. The field names follow
+// mctl-api's audit.Entry: the operation name ("deploy-service", ...) and the
+// submitted parameters (team_name, component_name, ...) are separate fields.
+// There is no "action" or "target" field; decoding those left every entry
+// blank, which is why the post-deploy rollback skill never matched.
 type AuditEntry struct {
-	User      string    `json:"user"`
-	Action    string    `json:"action"`
-	Target    string    `json:"target"`
-	Timestamp time.Time `json:"timestamp"`
+	ID           string            `json:"id"`
+	Timestamp    time.Time         `json:"timestamp"`
+	UserID       string            `json:"userId"`
+	Operation    string            `json:"operation"`
+	Parameters   map[string]string `json:"parameters"`
+	WorkflowName string            `json:"workflowName,omitempty"`
+	// Status is "submitted" when the workflow was handed to Argo, later
+	// closed out as succeeded, failed, error or expired. Refused requests
+	// are written as "denied" or "failed" and never reached the cluster.
+	Status string `json:"status"`
 }
 
 // ListServices returns all services.

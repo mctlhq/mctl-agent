@@ -177,3 +177,33 @@ func TestPublishAlertTraceID(t *testing.T) {
 		})
 	}
 }
+
+// ListAudit must decode mctl-api's field names. The client used to read
+// "action" and "target", which the API never sends, so every entry came back
+// blank.
+func TestListAuditDecodesAPISchema(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/audit" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"items":[{"id":"a1","timestamp":"2026-11-14T10:00:00Z","userId":"ci:github",` +
+			`"operation":"deploy-service","parameters":{"team_name":"acme","component_name":"api"},` +
+			`"workflowName":"deploy-service-x1","status":"submitted","riskLevel":"medium"}],"count":1}`))
+	}))
+	defer srv.Close()
+
+	entries, err := NewClient(srv.URL, "tok").ListAudit()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("got %d entries, want 1", len(entries))
+	}
+	e := entries[0]
+	if e.Operation != "deploy-service" || e.UserID != "ci:github" || e.Status != "submitted" ||
+		e.Parameters["team_name"] != "acme" || e.Parameters["component_name"] != "api" ||
+		e.WorkflowName != "deploy-service-x1" || e.Timestamp.IsZero() {
+		t.Fatalf("decoded entry = %+v", e)
+	}
+}
