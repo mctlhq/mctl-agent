@@ -382,6 +382,57 @@ func (s *Store) ListAll(ctx context.Context) ([]*Ticket, error) {
 	return s.ListByFilters(ctx, "", "", "", 100)
 }
 
+// FindByIDPrefix returns the tickets whose ID starts with prefix, across the
+// whole table rather than a recent window, so a short ID typed into a bot
+// command resolves however old the ticket is. tenant, when non-empty, limits
+// the search to that tenant's tickets.
+//
+// At most two rows are returned: callers only need to tell "none", "exactly
+// one" and "ambiguous" apart, and a short prefix must not pull a large part of
+// the table into memory.
+//
+// Ticket IDs are lowercase UUIDs. A prefix with any other character cannot
+// match one and returns no rows without a query, which also keeps LIKE
+// wildcards (% and _) out of the pattern.
+func (s *Store) FindByIDPrefix(ctx context.Context, prefix, tenant string) ([]*Ticket, error) {
+	prefix = strings.ToLower(prefix)
+	if !isTicketIDPrefix(prefix) {
+		return nil, nil
+	}
+	query := `
+		SELECT id, source, alert_name, type, tenant, service, summary, severity, status,
+			analysis, proposed_fix, pr_url, pr_number, pr_repo, pr_branch, pr_commit_sha, confidence, alert_fingerprint, trace_id, created_at, updated_at, resolved_at
+		FROM tickets WHERE id LIKE ?`
+	args := []interface{}{prefix + "%"}
+	if tenant != "" {
+		query += " AND tenant=?"
+		args = append(args, tenant)
+	}
+	query += " ORDER BY id LIMIT 2"
+
+	rows, err := s.db.QueryContext(ctx, s.rebind(query), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() //nolint:errcheck
+	return s.scanTickets(rows)
+}
+
+// isTicketIDPrefix reports whether p is a non-empty prefix of a lowercase
+// UUID string: hex digits and hyphens, no longer than a full UUID.
+func isTicketIDPrefix(p string) bool {
+	if p == "" || len(p) > 36 {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && c != '-' {
+			return false
+		}
+	}
+	return true
+}
+
 // ListByFilters returns tickets matching the given filters, latest first.
 // Empty filter values are ignored. limit <= 0 means no LIMIT clause.
 // Filters are applied in SQL before the limit so narrow queries return

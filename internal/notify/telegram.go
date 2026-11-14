@@ -529,6 +529,46 @@ func (tg *Telegram) CommandChatAllowed(chatID int64) bool {
 	return false
 }
 
+// CommandScope reports which tickets an allowlisted chat may act on. The
+// global operator chat (TELEGRAM_CHAT_ID) is unscoped and returns
+// operator=true. A chat configured only as a tenant chat returns that
+// tenant's name and operator=false: its commands must be confined to that
+// tenant's tickets.
+//
+// A chat that is not allowlisted, or a chat id listed for more than one
+// tenant, returns operator=false with an empty tenant. Callers must treat
+// that as "no access", never as "all tenants".
+//
+// An unconfigured notifier (no allowlist at all) is the open local-dev mode
+// that CommandChatAllowed already permits; it is treated as operator so unit
+// tests keep their behaviour. Production refuses commands before this point
+// unless an allowlist is set.
+func (tg *Telegram) CommandScope(chatID int64) (tenant string, operator bool) {
+	if tg == nil {
+		return "", false
+	}
+	if !tg.HasChatAllowlist() {
+		return "", true
+	}
+	got := strconv.FormatInt(chatID, 10)
+	if tg.chatID != "" && got == tg.chatID {
+		return "", true
+	}
+	match := ""
+	for name, id := range tg.tenantChatIDs {
+		if id != got {
+			continue
+		}
+		if match != "" {
+			// One chat serving two tenants has no single scope; refuse
+			// rather than pick one by map order.
+			return "", false
+		}
+		match = name
+	}
+	return match, false
+}
+
 // SetWebhook registers the public Telegram webhook. secret_token is the
 // value Telegram will send back as X-Telegram-Bot-Api-Secret-Token.
 func (tg *Telegram) SetWebhook(ctx context.Context, publicBaseURL, secretToken string) error {
