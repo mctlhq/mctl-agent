@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.9.5](https://github.com/mctlhq/mctl-agent/compare/2.9.4...2.9.5) (2026-11-14)
+
+
+### Bug Fixes
+
+* **skill:** re-enable re-registered skills, prune deleted YAML skills ([ba960d2](https://github.com/mctlhq/mctl-agent/commit/ba960d2f52a15b25c90bd4626c8285bb93bc3c54))
+* **skill:** re-enable re-registered skills, prune deleted YAML skills ([cadb18a](https://github.com/mctlhq/mctl-agent/commit/cadb18aa055cec9b49c06223c4f48c686d181812))
+
 ## [2.9.4](https://github.com/mctlhq/mctl-agent/compare/2.9.3...2.9.4) (2026-11-14)
 
 
