@@ -260,3 +260,57 @@ func TestManagerValidation(t *testing.T) {
 		t.Error("expected error for empty endpoint")
 	}
 }
+
+// Unregister followed by Register of the same name must leave the skill
+// enabled. Unregister used to only Disable it in the registry, so the flag
+// outlived the skill and the re-registered one never matched.
+func TestManagerReRegisterAfterUnregisterIsEnabled(t *testing.T) {
+	reg := skill.NewRegistry()
+	mgr := NewManager(reg)
+	r := Registration{Name: "ext-skill", Endpoint: "https://8.8.8.8"}
+
+	if err := mgr.Register(r); err != nil {
+		t.Fatal(err)
+	}
+	if !mgr.Unregister("ext-skill") {
+		t.Fatal("unregister failed")
+	}
+	if _, ok := reg.Get("ext-skill"); ok {
+		t.Fatal("unregistered skill still in registry")
+	}
+	if err := mgr.Register(r); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, info := range reg.List() {
+		if info.Name == "ext-skill" {
+			found = true
+			if !info.Enabled {
+				t.Fatal("re-registered skill is disabled")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("re-registered skill missing from registry")
+	}
+}
+
+// Re-registering a skill that is still registered (an update) must not undo
+// an operator or circuit-breaker Disable.
+func TestManagerReRegisterKeepsOperatorDisable(t *testing.T) {
+	reg := skill.NewRegistry()
+	mgr := NewManager(reg)
+	r := Registration{Name: "ext-skill", Endpoint: "https://8.8.8.8"}
+	if err := mgr.Register(r); err != nil {
+		t.Fatal(err)
+	}
+	reg.Disable("ext-skill")
+	if err := mgr.Register(r); err != nil {
+		t.Fatal(err)
+	}
+	for _, info := range reg.List() {
+		if info.Name == "ext-skill" && info.Enabled {
+			t.Fatal("update re-enabled an operator-disabled skill")
+		}
+	}
+}
