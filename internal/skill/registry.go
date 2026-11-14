@@ -120,6 +120,25 @@ func (r *Registry) List() []Info {
 	return infos
 }
 
+// Unregister removes a skill from the registry together with its disabled
+// flag, so a skill registered again under the same name starts enabled.
+// Disable is the wrong tool for removal: the flag would outlive the skill and
+// silently keep any later registration of that name out of Match.
+func (r *Registry) Unregister(name string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for i, s := range r.skills {
+		if s.Name() == name {
+			r.skills = append(r.skills[:i], r.skills[i+1:]...)
+			delete(r.disabled, name)
+			slog.Info("skill unregistered", "name", name)
+			return true
+		}
+	}
+	return false
+}
+
 // Disable prevents a skill from being matched.
 func (r *Registry) Disable(name string) bool {
 	r.mu.Lock()

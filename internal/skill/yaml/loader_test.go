@@ -304,3 +304,86 @@ func containsHelper(s, sub string) bool {
 	}
 	return false
 }
+
+func writeSkill(t *testing.T, dir, file, name string) {
+	t.Helper()
+	body := "name: " + name + "\ndiagnosis:\n  template: \"x\"\n  confidence: LOW\n"
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Reload must unregister a skill whose file was deleted. It used to only
+// add, so a deleted skill kept matching until restart.
+func TestLoaderReloadDropsDeletedSkill(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "a.yaml", "skill-a")
+	writeSkill(t, dir, "b.yaml", "skill-b")
+
+	reg := skill.NewRegistry()
+	loader := NewLoader(dir, reg)
+	if n := loader.LoadAll(); n != 2 {
+		t.Fatalf("initial load=%d, want 2", n)
+	}
+
+	if err := os.Remove(filepath.Join(dir, "b.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	loader.Reload()
+
+	if _, ok := reg.Get("skill-b"); ok {
+		t.Fatal("deleted skill-b still registered after Reload")
+	}
+	if _, ok := reg.Get("skill-a"); !ok {
+		t.Fatal("skill-a dropped by Reload")
+	}
+	if c := loader.LoadedCount(); c != 1 {
+		t.Fatalf("LoadedCount=%d, want 1", c)
+	}
+}
+
+// A file that still exists but no longer parses is an unknown state, not a
+// deletion: the skill it registered before must stay. A rename that keeps
+// the name must not drop the skill either.
+func TestLoaderReloadKeepsSkillOnParseErrorAndRename(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "a.yaml", "skill-a")
+	writeSkill(t, dir, "b.yaml", "skill-b")
+
+	reg := skill.NewRegistry()
+	loader := NewLoader(dir, reg)
+	loader.LoadAll()
+
+	if err := os.WriteFile(filepath.Join(dir, "a.yaml"), []byte("name: [unclosed"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(dir, "b.yaml"), filepath.Join(dir, "b2.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	loader.Reload()
+
+	if _, ok := reg.Get("skill-a"); !ok {
+		t.Fatal("skill-a dropped although its file still exists (parse error)")
+	}
+	if _, ok := reg.Get("skill-b"); !ok {
+		t.Fatal("skill-b dropped after a rename that kept its name")
+	}
+}
+
+// A directory that cannot be listed changes nothing.
+func TestLoaderReloadUnreadableDirKeepsSkills(t *testing.T) {
+	dir := t.TempDir()
+	writeSkill(t, dir, "a.yaml", "skill-a")
+	reg := skill.NewRegistry()
+	loader := NewLoader(dir, reg)
+	loader.LoadAll()
+
+	// Point the loader at a regular file: ReadDir fails with ENOTDIR,
+	// which is not os.IsNotExist.
+	file := filepath.Join(dir, "a.yaml")
+	loader.dir = file
+	loader.Reload()
+	if _, ok := reg.Get("skill-a"); !ok {
+		t.Fatal("unreadable directory treated as empty")
+	}
+}

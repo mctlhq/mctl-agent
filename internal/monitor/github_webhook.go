@@ -140,7 +140,7 @@ func (h *GitHubWebhookHandler) processWorkflowRun(ctx context.Context, event wor
 	}
 
 	summary := fmt.Sprintf("GitHub Actions workflow %q failed on %s (branch: %s, commit: %s)",
-		workflow, repo, branch, sha[:8])
+		workflow, repo, branch, shortSHA(sha))
 
 	t := &ticket.Ticket{
 		Source:   ticket.SourceGitHubWebhook,
@@ -191,4 +191,13 @@ func (h *GitHubWebhookHandler) verifySignature(payload []byte, signature string)
 	mac.Write(payload)
 	expected := mac.Sum(nil)
 	return hmac.Equal(sig, expected)
+}
+
+// shortSHA abbreviates a commit SHA for display. head_sha comes from the
+// webhook payload, so a short or empty value must not panic the handler.
+func shortSHA(sha string) string {
+	if len(sha) > 8 {
+		return sha[:8]
+	}
+	return sha
 }

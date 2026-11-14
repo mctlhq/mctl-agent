@@ -219,7 +219,8 @@ type Loader struct {
 	dir      string
 	registry *skill.Registry
 	mu       sync.Mutex
-	loaded   map[string]struct{}
+	// loaded maps each YAML file path to the skill name it registered.
+	loaded map[string]string
 }
 
 // NewLoader creates a loader that reads YAML skills from the given directory.
@@ -227,26 +228,31 @@ func NewLoader(dir string, registry *skill.Registry) *Loader {
 	return &Loader{
 		dir:      dir,
 		registry: registry,
-		loaded:   make(map[string]struct{}),
+		loaded:   make(map[string]string),
 	}
 }
 
-// LoadAll scans the directory and registers all valid YAML skills.
-// Returns the count of successfully loaded skills.
+// LoadAll scans the directory and registers all valid YAML skills. Called
+// again, it reconciles: a skill whose file is gone is unregistered. A file
+// that exists but cannot be read or parsed is an unknown state, not a
+// deletion, so the skill it registered before stays as it was. A directory
+// that cannot be listed changes nothing. Returns the count of skills
+// (re)loaded by this pass.
 func (l *Loader) LoadAll() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	entries, err := os.ReadDir(l.dir)
 	if err != nil {
-		if os.IsNotExist(err) {
-			slog.Debug("yaml skills directory does not exist", "dir", l.dir)
+		if !os.IsNotExist(err) {
+			slog.Error("failed to read yaml skills directory", "dir", l.dir, "error", err)
 			return 0
 		}
-		slog.Error("failed to read yaml skills directory", "dir", l.dir, "error", err)
-		return 0
+		slog.Debug("yaml skills directory does not exist", "dir", l.dir)
+		entries = nil // documented absence: no files, so nothing is loaded
 	}
 
+	next := make(map[string]string, len(l.loaded))
 	count := 0
 	for _, entry := range entries {
 		if entry.IsDir() {
@@ -258,30 +264,48 @@ func (l *Loader) LoadAll() int {
 		}
 
 		path := filepath.Join(l.dir, entry.Name())
-		if err := l.loadFile(path); err != nil {
+		name, err := l.loadFile(path)
+		if err != nil {
 			slog.Warn("failed to load yaml skill", "path", path, "error", err)
+			if prev, ok := l.loaded[path]; ok {
+				next[path] = prev
+			}
 			continue
 		}
+		next[path] = name
 		count++
 	}
+
+	keep := make(map[string]struct{}, len(next))
+	for _, name := range next {
+		keep[name] = struct{}{}
+	}
+	for path, name := range l.loaded {
+		if _, ok := keep[name]; ok {
+			continue
+		}
+		l.registry.Unregister(name)
+		slog.Info("yaml skill removed", "name", name, "path", path)
+	}
+	l.loaded = next
 
 	slog.Info("yaml skills loaded", "count", count, "dir", l.dir)
 	return count
 }
 
-func (l *Loader) loadFile(path string) error {
+func (l *Loader) loadFile(path string) (string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	var def SkillDef
 	if err := yaml.Unmarshal(data, &def); err != nil {
-		return fmt.Errorf("parsing YAML: %w", err)
+		return "", fmt.Errorf("parsing YAML: %w", err)
 	}
 
 	if def.Name == "" {
-		return fmt.Errorf("skill name is required")
+		return "", fmt.Errorf("skill name is required")
 	}
 	if def.Version == "" {
 		def.Version = "1.0.0"
@@ -289,15 +313,15 @@ func (l *Loader) loadFile(path string) error {
 
 	ys, err := NewFromDef(def)
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	l.registry.Register(ys)
-	l.loaded[def.Name] = struct{}{}
-	return nil
+	return def.Name, nil
 }
 
-// Reload re-reads all YAML skills (hot-reload).
+// Reload re-reads all YAML skills (hot-reload) and drops the ones whose
+// files were deleted.
 func (l *Loader) Reload() int {
 	return l.LoadAll()
 }
@@ -306,5 +330,9 @@ func (l *Loader) Reload() int {
 func (l *Loader) LoadedCount() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return len(l.loaded)
+	names := make(map[string]struct{}, len(l.loaded))
+	for _, name := range l.loaded {
+		names[name] = struct{}{}
+	}
+	return len(names)
 }

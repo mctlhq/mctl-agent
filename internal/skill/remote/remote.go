@@ -362,7 +362,10 @@ func (m *Manager) Unregister(name string) bool {
 		return false
 	}
 	delete(m.skills, name)
-	m.registry.Disable(name)
+	// Remove, not Disable: a disabled flag left behind would keep a later
+	// Register of the same name out of Match while List reports it as
+	// registered.
+	m.registry.Unregister(name)
 	return true
 }
 
