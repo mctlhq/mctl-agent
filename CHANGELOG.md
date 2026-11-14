@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.9.4](https://github.com/mctlhq/mctl-agent/compare/2.9.3...2.9.4) (2026-11-14)
+
+
+### Bug Fixes
+
+* **telegram:** guard bot commands by lookup, status and tenant ([006d0be](https://github.com/mctlhq/mctl-agent/commit/006d0be53948117ca5fda816637080346b229556))
+
 ## [2.9.3](https://github.com/mctlhq/mctl-agent/compare/2.9.2...2.9.3) (2026-11-14)
 
 
