@@ -1095,3 +1095,55 @@ func TestStoreFindDuplicateRebindDialect(t *testing.T) {
 		t.Errorf("different alert name must not match under rebind, got %s", dup.ID)
 	}
 }
+
+// FindByIDPrefix searches the whole table, honours the tenant filter, caps
+// the result at two rows so callers can detect ambiguity, and refuses
+// characters that cannot appear in a ticket ID (including LIKE wildcards).
+func TestFindByIDPrefix(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewStore(ctx, ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close() //nolint:errcheck
+
+	mk := func(id, tenant string) {
+		tk := &Ticket{Source: SourceManual, Type: TypeGeneric, Tenant: tenant}
+		if err := store.Create(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.ExecContext(ctx, `UPDATE tickets SET id=? WHERE id=?`, id, tk.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	mk("aaaa1111-0000-0000-0000-000000000000", "acme")
+	mk("aaaa2222-0000-0000-0000-000000000000", "other")
+	mk("aaaa3333-0000-0000-0000-000000000000", "acme")
+	mk("bbbb1111-0000-0000-0000-000000000000", "acme")
+
+	tests := []struct {
+		prefix, tenant string
+		want           int
+	}{
+		{"bbbb", "", 1},
+		{"BBBB", "", 1},
+		{"aaaa1", "", 1},
+		{"aaaa", "", 2}, // three match; capped at two -> ambiguous
+		{"aaaa2", "acme", 0},
+		{"aaaa2", "other", 1},
+		{"aaaa", "other", 1},
+		{"%", "", 0},
+		{"a_aa", "", 0},
+		{"", "", 0},
+		{"cccc", "", 0},
+	}
+	for _, tt := range tests {
+		got, err := store.FindByIDPrefix(ctx, tt.prefix, tt.tenant)
+		if err != nil {
+			t.Fatalf("FindByIDPrefix(%q, %q): %v", tt.prefix, tt.tenant, err)
+		}
+		if len(got) != tt.want {
+			t.Errorf("FindByIDPrefix(%q, %q) = %d rows, want %d", tt.prefix, tt.tenant, len(got), tt.want)
+		}
+	}
+}

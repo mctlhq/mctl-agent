@@ -262,3 +262,27 @@ func TestAnswerCallbackQueryTruncatesAndReportsErrors(t *testing.T) {
 		t.Fatalf("want non-200 error without the token, got %v", err)
 	}
 }
+
+func TestCommandScope(t *testing.T) {
+	tg := NewTelegram("tok", "100", map[string]string{"acme": "200", "other": "300", "dup1": "400", "dup2": "400"})
+	tests := []struct {
+		chat     int64
+		tenant   string
+		operator bool
+	}{
+		{100, "", true},
+		{200, "acme", false},
+		{300, "other", false},
+		{400, "", false}, // one chat listed for two tenants: no scope
+		{999, "", false}, // not allowlisted
+	}
+	for _, tt := range tests {
+		tenant, operator := tg.CommandScope(tt.chat)
+		if tenant != tt.tenant || operator != tt.operator {
+			t.Errorf("CommandScope(%d) = (%q, %v), want (%q, %v)", tt.chat, tenant, operator, tt.tenant, tt.operator)
+		}
+	}
+	if _, op := (*Telegram)(nil).CommandScope(100); op {
+		t.Error("nil notifier must not grant operator scope")
+	}
+}

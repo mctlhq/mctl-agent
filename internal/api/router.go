@@ -16,6 +16,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -245,7 +246,8 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 			return
 		}
 
-		handleTelegramCommand(r.Context(), cmd, opts)
+		tenant, operator := opts.Telegram.CommandScope(update.Message.Chat.ID)
+		handleTelegramCommand(r.Context(), cmd, opts, commandScope{tenant: tenant, operator: operator})
 		w.WriteHeader(http.StatusOK)
 	}
 }
@@ -255,7 +257,18 @@ func telegramWebhookHandler(opts Options) http.HandlerFunc {
 // r.Context() through changes nothing about when replies happen. It only
 // adds cancellation if the webhook caller disconnects before the command
 // (a GitHub merge/close) finishes, instead of letting it run unbounded.
-func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opts Options) {
+func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opts Options, scope commandScope) {
+	if !scope.operator && scope.tenant == "" {
+		// Allowlisted but with no single tenant (or not allowlisted at all):
+		// nothing this chat may see or change.
+		slog.Warn("telegram command from chat without a tenant scope", "command", cmd.Command)
+		return
+	}
+	if !scope.operator && operatorOnlyCommands[cmd.Command] {
+		_ = opts.Telegram.SendText("/" + cmd.Command + " is only available in the operator chat")
+		return
+	}
+
 	// Reads and the GitHub calls stay on ctx — cancelling those when the
 	// caller disconnects is the point. The status writes below do not: they
 	// record an external side effect that already happened (a merged or
@@ -282,20 +295,28 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 			slog.Error("failed to list tickets for /status", "error", err)
 			return
 		}
-		_ = opts.Telegram.SendStatus(tickets)
+		_ = opts.Telegram.SendStatus(scope.filter(tickets))
 
 	case "ticket":
-		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
+		t, miss := findTicketByPrefix(ctx, opts.Store, cmd.TicketID, scope)
 		if t == nil {
-			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			_ = opts.Telegram.SendText(miss)
 			return
 		}
 		_ = opts.Telegram.SendTicketDetail(t)
 
 	case "approve":
-		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
+		t, miss := findTicketByPrefix(ctx, opts.Store, cmd.TicketID, scope)
 		if t == nil {
-			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			_ = opts.Telegram.SendText(miss)
+			return
+		}
+		// Only a ticket whose fix is still a proposal may be approved. A
+		// resolved or suppressed ticket keeps its PR number, and merging that
+		// PR would ship a fix nobody is waiting for any more — or one an
+		// operator already rejected.
+		if t.Status != ticket.StatusFixProposed {
+			_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " is " + t.Status + "; only a " + ticket.StatusFixProposed + " ticket can be approved")
 			return
 		}
 		if t.PRNumber == 0 {
@@ -311,9 +332,9 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 		_ = opts.Telegram.SendText("PR #" + strings.TrimSpace(fmt.Sprint(t.PRNumber)) + " merged for " + t.Service)
 
 	case "reject":
-		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
+		t, miss := findTicketByPrefix(ctx, opts.Store, cmd.TicketID, scope)
 		if t == nil {
-			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			_ = opts.Telegram.SendText(miss)
 			return
 		}
 		if t.PRNumber > 0 {
@@ -324,9 +345,9 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 		_ = opts.Telegram.SendText("Ticket " + cmd.TicketID + " rejected: " + cmd.Reason)
 
 	case "ignore":
-		t := findTicketByPrefix(ctx, opts.Store, cmd.TicketID)
+		t, miss := findTicketByPrefix(ctx, opts.Store, cmd.TicketID, scope)
 		if t == nil {
-			_ = opts.Telegram.SendText("Ticket not found: " + cmd.TicketID)
+			_ = opts.Telegram.SendText(miss)
 			return
 		}
 		t.Status = ticket.StatusSuppressed
@@ -353,25 +374,82 @@ func handleTelegramCommand(ctx context.Context, cmd *notify.TelegramCommand, opt
 	}
 }
 
-// findTicketByPrefix finds a ticket by the first 8 chars of its ID.
-func findTicketByPrefix(ctx context.Context, store *ticket.Store, prefix string) *ticket.Ticket {
-	// Try exact match first.
-	t, err := store.Get(ctx, prefix)
-	if err == nil {
-		return t
-	}
+// operatorOnlyCommands act on the whole agent rather than on one tenant's
+// tickets, so a tenant chat must not run them.
+var operatorOnlyCommands = map[string]bool{
+	"pause":  true,
+	"resume": true,
+	"digest": true,
+}
 
-	// Search by prefix in open tickets.
-	tickets, err := store.ListAll(ctx)
-	if err != nil {
-		return nil
+// commandScope is what the chat a command came from may act on: everything
+// (the operator chat) or one tenant's tickets (a tenant chat).
+type commandScope struct {
+	tenant   string
+	operator bool
+}
+
+func (s commandScope) allows(t *ticket.Ticket) bool {
+	return s.operator || (s.tenant != "" && t.Tenant == s.tenant)
+}
+
+func (s commandScope) filter(tickets []*ticket.Ticket) []*ticket.Ticket {
+	if s.operator {
+		return tickets
 	}
+	out := make([]*ticket.Ticket, 0, len(tickets))
 	for _, t := range tickets {
-		if strings.HasPrefix(t.ID, prefix) {
-			return t
+		if s.allows(t) {
+			out = append(out, t)
 		}
 	}
-	return nil
+	return out
+}
+
+// findTicketByPrefix resolves the ticket ID typed into a bot command: a full
+// ID or a unique prefix of one (the bot shows the first 8 characters). The
+// search covers the whole table, not a recent window, and is confined to the
+// chat's tenant. When no single ticket matches it returns nil and the reply
+// to send.
+//
+// A ticket outside the chat's scope reads as "not found", the same as one
+// that does not exist, so a tenant chat cannot probe another tenant's IDs.
+func findTicketByPrefix(ctx context.Context, store *ticket.Store, prefix string, scope commandScope) (*ticket.Ticket, string) {
+	notFound := "Ticket not found: " + prefix
+
+	if t, err := store.Get(ctx, prefix); err == nil {
+		if !scope.allows(t) {
+			return nil, notFound
+		}
+		return t, ""
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		slog.Error("ticket lookup failed", "error", err)
+		return nil, "Ticket lookup failed, try again"
+	}
+
+	matches, err := store.FindByIDPrefix(ctx, prefix, scope.tenant)
+	if err != nil {
+		slog.Error("ticket prefix lookup failed", "error", err)
+		return nil, "Ticket lookup failed, try again"
+	}
+	switch len(matches) {
+	case 0:
+		return nil, notFound
+	case 1:
+		// Get loads evidence; the list query does not. Re-read so callers
+		// see the same ticket shape either way.
+		t, err := store.Get(ctx, matches[0].ID)
+		if err != nil {
+			slog.Error("ticket lookup failed", "error", err)
+			return nil, "Ticket lookup failed, try again"
+		}
+		if !scope.allows(t) {
+			return nil, notFound
+		}
+		return t, ""
+	default:
+		return nil, "Ticket ID " + prefix + " is ambiguous, use more characters"
+	}
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
