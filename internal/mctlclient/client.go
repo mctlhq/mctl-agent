@@ -16,6 +16,7 @@ package mctlclient
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,6 +26,10 @@ import (
 
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
+
+// resolveTimeout bounds one ResolveAlert call end to end.
+// A var so tests can shrink it.
+var resolveTimeout = 10 * time.Second
 
 // Client communicates with the mctl-api REST API.
 type Client struct {
@@ -266,13 +271,32 @@ func (c *Client) PublishAlert(t *ticket.Ticket) {
 // webhook path passes "alert resolved by AlertManager"; the poller's
 // self-cleanup paths pass the GC reason that closed the ticket locally.
 //
-// Errors are logged and swallowed (mirrors PublishAlert/UpdateAlert) — callers
-// are fire-and-forget and must not block on a remote write.
-func (c *Client) ResolveAlert(id, reason string) {
+// The request is bound to ctx and additionally capped at resolveTimeout, so a
+// stalled mctl-api cannot pin the caller. Failures are logged with alert_id
+// and also returned, so a caller can tell a lost resolve from a delivered one.
+func (c *Client) ResolveAlert(ctx context.Context, id, reason string) error {
+	ctx, cancel := context.WithTimeout(ctx, resolveTimeout)
+	defer cancel()
 	body := map[string]interface{}{"reason": reason}
-	if err := c.doPost("/api/v1/incidents/"+id+"/resolve", body); err != nil {
-		slog.Error("failed to resolve alert in mctl-api", "id", id, "error", err)
+	if err := c.doPostCtx(ctx, "/api/v1/incidents/"+id+"/resolve", body); err != nil {
+		slog.Error("failed to resolve alert in mctl-api", "alert_id", id, "error", err)
+		return err
 	}
+	return nil
+}
+
+// ResolveAlerts resolves ids one at a time. A burst of AlertManager resolves
+// therefore costs one in-flight request, not one goroutine per id, and a
+// failure on one id is logged by ResolveAlert and does not skip the rest.
+// It returns the number of ids that failed.
+func (c *Client) ResolveAlerts(ctx context.Context, ids []string, reason string) int {
+	failed := 0
+	for _, id := range ids {
+		if err := c.ResolveAlert(ctx, id, reason); err != nil {
+			failed++
+		}
+	}
+	return failed
 }
 
 // UpdateAlert sends an incident update to mctl-api.
@@ -300,12 +324,16 @@ func (c *Client) UpdateAlert(t *ticket.Ticket) {
 }
 
 func (c *Client) doPost(path string, body interface{}) error {
+	return c.doPostCtx(context.Background(), path, body)
+}
+
+func (c *Client) doPostCtx(ctx context.Context, path string, body interface{}) error {
 	jsonBody, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("marshaling body: %w", err)
 	}
 
-	req, err := http.NewRequest("POST", c.baseURL+path, bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.baseURL+path, bytes.NewReader(jsonBody))
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}

@@ -120,9 +120,9 @@ func main() {
 	alertHandler := monitor.NewAlertHandler(store, pipe.ProcessTicket)
 	alertHandler.FlapCooldown = cfg.AlertFlapCooldown
 	alertHandler.OnResolve = func(ids []string) {
-		for _, id := range ids {
-			go mctlClient.ResolveAlert(id, "alert resolved by AlertManager")
-		}
+		// One goroutine, sequential: a flap burst must not fan out one
+		// goroutine per id. ResolveAlert bounds each call and logs failures.
+		go mctlClient.ResolveAlerts(context.Background(), ids, "alert resolved by AlertManager")
 	}
 	if cfg.AlertIgnoreServiceRegex != "" {
 		re, err := regexp.Compile(cfg.AlertIgnoreServiceRegex)
