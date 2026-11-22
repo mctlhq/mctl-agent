@@ -72,17 +72,13 @@ func NewPoller(client *mctlclient.Client, store *ticket.Store, onTicket func(*ti
 // `analyzing`. reason is the GC reason that closed the ticket locally, so
 // mctl-api records why each path resolved it. Fire-and-forget: ResolveAlert
 // logs and swallows errors and the poll loop must not block on a remote write.
-// propagateResolve deliberately takes no context. The work is a fire-and-forget
-// POST to mctl-api whose client carries its own 15s timeout, so there is
-// nothing here for a caller's cancellation to bound; accepting a ctx and
-// ignoring it would be the same defect review caught in ListAll, dressed up as
-// propagation. Threading one properly means giving mctlclient.ResolveAlert a
-// context, which is a separate change.
+// ResolveAlert carries its own 10s context, so the goroutine is bounded even
+// though propagateResolve takes no caller context.
 func (p *Poller) propagateResolve(id, reason string) {
 	if p.client == nil {
 		return
 	}
-	go p.client.ResolveAlert(id, reason)
+	go func() { _ = p.client.ResolveAlert(context.Background(), id, reason) }()
 }
 
 // Run starts the polling loop. Blocks until ctx is cancelled.

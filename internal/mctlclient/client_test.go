@@ -15,10 +15,17 @@
 package mctlclient
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -109,7 +116,7 @@ func TestResolveAlertHitsCorrectEndpoint(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	c.ResolveAlert("ticket-abc-123", "auto-resolved: stale TTL GC")
+	_ = c.ResolveAlert(context.Background(), "ticket-abc-123", "auto-resolved: stale TTL GC")
 
 	if gotMethod != http.MethodPost {
 		t.Errorf("method: want POST, got %q", gotMethod)
@@ -136,7 +143,9 @@ func TestResolveAlertSwallowsServerError(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	c.ResolveAlert("ticket-abc-123", "reason") // must not panic, must not block.
+	if err := c.ResolveAlert(context.Background(), "ticket-abc-123", "reason"); err == nil {
+		t.Error("server 500 must surface as an error, not be reported as delivered")
+	}
 }
 
 // PublishAlert and UpdateAlert carry the ticket's trace id when it has one
@@ -205,5 +214,74 @@ func TestListAuditDecodesAPISchema(t *testing.T) {
 		e.Parameters["team_name"] != "acme" || e.Parameters["component_name"] != "api" ||
 		e.WorkflowName != "deploy-service-x1" || e.Timestamp.IsZero() {
 		t.Fatalf("decoded entry = %+v", e)
+	}
+}
+
+// A stalled mctl-api must not pin the caller: the 10s budget (shrunk here)
+// has to reach the HTTP request itself.
+func TestResolveAlertTimesOutOnStalledServer(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	old := resolveTimeout
+	resolveTimeout = 100 * time.Millisecond
+	defer func() { resolveTimeout = old }()
+
+	c := NewClient(srv.URL, "t")
+	start := time.Now()
+	err := c.ResolveAlert(context.Background(), "stuck", "r")
+	if err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("err = %v, want deadline exceeded", err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Errorf("returned after %v, want about 100ms", d)
+	}
+}
+
+// One failing id is logged with alert_id and must not abort the rest.
+func TestResolveAlertsLogsFailureAndContinues(t *testing.T) {
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen = append(seen, r.URL.Path)
+		mu.Unlock()
+		if strings.Contains(r.URL.Path, "/bad/") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	defer slog.SetDefault(prev)
+
+	c := NewClient(srv.URL, "t")
+	failed := c.ResolveAlerts(context.Background(), []string{"a", "bad", "c"}, "r")
+
+	if failed != 1 {
+		t.Errorf("failed = %d, want 1", failed)
+	}
+	want := []string{"/api/v1/incidents/a/resolve", "/api/v1/incidents/bad/resolve", "/api/v1/incidents/c/resolve"}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(seen, ",") != strings.Join(want, ",") {
+		t.Errorf("requests = %v, want %v (sequential, none skipped)", seen, want)
+	}
+	if out := buf.String(); !strings.Contains(out, "alert_id=bad") || !strings.Contains(out, "level=ERROR") {
+		t.Errorf("log missing ERROR with alert_id=bad: %q", out)
 	}
 }
