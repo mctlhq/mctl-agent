@@ -288,12 +288,12 @@ func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
 			wantStatus: ticket.StatusEscalated,
 		},
 		{
-			// Fix generation itself failed: a fix was identified, so the existing
-			// behaviour of recording fix_proposed is kept — but it must now reach
-			// mctl-api too, rather than only the local store.
+			// Fix generation failed: no PR exists, so fix_proposed would claim
+			// a proposal nobody can find. It goes to a human, as a CreatePR
+			// failure does (mctlhq/mctl-agent#117).
 			name:       "fix generation failed",
 			s:          stubSkill{fixErr: errors.New("boom")},
-			wantStatus: ticket.StatusFixProposed,
+			wantStatus: ticket.StatusEscalated,
 		},
 	}
 
@@ -317,6 +317,58 @@ func TestHandleHighConfidenceFixDoesNotLeaveAnalyzing(t *testing.T) {
 				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
 			}
 		})
+	}
+}
+
+// TestHandleHighConfidenceFixPatchFailureEscalates covers the second #117
+// path: the file resolves but no patch can be generated. The ticket must be
+// escalated with the reason recorded, not left in fix_proposed without a PR.
+func TestHandleHighConfidenceFixPatchFailureEscalates(t *testing.T) {
+	p, store := newEscalateTestPipeline(t)
+	p.telegram = notify.NewTelegram("", "", nil)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/contents/") {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"type": "file", "encoding": "base64", "sha": "f1",
+				"content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n")),
+			})
+			return
+		}
+		http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	gh := fixer.NewGitHubFixer("", "", "owner", "repo", store, true, 10, 10, gitopspath.DefaultAllowlist())
+	if err := gh.SetBaseURL(srv.URL + "/"); err != nil {
+		t.Fatal(err)
+	}
+	p.github = gh
+
+	tk := newAnalyzingTicket(t, store)
+	// No FixType, no current/suggested value, no NewContent: no strategy applies.
+	diag := &skill.DiagnosisResult{Diagnosis: "d", Confidence: ticket.ConfidenceHigh, Fixable: true}
+	s := stubSkill{fix: &skill.FixResult{
+		Applied:  true,
+		FilePath: "platform-gitops/services/argocd/root-app/values.yaml",
+		Summary:  "x",
+	}}
+
+	p.handleHighConfidenceFix(context.Background(), tk, s, diag, slog.Default())
+
+	got, err := store.Get(ctx, tk.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusEscalated {
+		t.Fatalf("status = %q, want %q", got.Status, ticket.StatusEscalated)
+	}
+	if !strings.Contains(got.Analysis, "no applicable fix strategy") {
+		t.Errorf("analysis does not record the reason: %q", got.Analysis)
+	}
+	if got.PRURL != "" {
+		t.Errorf("PRURL = %q, want empty", got.PRURL)
 	}
 }
 

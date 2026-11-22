@@ -677,9 +677,11 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		failed("fix generation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but generation failed: "+fmt.Sprint(err))
-		failedFrom := t.Status
-		t.Status = ticket.StatusFixProposed
-		p.persistDiagnosisAndMirror(ctx, t, failedFrom)
+		// escalate, not a status assignment: it captures the gate status
+		// itself, so it must see the ticket before any status change.
+		p.escalate(ctx, t, fmt.Sprintf(
+			"[escalated] Skill %s identified a fix but could not generate it: %v. "+
+				"No PR was created.", s.Name(), err))
 		return
 	}
 	if !fixResult.Applied {
@@ -853,9 +855,8 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		failed("patch generation failed")
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
 			"Fix identified but patch generation failed: "+patchErr.Error())
-		failedFrom := t.Status
-		t.Status = ticket.StatusFixProposed
-		p.persistDiagnosisAndMirror(ctx, t, failedFrom)
+		p.escalate(ctx, t, "[escalated] A fix was identified but the patch could not be generated: "+
+			patchErr.Error()+". No PR was created.")
 		return
 	}
 
