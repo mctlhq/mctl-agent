@@ -16,14 +16,13 @@ package builtin
 
 import (
 	"context"
-	"strings"
 
 	"github.com/mctlhq/mctl-agent/internal/fixer"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
 
-// ScaleUpSkill detects when HPA is maxed out and latency is high, suggesting max replica increase.
+// ScaleUpSkill detects an HPA that reports it cannot scale further and suggests a max replica increase.
 type ScaleUpSkill struct{}
 
 func NewScaleUpSkill() *ScaleUpSkill { return &ScaleUpSkill{} }
@@ -55,18 +54,13 @@ func (s *ScaleUpSkill) Match(_ context.Context, _ *ticket.Ticket, ev skill.Evide
 		}
 	}
 
-	// Check for high request latency combined with status indicators.
-	status := ev.Get("argocd_status")
-	if status != "" && strings.Contains(status, `"health":"Degraded"`) &&
-		containsAny(logs, "timeout", "503", "upstream connect error") {
-		return skill.MatchResult{
-			Matched:    true,
-			Confidence: 0.65,
-			Priority:   65,
-			Reason:     "Degraded health with timeout/503 errors — possible capacity issue",
-		}
-	}
-
+	// A Degraded app with timeouts or 503s in its logs is deliberately not a
+	// match. A pod that crashes on startup produces exactly that picture: on
+	// 2026-11-23 labs/mctl-telegram-preview crash-looped on "authorization
+	// server metadata unusable: HTTP 503" with one replica and no HPA
+	// pressure, and this skill told the operator to raise maxReplicas (as it
+	// had on 2026-10-29, 2026-10-30 and 2026-11-13). The diagnosis below is
+	// a fixed sentence about HPA limits, so only an HPA signal may select it.
 	return skill.MatchResult{}
 }
 
