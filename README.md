@@ -26,7 +26,7 @@ AlertManager Webhook / Periodic Polling
 
 Skills are resolved in three tiers:
 
-1. **Builtin** — 9 compiled Go skills: OOMKilled, ImagePull, Rollback, ArgoCDDrift, ProbeFix, CPUThrottle, QuotaAdjust, ScaleUp, LLMDiagnosis
+1. **Builtin** — 13 compiled Go skills: OOMKilled, ImagePull, Rollback, ArgoCDDrift, ArgoCDSyncFailed, ProbeFix, CrashLoop, CPUThrottle, QuotaAdjust, ScaleUp, GitHubActions, WorkflowFixer, LLMDiagnosis
 2. **YAML-defined** — hot-reloadable from `skills/custom/` (e.g. `high-restart-count.yaml`, `redis-connection-timeout.yaml`)
 3. **Remote** — HTTP-delegating skills registered at runtime via REST API
 
