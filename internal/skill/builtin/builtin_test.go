@@ -572,7 +572,13 @@ func TestScaleUpSkillMatch(t *testing.T) {
 	}{
 		{"max replicas reached", "max replicas reached for deployment", "", true},
 		{"ScaleUpLimited", "ScaleUpLimited: desired=10, max=5", "", true},
-		{"degraded + timeouts", "upstream connect error", `{"health":"Degraded"}`, true},
+		{"unable to scale", "unable to scale: max replicas", "", true},
+		// A crash on startup looks like this: Degraded, and the error that
+		// killed the pod mentions a 503 or a timeout. It is not HPA pressure.
+		{"degraded + upstream error", "upstream connect error", `{"health":"Degraded"}`, false},
+		{"degraded + crash on HTTP 503", "pa runtime: authorization server metadata unusable: HTTP 503", `{"health":"Degraded"}`, false},
+		{"degraded + timeout", "context deadline exceeded: timeout", `{"health":"Degraded"}`, false},
+		{"degraded + HPA signal", "ScaleUpLimited: desired=10, max=5", `{"health":"Degraded"}`, true},
 		{"healthy no issues", "all pods running", `{"health":"Healthy"}`, false},
 	}
 
