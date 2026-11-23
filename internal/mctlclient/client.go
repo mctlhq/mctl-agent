@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/ticket"
@@ -172,6 +173,35 @@ func (c *Client) GetServiceLogs(team, app string, lines int, since time.Duration
 		return nil, fmt.Errorf("parsing logs: %w", err)
 	}
 	return &resp, nil
+}
+
+// GetServicePods returns the pod state of a service as mctl-api reports it:
+// phase, readiness and, per container, the restart count, the current state
+// and the last termination. The body is returned undecoded, because it is
+// stored as evidence and read by whichever skill needs it.
+func (c *Client) GetServicePods(team, app string) (json.RawMessage, error) {
+	body, err := c.doGet(fmt.Sprintf("/api/v1/pods/%s/%s", url.PathEscape(team), url.PathEscape(app)))
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("parsing pods: response is not JSON")
+	}
+	return body, nil
+}
+
+// ListServiceEvents returns the Warning events of the last hour about one
+// service's objects in its tenant namespace, undecoded for the same reason.
+func (c *Client) ListServiceEvents(team, app string) (json.RawMessage, error) {
+	q := url.Values{"app": {app}, "type": {"Warning"}, "since": {"1h"}}
+	body, err := c.doGet(fmt.Sprintf("/api/v1/events/%s?%s", url.PathEscape(team), q.Encode()))
+	if err != nil {
+		return nil, err
+	}
+	if !json.Valid(body) {
+		return nil, fmt.Errorf("parsing events: response is not JSON")
+	}
+	return body, nil
 }
 
 // GetResourceUsage returns resource usage for a tenant.

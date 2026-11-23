@@ -17,6 +17,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -66,6 +67,32 @@ func (p *Pipeline) collectEvidence(ctx context.Context, t *ticket.Ticket) {
 			Content:     ticket.EvidenceJSON(logs),
 			CollectedAt: now,
 		})
+	}
+
+	// Pod state and Warning events. Logs alone cannot say that a container
+	// is restarting, with which exit code, or that the kubelet is backing
+	// off: those are pod status and events, never lines the application
+	// writes. A failed read adds no evidence at all, so a skill never takes
+	// "could not read" for "no restarts".
+	if t.Service != "" && t.Type != ticket.TypeWorkflowFailed {
+		if pods, err := p.apiClient.GetServicePods(t.Tenant, t.Service); err == nil {
+			_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
+				Type:        "pods",
+				Content:     string(pods),
+				CollectedAt: now,
+			})
+		} else {
+			slog.DebugContext(ctx, "pod state not collected", "ticket_id", t.ID, "error", err)
+		}
+		if events, err := p.apiClient.ListServiceEvents(t.Tenant, t.Service); err == nil {
+			_ = p.store.AddEvidence(ctx, t.ID, ticket.Evidence{
+				Type:        "events",
+				Content:     string(events),
+				CollectedAt: now,
+			})
+		} else {
+			slog.DebugContext(ctx, "events not collected", "ticket_id", t.ID, "error", err)
+		}
 	}
 
 	// Resource usage.
