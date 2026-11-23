@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.9.6](https://github.com/mctlhq/mctl-agent/compare/2.9.5...2.9.6) (2026-11-23)
+
+
+### Bug Fixes
+
+* **agent:** bound ResolveAlert with a 10s context, resolve sequentially ([d9722d3](https://github.com/mctlhq/mctl-agent/commit/d9722d3c7192f0a610f030248e3204295abc3c18)), closes [#72](https://github.com/mctlhq/mctl-agent/issues/72)
+* **mctlclient:** bound ResolveAlert with a 10s context and log failures ([4acf43c](https://github.com/mctlhq/mctl-agent/commit/4acf43cbe9445da3936a4e18873222f1c0b39194))
+* **pipeline:** escalate when fix or patch generation fails ([f18d440](https://github.com/mctlhq/mctl-agent/commit/f18d440a48f3784b1764ff7ce592e9c9a306c9e0)), closes [#117](https://github.com/mctlhq/mctl-agent/issues/117)
+* **pipeline:** escalate() on the two failure paths of handleHighConfidenceFix ([644bca1](https://github.com/mctlhq/mctl-agent/commit/644bca1797e76c87f0e0ded33aad78fef98de2a1))
+* **skill:** scale_up matches only on an HPA signal ([d921768](https://github.com/mctlhq/mctl-agent/commit/d921768c59cf45e3aecb4668d517d63efd673b70))
+* **skill:** scale_up matches only on an HPA signal ([b24f23a](https://github.com/mctlhq/mctl-agent/commit/b24f23ad4ef7f44907cf9bef491c6e75a8a40fdd))
+
 ## [2.9.5](https://github.com/mctlhq/mctl-agent/compare/2.9.4...2.9.5) (2026-11-14)
 
 
