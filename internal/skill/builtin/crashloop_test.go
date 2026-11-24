@@ -34,6 +34,8 @@ const (
 	recoveredContainer = `{"name":"app","ready":true,"restart_count":9,"state":{"kind":"running"},"last_termination":{"kind":"terminated","reason":"Error","exit_code":1}}`
 	fewRestarts        = `{"name":"app","ready":false,"restart_count":2,"state":{"kind":"waiting","reason":"ContainerCreating"},"last_termination":{"kind":"terminated","reason":"Error","exit_code":1}}`
 	cleanExits         = `{"name":"job","ready":false,"restart_count":6,"state":{"kind":"waiting","reason":"ContainerCreating"},"last_termination":{"kind":"terminated","reason":"Completed","exit_code":0}}`
+	initRetriedThenOK  = `{"name":"wait-db","ready":true,"restart_count":4,"state":{"kind":"terminated","reason":"Completed","exit_code":0},"last_termination":{"kind":"terminated","reason":"Error","exit_code":1}}`
+	terminatedFailing  = `{"name":"migrate","ready":false,"restart_count":4,"state":{"kind":"terminated","reason":"Error","exit_code":1},"last_termination":{"kind":"terminated","reason":"Error","exit_code":1}}`
 	healthyContainer   = `{"name":"app","ready":true,"restart_count":0,"state":{"kind":"running"}}`
 )
 
@@ -54,6 +56,8 @@ func TestCrashLoopSkillMatch(t *testing.T) {
 		{"two restarts are not a loop", podsEvidence(fewRestarts), false},
 		{"restarts that exit 0 are not crashes", podsEvidence(cleanExits), false},
 		{"healthy", podsEvidence(healthyContainer), false},
+		{"init container retried, then completed", `{"items":[{"name":"p","init_containers":[` + initRetriedThenOK + `],"containers":[` + healthyContainer + `]}]}`, false},
+		{"terminated with a failure right now", `{"items":[{"name":"p","init_containers":[` + terminatedFailing + `],"containers":[]}]}`, true},
 		{"one looping container among healthy ones", podsEvidence(healthyContainer + "," + backoffContainer), true},
 		{"looping init container", `{"items":[{"name":"p","init_containers":[` + backoffContainer + `],"containers":[]}]}`, true},
 		// A read that failed leaves no pods evidence. That is unknown, not

@@ -129,8 +129,17 @@ func inCrashLoop(c crashContainer) bool {
 	if c.Ready && c.State != nil && c.State.Kind == "running" {
 		return false
 	}
-	lt := c.LastTermination
-	return lt.Reason != "Completed" && (lt.ExitCode == nil || *lt.ExitCode != 0)
+	// So has one that finished cleanly: an init container that retried
+	// while a dependency came up ends terminated/Completed and keeps the
+	// earlier failure in its last termination.
+	if c.State != nil && c.State.Kind == "terminated" && exitedCleanly(c.State) {
+		return false
+	}
+	return !exitedCleanly(c.LastTermination)
+}
+
+func exitedCleanly(st *crashState) bool {
+	return st.Reason == "Completed" || (st.ExitCode != nil && *st.ExitCode == 0)
 }
 
 func (s *CrashLoopSkill) Match(_ context.Context, _ *ticket.Ticket, ev skill.EvidenceSet) skill.MatchResult {
