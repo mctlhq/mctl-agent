@@ -39,6 +39,16 @@ var OrphanPruned = promauto.NewCounter(
 	},
 )
 
+// ArgoRecoveredResolved counts poller-created argocd_app_degraded tickets
+// closed because the poller itself observed the application Healthy and
+// Synced again.
+var ArgoRecoveredResolved = promauto.NewCounter(
+	prometheus.CounterOpts{
+		Name: "mctl_agent_argocd_recovered_resolved_total",
+		Help: "Poller-created ArgoCD degraded tickets auto-resolved after the app was observed Healthy and Synced.",
+	},
+)
+
 // AMReconcileResolved counts tickets auto-resolved by AlertManager
 // fingerprint reconciliation.
 var AMReconcileResolved = promauto.NewCounter(
