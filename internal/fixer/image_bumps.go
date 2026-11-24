@@ -23,6 +23,12 @@ import (
 	"github.com/google/go-github/v68/github"
 )
 
+// MaxCommitClockSkew is how far ahead of this process's clock a committer
+// date may be before the history is refused. Committer dates are set by the
+// client that made the commit, so a wrong clock can put one in the future,
+// where it would stay "recent", and the newest change, until that date.
+const MaxCommitClockSkew = 5 * time.Minute
+
 // RecentBumpCommitCap is how many commits to one values file a single
 // RecentImageBumps read accepts. A file that changed more often than this
 // inside the window is reported as unreadable rather than as a shorter list.
@@ -65,7 +71,8 @@ type ImageBumpHistory struct {
 // "no recent deploy seen", never towards a rollback of something else.
 //
 // Every failure is an error: the listing, a later page that was not read, a
-// commit without a SHA or a date, a file revision that could not be fetched.
+// commit without a SHA or a date, a file revision that could not be fetched
+// or whose image block was not understood, a tag change dated in the future.
 // Only GitHub's own absence signals mean absent: an empty listing, and a 404
 // for the file at a revision (created or deleted by that commit, so there is
 // no tag change to report).
@@ -124,6 +131,11 @@ func (f *GitHubFixer) RecentImageBumps(ctx context.Context, valuesPath string, s
 			continue
 		}
 
+		if at.After(time.Now().Add(MaxCommitClockSkew)) {
+			return nil, fmt.Errorf("commit %s changed the image tag of %s but is dated %s, in the future: commit times cannot be trusted",
+				sha, valuesPath, at.UTC().Format(time.RFC3339))
+		}
+
 		subject, _, _ := strings.Cut(c.GetCommit().GetMessage(), "\n")
 		history.Bumps = append(history.Bumps, ImageBump{
 			SHA:         sha,
@@ -138,7 +150,8 @@ func (f *GitHubFixer) RecentImageBumps(ctx context.Context, valuesPath string, s
 
 // imageTagAt reads the chart-level image.tag of valuesPath at ref. ok is
 // false when the file does not exist there (GitHub's 404) or declares no
-// chart-level tag; any other failure is returned as an error.
+// chart-level tag; any other failure is returned as an error, including a
+// file whose image block was not understood.
 func (f *GitHubFixer) imageTagAt(ctx context.Context, valuesPath, ref string) (tag string, ok bool, err error) {
 	content, err := f.GetFileContent(ctx, valuesPath, ref)
 	if err != nil {
@@ -147,6 +160,9 @@ func (f *GitHubFixer) imageTagAt(ctx context.Context, valuesPath, ref string) (t
 		}
 		return "", false, fmt.Errorf("reading %s at %s: %w", valuesPath, ref, err)
 	}
-	tag, ok = ExtractImageTag(content)
-	return tag, ok && tag != "", nil
+	image, ok, err := ReadImageRef(content)
+	if err != nil {
+		return "", false, fmt.Errorf("reading %s at %s: %w", valuesPath, ref, err)
+	}
+	return image.Tag, ok, nil
 }

@@ -638,6 +638,11 @@ func TestGenerateImageRollbackRefusesPrepull(t *testing.T) {
 		{"prepull enabled", "prepull:\n  enabled: true\n  ref: \"repo:1.117.0@sha256:abc\"\n", true},
 		{"prepull block without the switch", "prepull:\n  ref: \"repo:1.117.0@sha256:abc\"\n", true},
 		{"prepull in flow style cannot be read", "prepull: {enabled: false}\n", true},
+		// A quoted false is a non-empty string, which the chart's
+		// `if .Values.prepull.enabled` takes as true.
+		{"prepull switch is the string \"false\"", "prepull:\n  enabled: \"false\"\n", true},
+		{"prepull switch is the string 'false'", "prepull:\n  enabled: 'false'\n", true},
+		{"prepull disabled, with a comment", "prepull:\n  enabled: false # off until the registry is back\n", false},
 		{"a nested prepull key is another chart's business", "sub:\n  prepull:\n    enabled: true\n", false},
 	}
 	for _, tt := range tests {

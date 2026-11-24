@@ -22,6 +22,7 @@ import (
 	"strings"
 
 	"github.com/google/go-github/v68/github"
+	"gopkg.in/yaml.v3"
 )
 
 // PreviousTagLookupCommitCap bounds how far back we walk a values file's
@@ -263,6 +264,76 @@ func ExtractImageRef(content string) (ImageRef, bool) {
 	return ref, true
 }
 
+// ReadImageRef is ExtractImageRef for a caller that acts on the answer: it
+// tells "this file declares no chart-level image tag" (ok=false, nil error)
+// from "this file's image block was not understood" (an error).
+//
+// ExtractImageRef is a line scanner. It does not see an image written in
+// flow style, under a quoted key, with an anchor or as a block scalar, and
+// reports each of those as "no tag", or as the wrong one. Here the same
+// content is also parsed as YAML, and the two readings have to agree on
+// image.tag. When they do not, the file was not read, which is not the same
+// as it having no tag.
+func ReadImageRef(content string) (ImageRef, bool, error) {
+	scanned, scannedOK := ExtractImageRef(content)
+	if !scannedOK {
+		scanned = ImageRef{}
+	}
+	parsed, err := yamlImageTag(content)
+	if err != nil {
+		return ImageRef{}, false, err
+	}
+	if parsed != scanned.Tag {
+		return ImageRef{}, false, fmt.Errorf(
+			"chart-level image.tag not understood: the line scan read %q, the YAML parse read %q", scanned.Tag, parsed)
+	}
+	if scanned.Tag == "" {
+		return ImageRef{}, false, nil
+	}
+	return scanned, true, nil
+}
+
+// yamlImageTag returns the scalar at image.tag of the first YAML document in
+// content, or "" when the document has no such key or holds null there. A
+// tag that is present but is not a plain scalar is an error.
+func yamlImageTag(content string) (string, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return "", fmt.Errorf("values file is not valid YAML: %w", err)
+	}
+	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 {
+		return "", nil
+	}
+	image := yamlMappingValue(doc.Content[0], "image")
+	if image == nil {
+		return "", nil
+	}
+	tag := yamlMappingValue(image, "tag")
+	switch {
+	case tag == nil:
+		return "", nil
+	case tag.Kind != yaml.ScalarNode:
+		return "", fmt.Errorf("image.tag is not a scalar")
+	case tag.Tag == "!!null":
+		return "", nil
+	}
+	return tag.Value, nil
+}
+
+// yamlMappingValue returns the value node of key in a mapping node, or nil
+// when n is not a mapping or has no such key.
+func yamlMappingValue(n *yaml.Node, key string) *yaml.Node {
+	if n == nil || n.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Kind == yaml.ScalarNode && n.Content[i].Value == key {
+			return n.Content[i+1]
+		}
+	}
+	return nil
+}
+
 // LookupPreviousImageTag is LookupPreviousImage for a caller that needs the
 // tag alone.
 func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, currentTag string) (string, error) {
@@ -280,6 +351,26 @@ func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, cu
 // in the cap window; the caller should degrade to diagnosis-only Telegram in
 // that case.
 func (f *GitHubFixer) LookupPreviousImage(ctx context.Context, valuesPath, currentTag string) (ImageRef, error) {
+	return f.lookupImage(ctx, valuesPath, func(ref ImageRef) bool { return ref.Tag != currentTag })
+}
+
+// LookupImageByTag walks the GitHub history of valuesPath and returns the
+// image of the most recent revision whose image.tag is exactly tag, with the
+// image.digest of that same revision. It is the lookup for a rollback whose
+// target is already known from the evidence: unlike LookupPreviousImage it
+// cannot settle on some other image when the file moved in the meantime.
+// Returns a zero ImageRef and a nil error when no revision in the cap window
+// carries the tag.
+func (f *GitHubFixer) LookupImageByTag(ctx context.Context, valuesPath, tag string) (ImageRef, error) {
+	if tag == "" {
+		return ImageRef{}, fmt.Errorf("no image tag to look up in %s", valuesPath)
+	}
+	return f.lookupImage(ctx, valuesPath, func(ref ImageRef) bool { return ref.Tag == tag })
+}
+
+// lookupImage returns the image of the newest revision of valuesPath, within
+// PreviousTagLookupCommitCap commits, that accept approves.
+func (f *GitHubFixer) lookupImage(ctx context.Context, valuesPath string, accept func(ImageRef) bool) (ImageRef, error) {
 	commits, _, err := f.client.Repositories.ListCommits(ctx, f.owner, f.repo, &github.CommitsListOptions{
 		Path: valuesPath,
 		ListOptions: github.ListOptions{
@@ -293,7 +384,9 @@ func (f *GitHubFixer) LookupPreviousImage(ctx context.Context, valuesPath, curre
 	for _, c := range commits {
 		sha := c.GetSHA()
 		if sha == "" {
-			continue
+			// A row that names no revision cannot be read, and the image it
+			// stands for may be the very one the walk is looking for.
+			return ImageRef{}, fmt.Errorf("commit without a SHA in the history of %s", valuesPath)
 		}
 		content, err := f.GetFileContent(ctx, valuesPath, sha)
 		if err != nil {
@@ -312,11 +405,17 @@ func (f *GitHubFixer) LookupPreviousImage(ctx context.Context, valuesPath, curre
 			}
 			return ImageRef{}, fmt.Errorf("reading %s at %s: %w", valuesPath, sha, err)
 		}
-		ref, ok := ExtractImageRef(content)
-		if !ok || ref.Tag == "" {
+		// A revision whose image block was not understood stops the walk
+		// like a failed read does: skipping it would hand back whatever
+		// older image comes next as if nothing lay in between.
+		ref, ok, err := ReadImageRef(content)
+		if err != nil {
+			return ImageRef{}, fmt.Errorf("reading %s at %s: %w", valuesPath, sha, err)
+		}
+		if !ok {
 			continue
 		}
-		if ref.Tag != currentTag {
+		if accept(ref) {
 			return ref, nil
 		}
 	}

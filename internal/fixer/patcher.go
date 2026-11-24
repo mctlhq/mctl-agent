@@ -182,9 +182,13 @@ func refusePrepull(lines []string) error {
 	if !present {
 		return nil
 	}
-	if idx, err := findScalarLine(lines, []string{"prepull", "enabled"}); err == nil &&
-		parseScalarLine(lines[idx]).value == "false" {
-		return nil
+	if idx, err := findScalarLine(lines, []string{"prepull", "enabled"}); err == nil {
+		// Only the plain boolean counts. A quoted "false" is a non-empty
+		// string, which the chart's `if .Values.prepull.enabled` takes as
+		// true: prepull is on for such a file.
+		if sc := parseScalarLine(lines[idx]); sc.quote == "" && sc.value == "false" {
+			return nil
+		}
 	}
 	return fmt.Errorf("values file configures prepull verification (prepull.enabled is not false): " +
 		"a rollback must first move prepull.ref to the older image, which is not automated")
