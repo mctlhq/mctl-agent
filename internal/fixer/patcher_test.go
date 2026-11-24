@@ -407,7 +407,7 @@ sidecar:
     repository: ghcr.io/mctlhq/whisper-builder
     tag: "2026.3.24-beta.19"`
 
-		newContent, summary, err := GenerateImageRollback(content, "2026.4.29-beta.1")
+		newContent, summary, err := GenerateImageRollback(content, ImageRef{Tag: "2026.4.29-beta.1"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -423,7 +423,7 @@ sidecar:
 	})
 
 	t.Run("missing tag returns error", func(t *testing.T) {
-		_, _, err := GenerateImageRollback("image:\n  repository: foo", "1.0.0")
+		_, _, err := GenerateImageRollback("image:\n  repository: foo", ImageRef{Tag: "1.0.0"})
 		if err == nil {
 			t.Error("expected error when no tag found")
 		}
@@ -434,7 +434,7 @@ sidecar:
   repository: ghcr.io/mctlhq/mctl-openclaw
   tag: "broken-2.0"  # bumped 2026-04-30 by deploy bot`
 
-		newContent, _, err := GenerateImageRollback(content, "good-1.0")
+		newContent, _, err := GenerateImageRollback(content, ImageRef{Tag: "good-1.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -455,7 +455,7 @@ image:
   repository: ghcr.io/mctlhq/mctl-openclaw
   tag: "broken-2.0"`
 
-		newContent, summary, err := GenerateImageRollback(content, "good-1.0")
+		newContent, summary, err := GenerateImageRollback(content, ImageRef{Tag: "good-1.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -481,7 +481,7 @@ image:
         service:
           port: 8080`
 
-		newContent, summary, err := GenerateImageRollback(content, "good-1.0")
+		newContent, summary, err := GenerateImageRollback(content, ImageRef{Tag: "good-1.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -506,7 +506,7 @@ image:
   repository: foo
   tag: "broken-2.0"`
 
-		newContent, _, err := GenerateImageRollback(content, "good-1.0")
+		newContent, _, err := GenerateImageRollback(content, ImageRef{Tag: "good-1.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -525,7 +525,7 @@ image:
   repository: ghcr.io/mctlhq/mctl-openclaw
   tag: "broken-2.0"`
 
-		newContent, summary, err := GenerateImageRollback(content, "good-1.0")
+		newContent, summary, err := GenerateImageRollback(content, ImageRef{Tag: "good-1.0"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -539,6 +539,129 @@ image:
 			t.Errorf("summary should reference the chart tag, not the global one: %s", summary)
 		}
 	})
+}
+
+const (
+	digestNew = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	digestOld = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+// A values file that pins image.digest runs the digest, not the tag
+// (base-service renders repository:tag@digest). The rollback has to restore
+// both, or it relabels the crashing image with the old version.
+func TestGenerateImageRollbackRestoresPinnedDigest(t *testing.T) {
+	pinned := "image:\n  repository: ghcr.io/mctlhq/mctl-telegram\n  tag: \"main-new\"\n" +
+		"  digest: \"" + digestNew + "\"  # pinned by gitops-bump\nimagePullSecrets:\n  - name: ghcr-credentials\n" +
+		"sidecar:\n  image:\n    tag: \"s1\"\n    digest: \"" + digestNew + "\"\n"
+
+	t.Run("tag and digest move together", func(t *testing.T) {
+		got, summary, err := GenerateImageRollback(pinned, ImageRef{Tag: "main-old", Digest: digestOld})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := strings.Replace(strings.Replace(pinned, `tag: "main-new"`, `tag: "main-old"`, 1), digestNew, digestOld, 1)
+		if got != want {
+			t.Errorf("content =\n%s\nwant\n%s", got, want)
+		}
+		if !strings.Contains(summary, "main-new to main-old") || !strings.Contains(summary, "digest restored") {
+			t.Errorf("summary = %q", summary)
+		}
+	})
+
+	t.Run("digest written above the tag is found too", func(t *testing.T) {
+		content := "image:\n  digest: " + digestNew + "\n  tag: main-new\n"
+		got, _, err := GenerateImageRollback(content, ImageRef{Tag: "main-old", Digest: digestOld})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "image:\n  digest: " + digestOld + "\n  tag: \"main-old\"\n"; got != want {
+			t.Errorf("content = %q, want %q", got, want)
+		}
+	})
+
+	for _, prev := range []ImageRef{{Tag: "main-old"}, {Tag: "main-old", Digest: "sha256:short"}} {
+		t.Run("refused without a usable previous digest "+prev.Digest, func(t *testing.T) {
+			got, _, err := GenerateImageRollback(pinned, prev)
+			if err == nil {
+				t.Fatalf("no error; a tag-only rollback of a digest-pinned image was generated:\n%s", got)
+			}
+			if !strings.Contains(err.Error(), "pinned by digest") {
+				t.Errorf("error = %q", err)
+			}
+			if got != pinned {
+				t.Errorf("content changed on a refused rollback:\n%s", got)
+			}
+		})
+	}
+
+	t.Run("a digest key of a neighbouring block is not the image's", func(t *testing.T) {
+		content := "before:\n  digest: " + digestNew + "\nimage:\n  tag: \"main-new\"\nafter:\n  digest: " + digestNew + "\n"
+		got, summary, err := GenerateImageRollback(content, ImageRef{Tag: "main-old", Digest: digestOld})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := strings.Replace(content, "main-new", "main-old", 1); got != want {
+			t.Errorf("content = %q, want %q", got, want)
+		}
+		if strings.Contains(summary, "digest") {
+			t.Errorf("summary claims a digest change: %q", summary)
+		}
+	})
+
+	t.Run("an empty digest line pins nothing: the tag alone is rewritten", func(t *testing.T) {
+		content := "image:\n  tag: \"main-new\"\n  digest: \"\"\n"
+		got, summary, err := GenerateImageRollback(content, ImageRef{Tag: "main-old", Digest: digestOld})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := "image:\n  tag: \"main-old\"\n  digest: \"\"\n"; got != want {
+			t.Errorf("content = %q, want %q", got, want)
+		}
+		if strings.Contains(summary, "digest") {
+			t.Errorf("summary claims a digest change: %q", summary)
+		}
+	})
+}
+
+// With prepull verification on, reverting image.tag and image.digest alone
+// is stopped by the chart's PreSync verifier. The rollback is refused unless
+// the switch is readably off.
+func TestGenerateImageRollbackRefusesPrepull(t *testing.T) {
+	image := "image:\n  tag: \"1.117.0\"\n"
+	tests := []struct {
+		name    string
+		prepull string
+		refused bool
+	}{
+		{"no prepull block", "", false},
+		{"prepull disabled", "prepull:\n  enabled: false\n  ref: \"\"\n", false},
+		{"prepull enabled", "prepull:\n  enabled: true\n  ref: \"repo:1.117.0@sha256:abc\"\n", true},
+		{"prepull block without the switch", "prepull:\n  ref: \"repo:1.117.0@sha256:abc\"\n", true},
+		{"prepull in flow style cannot be read", "prepull: {enabled: false}\n", true},
+		// A quoted false is a non-empty string, which the chart's
+		// `if .Values.prepull.enabled` takes as true.
+		{"prepull switch is the string \"false\"", "prepull:\n  enabled: \"false\"\n", true},
+		{"prepull switch is the string 'false'", "prepull:\n  enabled: 'false'\n", true},
+		{"prepull disabled, with a comment", "prepull:\n  enabled: false # off until the registry is back\n", false},
+		{"a nested prepull key is another chart's business", "sub:\n  prepull:\n    enabled: true\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _, err := GenerateImageRollback(image+tt.prepull, ImageRef{Tag: "1.116.0"})
+			if tt.refused {
+				if err == nil || !strings.Contains(err.Error(), "prepull") {
+					t.Fatalf("err = %v, content:\n%s", err, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(got, `tag: "1.116.0"`) {
+				t.Errorf("tag not rolled back:\n%s", got)
+			}
+		})
+	}
 }
 
 func TestBumpCPU(t *testing.T) {

@@ -335,3 +335,220 @@ func TestLookupPreviousImageTag(t *testing.T) {
 		}
 	})
 }
+
+// The previous image is the tag and the digest of one and the same revision.
+func TestLookupPreviousImageReturnsDigestOfThatRevision(t *testing.T) {
+	const path = "platform-gitops/services/labs/mctl-telegram/values.yaml"
+	file := func(tag, digest string) string {
+		return "image:\n  repository: ghcr.io/mctlhq/mctl-telegram\n  tag: \"" + tag + "\"\n  digest: \"" + digest + "\"\n"
+	}
+	f, cleanup := fakeGH(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/commits") {
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"sha": "head"}, {"sha": "pre-bump"}})
+			return
+		}
+		body := file("0.148.0", digestNew)
+		if r.URL.Query().Get("ref") == "pre-bump" {
+			body = file("0.147.0", digestOld)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "file", "encoding": "base64", "sha": "b", "content": encodeContent(body)})
+	})
+	defer cleanup()
+
+	got, err := f.LookupPreviousImage(context.Background(), path, "0.148.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (ImageRef{Tag: "0.147.0", Digest: digestOld}); got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
+// ReadImageRef agrees with the line scanner where the scanner is right and
+// refuses where it is not: an image block the scanner cannot see is "not
+// understood", never "no tag".
+func TestReadImageRef(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    ImageRef
+		wantOK  bool
+		wantErr string
+	}{
+		{"block style", "image:\n  repository: r\n  tag: \"1.2.3\"\n", ImageRef{Tag: "1.2.3"}, true, ""},
+		{"unquoted tag that looks like a number", "image:\n  tag: 1.20\n", ImageRef{Tag: "1.20"}, true, ""},
+		{"tag and digest", "image:\n  tag: 1.2.3\n  digest: \"" + digestOld + "\"\n", ImageRef{Tag: "1.2.3", Digest: digestOld}, true, ""},
+		{"no image block", "service:\n  port: 8080\n", ImageRef{}, false, ""},
+		{"image block without a tag", "image:\n  repository: r\n", ImageRef{}, false, ""},
+		{"empty tag", "image:\n  tag: \"\"\n", ImageRef{}, false, ""},
+		{"empty file", "", ImageRef{}, false, ""},
+		{"flow style", "image: {repository: r, tag: main-new}\n", ImageRef{}, false, "not understood"},
+		{"quoted tag key", "image:\n  \"tag\": main-new\n", ImageRef{}, false, "not understood"},
+		{"anchored tag", "image:\n  tag: &t main-new\n", ImageRef{}, false, "not understood"},
+		{"folded scalar tag", "image:\n  tag: >-\n    main-new\n", ImageRef{}, false, "not understood"},
+		{"tag that is a mapping", "image:\n  tag:\n    value: main-new\n", ImageRef{}, false, "not a scalar"},
+		{"only a nested image carries a tag", "sidecar:\n  image:\n    tag: 9.9.9\n", ImageRef{}, false, "not understood"},
+		{"not YAML", "image:\n  tag: \"1.2.3\n", ImageRef{}, false, "not valid YAML"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok, err := ReadImageRef(tt.content)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q (ref %+v, ok %v)", err, tt.wantErr, got, ok)
+				}
+				if ok || got != (ImageRef{}) {
+					t.Fatalf("a failed read returned %+v, ok %v", got, ok)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want || ok != tt.wantOK {
+				t.Fatalf("got %+v, ok %v; want %+v, ok %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// revisionsAPI serves a commit listing, newest first, and the values file of
+// each listed revision. A revision whose content is "!503" answers 503.
+func revisionsAPI(t *testing.T, shas []string, files map[string]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/commits") {
+			rows := make([]map[string]any, 0, len(shas))
+			for _, sha := range shas {
+				row := map[string]any{"commit": map[string]any{"message": "x"}}
+				if sha != "" {
+					row["sha"] = sha
+				}
+				rows = append(rows, row)
+			}
+			_ = json.NewEncoder(w).Encode(rows)
+			return
+		}
+		body, ok := files[r.URL.Query().Get("ref")]
+		switch {
+		case !ok:
+			http.Error(w, `{"message":"Not Found"}`, http.StatusNotFound)
+		case body == "!503":
+			http.Error(w, `{"message":"server overloaded"}`, http.StatusServiceUnavailable)
+		default:
+			_ = json.NewEncoder(w).Encode(map[string]any{"type": "file", "encoding": "base64", "sha": "b", "content": encodeContent(body)})
+		}
+	}
+}
+
+// LookupImageByTag returns the revision that carries exactly the wanted tag,
+// however many other images lie between it and the head, with that
+// revision's digest.
+func TestLookupImageByTag(t *testing.T) {
+	const path = "platform-gitops/services/labs/mctl-telegram/values.yaml"
+	const digestMid = "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+	file := func(tag, digest string) string {
+		return "image:\n  repository: ghcr.io/mctlhq/mctl-telegram\n  tag: \"" + tag + "\"\n  digest: \"" + digest + "\"\n"
+	}
+	flow := "image: {repository: ghcr.io/mctlhq/mctl-telegram, tag: 0.147.5}\n"
+
+	tests := []struct {
+		name    string
+		shas    []string
+		files   map[string]string
+		tag     string
+		want    ImageRef
+		wantErr string
+	}{
+		{
+			name:  "the wanted tag, past a nearer distinct one",
+			shas:  []string{"c3", "c2", "c1"},
+			files: map[string]string{"c3": file("0.149.0", digestNew), "c2": file("0.148.0", digestMid), "c1": file("0.147.0", digestOld)},
+			tag:   "0.147.0",
+			want:  ImageRef{Tag: "0.147.0", Digest: digestOld},
+		},
+		{
+			name:  "a tag no revision carries is not found",
+			shas:  []string{"c3", "c2"},
+			files: map[string]string{"c3": file("0.149.0", digestNew), "c2": file("0.148.0", digestMid)},
+			tag:   "0.147.0",
+		},
+		{
+			name:  "a revision where the file did not exist is passed over",
+			shas:  []string{"c3", "gone", "c1"},
+			files: map[string]string{"c3": file("0.149.0", digestNew), "c1": file("0.147.0", digestOld)},
+			tag:   "0.147.0",
+			want:  ImageRef{Tag: "0.147.0", Digest: digestOld},
+		},
+		{
+			name:    "an empty tag is refused",
+			shas:    []string{"c3"},
+			files:   map[string]string{"c3": file("0.149.0", digestNew)},
+			wantErr: "no image tag to look up",
+		},
+		{
+			name:    "an unreadable revision stops the walk",
+			shas:    []string{"c3", "c2", "c1"},
+			files:   map[string]string{"c3": file("0.149.0", digestNew), "c2": "!503", "c1": file("0.147.0", digestOld)},
+			tag:     "0.147.0",
+			wantErr: "at c2",
+		},
+		{
+			name:    "a revision that is not understood stops the walk",
+			shas:    []string{"c3", "c2", "c1"},
+			files:   map[string]string{"c3": file("0.149.0", digestNew), "c2": flow, "c1": file("0.147.0", digestOld)},
+			tag:     "0.147.0",
+			wantErr: "image.tag not understood",
+		},
+		{
+			name:    "a commit without a SHA stops the walk",
+			shas:    []string{"c3", "", "c1"},
+			files:   map[string]string{"c3": file("0.149.0", digestNew), "c1": file("0.147.0", digestOld)},
+			tag:     "0.147.0",
+			wantErr: "without a SHA",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, cleanup := fakeGH(t, revisionsAPI(t, tt.shas, tt.files))
+			defer cleanup()
+
+			got, err := f.LookupImageByTag(context.Background(), path, tt.tag)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q (got %+v)", err, tt.wantErr, got)
+				}
+				if got != (ImageRef{}) {
+					t.Fatalf("a failed lookup returned %+v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != tt.want {
+				t.Fatalf("got %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+// LookupPreviousImage must not step over a revision it did not understand:
+// the image there may be the real previous one, and the next older tag would
+// be returned in its place.
+func TestLookupPreviousImageStopsAtARevisionNotUnderstood(t *testing.T) {
+	const path = "platform-gitops/services/labs/mctl-telegram/values.yaml"
+	files := map[string]string{
+		"head": "image:\n  tag: \"0.149.0\"\n",
+		"mid":  "image: {repository: ghcr.io/mctlhq/mctl-telegram, tag: 0.148.0}\n",
+		"old":  "image:\n  tag: \"0.147.0\"\n",
+	}
+	f, cleanup := fakeGH(t, revisionsAPI(t, []string{"head", "mid", "old"}, files))
+	defer cleanup()
+
+	got, err := f.LookupPreviousImage(context.Background(), path, "0.149.0")
+	if err == nil || !strings.Contains(err.Error(), "at mid") {
+		t.Fatalf("got %+v, error = %v; want the walk to stop at mid", got, err)
+	}
+}
