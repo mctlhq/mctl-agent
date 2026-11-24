@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.10.0](https://github.com/mctlhq/mctl-agent/compare/2.9.6...2.10.0) (2026-11-24)
+
+
+### Features
+
+* **skill:** diagnose crash loops from pod state ([1085153](https://github.com/mctlhq/mctl-agent/commit/10851537d010aba30dd953d7de7ab4241077699f))
+* **skill:** diagnose crash loops from pod state ([36ffb0d](https://github.com/mctlhq/mctl-agent/commit/36ffb0d0d8b3cd976f41afc90eb0a249d58b8d7d))
+
+
+### Bug Fixes
+
+* **skill:** a container that finished cleanly is not crash-looping ([f8308db](https://github.com/mctlhq/mctl-agent/commit/f8308db787b5a4a205802ae7cd7bef930fa57d9f))
+* **skill:** redact credentials in quoted crash-loop log lines ([303e055](https://github.com/mctlhq/mctl-agent/commit/303e055e138faed2612730f117e5ede266ab4095))
+* **skill:** redact the credential after an auth scheme ([291012c](https://github.com/mctlhq/mctl-agent/commit/291012c40758ae289c0c707a11241d98d37b184a))
+
 ## [2.9.6](https://github.com/mctlhq/mctl-agent/compare/2.9.5...2.9.6) (2026-11-23)
 
 
