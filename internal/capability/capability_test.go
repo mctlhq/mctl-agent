@@ -16,9 +16,15 @@ package capability
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/fixer"
+	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/skill"
 	"github.com/mctlhq/mctl-agent/internal/ticket"
 )
@@ -118,22 +124,22 @@ func TestContextDeniedCapabilityMethods(t *testing.T) {
 	}
 
 	// Read methods without the right capability should also fail.
-	_, err = ctx.GetServiceStatus("t", "s")
+	_, err = ctx.GetServiceStatus(context.Background(), "t", "s")
 	if err == nil {
 		t.Error("GetServiceStatus should be denied without CapReadStatus")
 	}
 
-	_, err = ctx.GetResourceUsage("t")
+	_, err = ctx.GetResourceUsage(context.Background(), "t")
 	if err == nil {
 		t.Error("GetResourceUsage should be denied without CapReadResources")
 	}
 
-	_, err = ctx.ListAudit()
+	_, err = ctx.ListAudit(context.Background())
 	if err == nil {
 		t.Error("ListAudit should be denied without CapReadAudit")
 	}
 
-	_, err = ctx.GetServiceConfig("t", "s")
+	_, err = ctx.GetServiceConfig(context.Background(), "t", "s")
 	if err == nil {
 		t.Error("GetServiceConfig should be denied without CapReadConfig")
 	}
@@ -142,5 +148,44 @@ func TestContextDeniedCapabilityMethods(t *testing.T) {
 	// We can't actually call it with nil apiClient, so just verify capability check.
 	if err := ctx.check(skill.CapReadLogs); err != nil {
 		t.Error("GetServiceLogs capability check should pass with CapReadLogs")
+	}
+}
+
+// A skill's reads end with the context it passes: the sandboxed view hands it
+// down to mctl-api instead of starting a detached request.
+//
+// Mutation check: replace ctx with context.Background() in any Provider or
+// Context read wrapper and that read reaches the server.
+func TestContextReadsCarryCallerContext(t *testing.T) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	s := &mockSkill{name: "reader", caps: []skill.CapabilityID{
+		skill.CapReadStatus, skill.CapReadLogs, skill.CapReadResources, skill.CapReadConfig, skill.CapReadAudit,
+	}}
+	c := NewContext(NewProvider(mctlclient.NewClient(srv.URL, "tok"), nil, nil, nil), s, &ticket.Ticket{}, skill.NewEvidenceSet(nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	reads := map[string]func() error{
+		"GetServiceStatus": func() error { _, err := c.GetServiceStatus(ctx, "t", "s"); return err },
+		"GetServiceLogs":   func() error { _, err := c.GetServiceLogs(ctx, "t", "s", 10, time.Minute); return err },
+		"GetResourceUsage": func() error { _, err := c.GetResourceUsage(ctx, "t"); return err },
+		"GetServiceConfig": func() error { _, err := c.GetServiceConfig(ctx, "t", "s"); return err },
+		"ListAudit":        func() error { _, err := c.ListAudit(ctx); return err },
+	}
+	for name, read := range reads {
+		t.Run(name, func(t *testing.T) {
+			before := requests.Load()
+			if err := read(); !errors.Is(err, context.Canceled) {
+				t.Errorf("err = %v, want context.Canceled", err)
+			}
+			if requests.Load() != before {
+				t.Error("the request was sent although the caller's context was cancelled")
+			}
+		})
 	}
 }
