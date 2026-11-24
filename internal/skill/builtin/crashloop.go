@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -166,12 +167,12 @@ func (s *CrashLoopSkill) Diagnose(_ context.Context, _ *ticket.Ticket, ev skill.
 			kind, l.container.Name, l.pod, l.container.RestartCount, describeExit(l.container))
 	}
 	if lines := lastErrorLines(ev.Get("logs"), 3); len(lines) > 0 {
-		sb.WriteString("Last error lines in its log:\n")
+		sb.WriteString("Last error lines in the service log (all pods and containers):\n")
 		for _, line := range lines {
 			fmt.Fprintf(&sb, "  %s\n", line)
 		}
 	} else {
-		sb.WriteString("The collected log holds no error line; the container may exit before it logs.\n")
+		sb.WriteString("The collected service log holds no error line; the container may exit before it logs.\n")
 	}
 	if w := warningEvents(ev.Get("events"), 3); w != "" {
 		fmt.Fprintf(&sb, "Warning events: %s.\n", w)
@@ -215,6 +216,19 @@ func describeExit(c crashContainer) string {
 // a payload.
 const maxErrorLineLen = 240
 
+// A startup error often quotes the DSN or URL it failed on, credentials
+// included. The diagnosis goes to the ticket and the operators' chat, so the
+// userinfo of a URL and the value of a secret-looking key are removed first.
+var (
+	urlUserinfo  = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@`)
+	secretKeyVal = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|authorization)[a-z0-9_.-]*)("?\s*[=:]\s*)("[^"]*"|\S+)`)
+)
+
+func redactCredentials(line string) string {
+	line = urlUserinfo.ReplaceAllString(line, "${1}[redacted]@")
+	return secretKeyVal.ReplaceAllString(line, "${1}${2}[redacted]")
+}
+
 // lastErrorLines returns up to n of the most recent log lines that look like
 // an error, oldest first.
 func lastErrorLines(raw string, n int) []string {
@@ -236,6 +250,7 @@ func lastErrorLines(raw string, n int) []string {
 		if !containsAny(lower, "error", "fatal", "panic") {
 			continue
 		}
+		line = redactCredentials(line)
 		if r := []rune(line); len(r) > maxErrorLineLen {
 			line = string(r[:maxErrorLineLen]) + "…"
 		}

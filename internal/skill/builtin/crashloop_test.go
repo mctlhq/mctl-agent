@@ -146,3 +146,42 @@ func TestCrashLoopSkillDiagnoseWithoutLogsOrEvents(t *testing.T) {
 		t.Error("Fix must refuse: the skill proposes nothing")
 	}
 }
+
+// Quoted error lines lose URL userinfo and the values of secret-looking keys;
+// the rest of the line, which names the failure, stays.
+//
+// Mutation check: drop either replacement in redactCredentials and a case
+// fails.
+func TestCrashLoopDiagnosisRedactsCredentials(t *testing.T) {
+	tests := []struct {
+		name, line, want string
+		gone             []string
+	}{
+		{"DSN userinfo", `error: connect postgres://app:s3cr3t@db.internal:5432/app: refused`,
+			`error: connect postgres://[redacted]@db.internal:5432/app: refused`, []string{"s3cr3t", "//app"}},
+		{"key=value", `level=error msg="auth failed" api_key=sk-live-123 user=bob`,
+			`level=error msg="auth failed" api_key=[redacted] user=bob`, []string{"sk-live-123"}},
+		{"quoted value", `fatal: db_password="hunter two" rejected`,
+			`fatal: db_password=[redacted] rejected`, []string{"hunter"}},
+		{"JSON field", `{"level":"error","token":"abc.def","msg":"expired"}`,
+			`{"level":"error","token":[redacted],"msg":"expired"}`, []string{"abc.def"}},
+		{"nothing to redact", `error: dial tcp 10.0.0.5:5432: connection refused`,
+			`error: dial tcp 10.0.0.5:5432: connection refused`, nil},
+		{"plain URL keeps its host", `error: GET https://idp.example.com/.well-known: HTTP 503`,
+			`error: GET https://idp.example.com/.well-known: HTTP 503`, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := ticket.EvidenceJSON(map[string]any{"lines": []map[string]string{{"line": tt.line}}})
+			got := lastErrorLines(logs, 3)
+			if len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+			for _, g := range tt.gone {
+				if strings.Contains(got[0], g) {
+					t.Errorf("%q survived in %q", g, got[0])
+				}
+			}
+		})
+	}
+}
