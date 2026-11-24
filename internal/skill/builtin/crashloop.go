@@ -230,14 +230,128 @@ const maxErrorLineLen = 240
 // userinfo of a URL and the value of a secret-looking key are removed first.
 // A header value takes its auth scheme with it: in "Authorization: Bearer x"
 // the credential is x, not the word Bearer.
-var (
-	urlUserinfo  = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@`)
-	secretKeyVal = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|authorization)[a-z0-9_.-]*)("?\s*[=:]\s*)("[^"]*"|(?:(?:bearer|basic|token)\s+)?\S+)`)
+//
+// Every pattern errs towards removing too much. A value that is quoted is
+// removed up to its closing quote, whichever quote that is, because a quoted
+// secret may hold spaces; one whose quote never closes is removed to the end
+// of the line. A bracketed value, which is how Go prints a header map, is
+// removed up to its closing bracket. An unquoted value runs to the next space.
+//
+// A backslash before a quote is ambiguous: an escaped quote inside the value,
+// or a value that ends in a backslash. Both readings are taken and whatever
+// either one covers is removed, see redactSecretValues.
+const (
+	// stringEnd is what follows a double quote that closed a string rather
+	// than one that is part of a password: `"https://a.example","mail":"b@c"`
+	// is a URL and an address, `https://user:p"q@host` is one credential.
+	stringEnd = `\s",;:}\])>`
+
+	secretKey = `[a-z0-9_.-]*(?:password|passwd|pwd|passphrase|secret|token|credentials?|api[_-]?key|access[_-]?key|private[_-]?key|authorization)[a-z0-9_.-]*`
+	// The separator: the key's own closing quote or bracket, escaped when
+	// the line is JSON inside a string, then = : := or =>.
+	secretSeparator = `\\?["'` + "`" + `]?\]?\s*(?:=>|:=|=|:)\s*`
+
+	// The escape-aware reading of a quoted value. In a single-quoted value
+	// an apostrophe inside a word ('it's a secret') does not close it. A
+	// value quoted inside a JSON string opens and closes with \" and holds
+	// its own quotes as \\\".
+	doubleQuotedBody = `(?:[^"\\]|\\.)*`
+	singleQuotedBody = `(?:[^'\\]|\\.|'[a-zA-Z0-9])*`
+	nestedQuotedBody = `(?:[^"\\]|\\\\\\.|\\[^"])*`
 )
+
+var (
+	// The first form is the authority of a URL up to its last "@", so a
+	// password holding a raw "@" goes whole. The second covers a password
+	// holding a raw "/", which ends the authority early: it wants
+	// "user:password" where the password is not a port number, so
+	// "http://host:8080/users/a@b" is left alone. A double quote is part of
+	// the userinfo unless stringEnd follows it; past the first character of
+	// a password the second form no longer needs to ask.
+	urlUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)(?:` +
+		`(?:"*[^/` + stringEnd + `]|[^/\s"])+` +
+		`|` +
+		`[^/\s?#@:\["]+:[0-9]*` +
+		`(?:"*[^0-9/?#@` + stringEnd + `]|[^0-9/\s?#@"])` +
+		`[^\s?#@]*` +
+		`)"*@`)
+	// Go's MySQL DSN has no scheme: user:password@tcp(host:3306)/db.
+	schemelessDSN = regexp.MustCompile("[^\\s:@/\"'`=(]+:\\S*@((?:tcp|unix)\\()")
+	// A JWT is a credential wherever it stands, key or no key.
+	bareJWT = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)
+
+	// secretKeyVal reads a backslash as an escape; secretKeyValLiteral reads
+	// it as an ordinary character, so a quoted value ends at the next quote.
+	secretKeyVal = secretKeyValPattern(
+		`"`+doubleQuotedBody+`"`,
+		`'`+singleQuotedBody+`'`,
+		`\\"`+nestedQuotedBody+`\\"`)
+	secretKeyValLiteral = secretKeyValPattern(`"[^"]*"`, `'[^']*'`, `\\"[^"]*"`)
+)
+
+// secretKeyValPattern matches a secret-looking key (with whatever prefix or
+// suffix it carries: DB_PASSWORD, x-api-key, client_secret_v2), its separator
+// and its value. The value is the third group.
+func secretKeyValPattern(doubleQuoted, singleQuoted, nestedQuoted string) *regexp.Regexp {
+	return regexp.MustCompile(`(?i)\b(` + secretKey + `)(` + secretSeparator + `)(` +
+		doubleQuoted +
+		`|` + singleQuoted +
+		"|`[^`]*`" +
+		`|` + nestedQuoted +
+		// A quote that never closes.
+		`|"` + doubleQuotedBody + `\\?$` +
+		`|'` + singleQuotedBody + `\\?$` +
+		"|`[^`]*$" +
+		`|\\"` + nestedQuotedBody + `\\?$` +
+		// map[Authorization:[Bearer x]], "authorization":["Bearer x"].
+		`|\[[^\]]*\]|\[[^\]]*$` +
+		`|(?:(?:bearer|basic|token|digest|negotiate|ntlm|apikey)\s+)?\S+` +
+		`)`)
+}
 
 func redactCredentials(line string) string {
 	line = urlUserinfo.ReplaceAllString(line, "${1}[redacted]@")
-	return secretKeyVal.ReplaceAllString(line, "${1}${2}[redacted]")
+	line = schemelessDSN.ReplaceAllString(line, "[redacted]@${1}")
+	line = redactSecretValues(line)
+	return bareJWT.ReplaceAllString(line, "[redacted]")
+}
+
+// redactSecretValues removes the value of every secret-looking key under both
+// readings of a backslash. `password="pa\"ss word"` is one value with an
+// escaped quote; `password="ab\" token="x y"` is two values, the first ending
+// in a backslash. Nothing in the line says which, so the spans of both
+// readings are merged and each merged span is replaced once.
+func redactSecretValues(line string) string {
+	var spans [][2]int
+	for _, re := range []*regexp.Regexp{secretKeyVal, secretKeyValLiteral} {
+		for _, m := range re.FindAllStringSubmatchIndex(line, -1) {
+			spans = append(spans, [2]int{m[6], m[7]})
+		}
+	}
+	if len(spans) == 0 {
+		return line
+	}
+	// Stable, so of two spans opening at the same quote the escape-aware
+	// one stays first.
+	sort.SliceStable(spans, func(i, j int) bool { return spans[i][0] < spans[j][0] })
+	var b strings.Builder
+	pos, start, end := 0, spans[0][0], spans[0][1]
+	flush := func() {
+		b.WriteString(line[pos:start])
+		b.WriteString("[redacted]")
+		pos = end
+	}
+	for _, s := range spans[1:] {
+		if s[0] <= end {
+			end = max(end, s[1])
+			continue
+		}
+		flush()
+		start, end = s[0], s[1]
+	}
+	flush()
+	b.WriteString(line[pos:])
+	return b.String()
 }
 
 // lastErrorLines returns up to n of the most recent log lines that look like

@@ -53,28 +53,28 @@ func NewProvider(
 // --- Read capabilities ---
 
 // GetServiceStatus returns ArgoCD status for a service.
-func (p *Provider) GetServiceStatus(team, service string) (*mctlclient.StatusResponse, error) {
-	return p.apiClient.GetServiceStatus(team, service)
+func (p *Provider) GetServiceStatus(ctx context.Context, team, service string) (*mctlclient.StatusResponse, error) {
+	return p.apiClient.GetServiceStatus(ctx, team, service)
 }
 
 // GetServiceConfig returns the GitOps config for a service.
-func (p *Provider) GetServiceConfig(team, service string) (*mctlclient.Service, error) {
-	return p.apiClient.GetServiceConfig(team, service)
+func (p *Provider) GetServiceConfig(ctx context.Context, team, service string) (*mctlclient.Service, error) {
+	return p.apiClient.GetServiceConfig(ctx, team, service)
 }
 
 // GetServiceLogs returns recent logs for a service.
-func (p *Provider) GetServiceLogs(team, service string, lines int, since time.Duration) (*mctlclient.LogsResponse, error) {
-	return p.apiClient.GetServiceLogs(team, service, lines, since)
+func (p *Provider) GetServiceLogs(ctx context.Context, team, service string, lines int, since time.Duration) (*mctlclient.LogsResponse, error) {
+	return p.apiClient.GetServiceLogs(ctx, team, service, lines, since)
 }
 
 // GetResourceUsage returns resource quota usage for a tenant.
-func (p *Provider) GetResourceUsage(tenant string) (*mctlclient.ResourceUsage, error) {
-	return p.apiClient.GetResourceUsage(tenant)
+func (p *Provider) GetResourceUsage(ctx context.Context, tenant string) (*mctlclient.ResourceUsage, error) {
+	return p.apiClient.GetResourceUsage(ctx, tenant)
 }
 
 // ListAudit returns recent audit log entries.
-func (p *Provider) ListAudit() ([]mctlclient.AuditEntry, error) {
-	return p.apiClient.ListAudit()
+func (p *Provider) ListAudit(ctx context.Context) ([]mctlclient.AuditEntry, error) {
+	return p.apiClient.ListAudit(ctx)
 }
 
 // --- Write capabilities ---
@@ -131,43 +131,43 @@ func (c *Context) check(cap skill.CapabilityID) error {
 }
 
 // GetServiceStatus returns ArgoCD status (requires CapReadStatus).
-func (c *Context) GetServiceStatus(team, service string) (*mctlclient.StatusResponse, error) {
+func (c *Context) GetServiceStatus(ctx context.Context, team, service string) (*mctlclient.StatusResponse, error) {
 	if err := c.check(skill.CapReadStatus); err != nil {
 		return nil, err
 	}
-	return c.provider.GetServiceStatus(team, service)
+	return c.provider.GetServiceStatus(ctx, team, service)
 }
 
 // GetServiceLogs returns service logs (requires CapReadLogs).
-func (c *Context) GetServiceLogs(team, service string, lines int, since time.Duration) (*mctlclient.LogsResponse, error) {
+func (c *Context) GetServiceLogs(ctx context.Context, team, service string, lines int, since time.Duration) (*mctlclient.LogsResponse, error) {
 	if err := c.check(skill.CapReadLogs); err != nil {
 		return nil, err
 	}
-	return c.provider.GetServiceLogs(team, service, lines, since)
+	return c.provider.GetServiceLogs(ctx, team, service, lines, since)
 }
 
 // GetResourceUsage returns resource usage (requires CapReadResources).
-func (c *Context) GetResourceUsage(tenant string) (*mctlclient.ResourceUsage, error) {
+func (c *Context) GetResourceUsage(ctx context.Context, tenant string) (*mctlclient.ResourceUsage, error) {
 	if err := c.check(skill.CapReadResources); err != nil {
 		return nil, err
 	}
-	return c.provider.GetResourceUsage(tenant)
+	return c.provider.GetResourceUsage(ctx, tenant)
 }
 
 // GetServiceConfig returns config (requires CapReadConfig).
-func (c *Context) GetServiceConfig(team, service string) (*mctlclient.Service, error) {
+func (c *Context) GetServiceConfig(ctx context.Context, team, service string) (*mctlclient.Service, error) {
 	if err := c.check(skill.CapReadConfig); err != nil {
 		return nil, err
 	}
-	return c.provider.GetServiceConfig(team, service)
+	return c.provider.GetServiceConfig(ctx, team, service)
 }
 
 // ListAudit returns audit entries (requires CapReadAudit).
-func (c *Context) ListAudit() ([]mctlclient.AuditEntry, error) {
+func (c *Context) ListAudit(ctx context.Context) ([]mctlclient.AuditEntry, error) {
 	if err := c.check(skill.CapReadAudit); err != nil {
 		return nil, err
 	}
-	return c.provider.ListAudit()
+	return c.provider.ListAudit(ctx)
 }
 
 // GetFileContent reads a GitOps file (requires CapModifyGitOps).

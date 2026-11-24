@@ -121,8 +121,8 @@ type AuditEntry struct {
 }
 
 // ListServices returns all services.
-func (c *Client) ListServices() ([]Service, error) {
-	body, err := c.doGet("/api/v1/services")
+func (c *Client) ListServices(ctx context.Context) ([]Service, error) {
+	body, err := c.doGet(ctx, "/api/v1/services")
 	if err != nil {
 		return nil, err
 	}
@@ -136,8 +136,8 @@ func (c *Client) ListServices() ([]Service, error) {
 }
 
 // GetServiceStatus returns the ArgoCD status for a service.
-func (c *Client) GetServiceStatus(team, app string) (*StatusResponse, error) {
-	body, err := c.doGet(fmt.Sprintf("/api/v1/status/%s/%s", team, app))
+func (c *Client) GetServiceStatus(ctx context.Context, team, app string) (*StatusResponse, error) {
+	body, err := c.doGet(ctx, fmt.Sprintf("/api/v1/status/%s/%s", team, app))
 	if err != nil {
 		return nil, err
 	}
@@ -149,8 +149,8 @@ func (c *Client) GetServiceStatus(team, app string) (*StatusResponse, error) {
 }
 
 // GetServiceConfig returns the gitops config for a service.
-func (c *Client) GetServiceConfig(team, app string) (*Service, error) {
-	body, err := c.doGet(fmt.Sprintf("/api/v1/services/%s/%s", team, app))
+func (c *Client) GetServiceConfig(ctx context.Context, team, app string) (*Service, error) {
+	body, err := c.doGet(ctx, fmt.Sprintf("/api/v1/services/%s/%s", team, app))
 	if err != nil {
 		return nil, err
 	}
@@ -162,9 +162,9 @@ func (c *Client) GetServiceConfig(team, app string) (*Service, error) {
 }
 
 // GetServiceLogs returns recent logs for a service.
-func (c *Client) GetServiceLogs(team, app string, lines int, since time.Duration) (*LogsResponse, error) {
+func (c *Client) GetServiceLogs(ctx context.Context, team, app string, lines int, since time.Duration) (*LogsResponse, error) {
 	path := fmt.Sprintf("/api/v1/logs/%s/%s?lines=%d&since=%s", team, app, lines, since)
-	body, err := c.doGet(path)
+	body, err := c.doGet(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -179,8 +179,8 @@ func (c *Client) GetServiceLogs(team, app string, lines int, since time.Duration
 // phase, readiness and, per container, the restart count, the current state
 // and the last termination. The body is returned undecoded, because it is
 // stored as evidence and read by whichever skill needs it.
-func (c *Client) GetServicePods(team, app string) (json.RawMessage, error) {
-	body, err := c.doGet(fmt.Sprintf("/api/v1/pods/%s/%s", url.PathEscape(team), url.PathEscape(app)))
+func (c *Client) GetServicePods(ctx context.Context, team, app string) (json.RawMessage, error) {
+	body, err := c.doGet(ctx, fmt.Sprintf("/api/v1/pods/%s/%s", url.PathEscape(team), url.PathEscape(app)))
 	if err != nil {
 		return nil, err
 	}
@@ -192,9 +192,9 @@ func (c *Client) GetServicePods(team, app string) (json.RawMessage, error) {
 
 // ListServiceEvents returns the Warning events of the last hour about one
 // service's objects in its tenant namespace, undecoded for the same reason.
-func (c *Client) ListServiceEvents(team, app string) (json.RawMessage, error) {
+func (c *Client) ListServiceEvents(ctx context.Context, team, app string) (json.RawMessage, error) {
 	q := url.Values{"app": {app}, "type": {"Warning"}, "since": {"1h"}}
-	body, err := c.doGet(fmt.Sprintf("/api/v1/events/%s?%s", url.PathEscape(team), q.Encode()))
+	body, err := c.doGet(ctx, fmt.Sprintf("/api/v1/events/%s?%s", url.PathEscape(team), q.Encode()))
 	if err != nil {
 		return nil, err
 	}
@@ -205,8 +205,8 @@ func (c *Client) ListServiceEvents(team, app string) (json.RawMessage, error) {
 }
 
 // GetResourceUsage returns resource usage for a tenant.
-func (c *Client) GetResourceUsage(tenant string) (*ResourceUsage, error) {
-	body, err := c.doGet(fmt.Sprintf("/api/v1/resources/%s", tenant))
+func (c *Client) GetResourceUsage(ctx context.Context, tenant string) (*ResourceUsage, error) {
+	body, err := c.doGet(ctx, fmt.Sprintf("/api/v1/resources/%s", tenant))
 	if err != nil {
 		return nil, err
 	}
@@ -218,8 +218,8 @@ func (c *Client) GetResourceUsage(tenant string) (*ResourceUsage, error) {
 }
 
 // ListAudit returns recent audit entries.
-func (c *Client) ListAudit() ([]AuditEntry, error) {
-	body, err := c.doGet("/api/v1/audit")
+func (c *Client) ListAudit(ctx context.Context) ([]AuditEntry, error) {
+	body, err := c.doGet(ctx, "/api/v1/audit")
 	if err != nil {
 		return nil, err
 	}
@@ -233,8 +233,8 @@ func (c *Client) ListAudit() ([]AuditEntry, error) {
 }
 
 // GetWorkflow returns live workflow status.
-func (c *Client) GetWorkflow(name string) (map[string]any, error) {
-	body, err := c.doGet(fmt.Sprintf("/api/v1/workflows/%s", name))
+func (c *Client) GetWorkflow(ctx context.Context, name string) (map[string]any, error) {
+	body, err := c.doGet(ctx, fmt.Sprintf("/api/v1/workflows/%s", name))
 	if err != nil {
 		return nil, err
 	}
@@ -413,8 +413,12 @@ func (c *Client) doPatch(path string, body interface{}) error {
 	return nil
 }
 
-func (c *Client) doGet(path string) ([]byte, error) {
-	req, err := http.NewRequest("GET", c.baseURL+path, nil)
+// doGet issues one read. The request carries ctx, so a caller that is
+// cancelled or past its deadline stops waiting at once instead of holding
+// its slot for the client's own timeout. Either way the read failed: the
+// error is returned and no body, never an empty one.
+func (c *Client) doGet(ctx context.Context, path string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}

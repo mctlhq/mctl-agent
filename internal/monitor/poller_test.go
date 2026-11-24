@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1398,4 +1399,73 @@ func TestResolveStaleEscalatedRespectsThreshold(t *testing.T) {
 	if got.Status != ticket.StatusEscalated {
 		t.Errorf("status = %q, want %q — 30h is well inside the 168h grace period", got.Status, ticket.StatusEscalated)
 	}
+}
+
+// A poll that is cancelled could not observe anything. With the context gone
+// before the inventory read, the whole cycle is unknown; with it gone during
+// a status read, that service and every later one count as not refreshed, so
+// the stale GC leaves their tickets alone. No request is sent to mctl-api
+// after the cancellation.
+//
+// Mutation check: pass context.Background() to ListServices or to
+// GetServiceStatus in pollDegraded and the matching case fails.
+func TestPollDegradedStopsWithContext(t *testing.T) {
+	const services = `{"items":[{"team":"labs","name":"a"},{"team":"labs","name":"b"}]}`
+
+	t.Run("cancelled before the inventory read", func(t *testing.T) {
+		var requests atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			requests.Add(1)
+			_, _ = w.Write([]byte(services))
+		}))
+		defer srv.Close()
+		p := NewPoller(mctlclient.NewClient(srv.URL, "tok"), newTestStore(t), nil)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		state := p.pollDegraded(ctx)
+
+		if !state.allUnknown {
+			t.Errorf("state = %+v, want allUnknown", state)
+		}
+		if n := requests.Load(); n != 0 {
+			t.Errorf("%d request(s) sent with a cancelled context", n)
+		}
+	})
+
+	t.Run("cancelled during a status read", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var statusPaths []string
+		notCancelled := false
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/services" {
+				_, _ = w.Write([]byte(services))
+				return
+			}
+			statusPaths = append(statusPaths, r.URL.Path)
+			cancel()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(3 * time.Second):
+				notCancelled = true
+			}
+			_, _ = w.Write([]byte(`{"argocd":{"health":"Healthy"}}`))
+		}))
+		p := NewPoller(mctlclient.NewClient(srv.URL, "tok"), newTestStore(t), nil)
+
+		state := p.pollDegraded(ctx)
+		// Closing waits for the handlers, so their writes are done.
+		srv.Close()
+
+		if notCancelled {
+			t.Error("the status read was not cancelled with the context; it waited for mctl-api")
+		}
+		if len(statusPaths) != 1 || statusPaths[0] != "/api/v1/status/labs/a" {
+			t.Errorf("status requests that reached mctl-api = %q, want only labs/a", statusPaths)
+		}
+		if state.allUnknown || state.argoRefreshed("labs", "a") || state.argoRefreshed("labs", "b") {
+			t.Errorf("state = %+v, want labs/a and labs/b not refreshed", state)
+		}
+	})
 }
