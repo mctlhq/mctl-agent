@@ -99,8 +99,11 @@ const (
 // ticket some other source owns, a ticket the pipeline or a PR still holds,
 // and a ticket still inside the flap grace.
 //
-// Mutation check: each guard in pollDegraded / resolveRecovered, removed on
-// its own, fails the row named after it.
+// Mutation check: each guard in pollDegraded / resolveRecovered that reads
+// the ArgoCD status or the ticket, removed on its own, fails the row named
+// after it. The two guards this table cannot reach — a failed ticket listing
+// and a resolve the store refuses — are covered by
+// TestResolveRecoveredRefusesAFailedReadAndALostRace.
 func TestPollerResolvesOwnTicketsForARecoveredApp(t *testing.T) {
 	type tc struct {
 		name string
@@ -310,5 +313,270 @@ func TestOwnDegradedTicketsLoadFailureIsNotAnEmptySet(t *testing.T) {
 	}
 	if own.byService != nil {
 		t.Errorf("a failed read must not produce a ticket set, got %v", own.byService)
+	}
+}
+
+// degradedTicket creates a ticket for labs/web of the given source and
+// status, last updated an hour ago.
+func degradedTicket(t *testing.T, store *ticket.Store, source, status string) *ticket.Ticket {
+	t.Helper()
+	tk := &ticket.Ticket{
+		Source: source, Type: ticket.TypeArgoCDDegraded, Tenant: "labs", Service: "web",
+		Summary: "ArgoCD app labs-web health: Degraded", Severity: ticket.SeverityWarning,
+	}
+	if err := store.Create(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	tk.Status = status
+	if err := store.Update(ctx, tk); err != nil {
+		t.Fatal(err)
+	}
+	backdate(t, store, tk.ID, time.Now().UTC().Add(-time.Hour))
+	return tk
+}
+
+// resolveRecovered acts on what the cycle's snapshot says, and two things
+// must outrank a snapshot that says "resolve this":
+//
+//   - the read that produced it having failed. A failed read is unknown, so
+//     nothing is resolved from it whatever the set holds — today a failed load
+//     leaves the set nil, and this row is what keeps a later load that fills it
+//     first, or falls back to something else, from resolving on a failed read;
+//   - the row having moved on since. The pipeline takes an open ticket to
+//     analyzing between the snapshot and the write; the store refuses the
+//     resolve, and the poller must then neither count it nor tell mctl-api the
+//     incident is over while the ticket is being analysed.
+//
+// The first row is the control: the same call on a good, current snapshot
+// resolves, counts and propagates.
+//
+// Mutation check: delete `if own.failed { return }` and "failed read" fails;
+// delete the `continue` after the "resolve no-op" line and "ticket advanced
+// concurrently" fails on the counter and on the propagated resolve.
+func TestResolveRecoveredRefusesAFailedReadAndALostRace(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		failed       bool
+		advance      bool // move the row to analyzing after the snapshot
+		wantStatus   string
+		wantResolved bool
+	}{
+		{"current snapshot", false, false, ticket.StatusResolved, true},
+		{"failed read", true, false, ticket.StatusOpen, false},
+		{"ticket advanced concurrently", false, true, ticket.StatusAnalyzing, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			api := newArgoAPI(t, http.StatusOK, oneService, http.StatusOK, healthySynced)
+			store := newTestStore(t)
+			p := NewPoller(mctlclient.NewClient(api.srv.URL, ""), store, nil)
+
+			tk := degradedTicket(t, store, ticket.SourcePolling, ticket.StatusOpen)
+			snapshot, err := store.Get(ctx, tk.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			own := &ownDegradedTickets{
+				loaded: true, failed: tc.failed,
+				byService: map[string][]*ticket.Ticket{"labs/web": {snapshot}},
+			}
+			if tc.advance {
+				ok, err := store.SetStatusFromStatus(ctx, tk.ID, ticket.StatusOpen, ticket.StatusAnalyzing)
+				if err != nil || !ok {
+					t.Fatalf("advance: ok=%v err=%v", ok, err)
+				}
+			}
+
+			before := testutil.ToFloat64(metrics.ArgoRecoveredResolved)
+			p.resolveRecovered(ctx, "labs", "web", own)
+
+			got, err := store.Get(ctx, tk.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			delta := testutil.ToFloat64(metrics.ArgoRecoveredResolved) - before
+			if tc.wantResolved {
+				if delta != 1 {
+					t.Errorf("recovered-resolved counter moved by %v, want 1", delta)
+				}
+				api.awaitResolved(t, tk.ID)
+				return
+			}
+			if delta != 0 {
+				t.Errorf("recovered-resolved counter moved by %v for a ticket that was not resolved", delta)
+			}
+			// The propagation is asynchronous; give a wrong one time to land.
+			time.Sleep(150 * time.Millisecond)
+			api.mu.Lock()
+			defer api.mu.Unlock()
+			if len(api.resolved) != 0 {
+				t.Errorf("mctl-api was told to resolve %v for a ticket the poller did not resolve", api.resolved)
+			}
+		})
+	}
+}
+
+// switchingAPI is a stub mctl-api for labs/web whose ArgoCD status the test
+// changes between polls.
+func switchingAPI(t *testing.T) (*mctlclient.Client, func(status string)) {
+	t.Helper()
+	var mu sync.Mutex
+	body := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/services":
+			_, _ = w.Write([]byte(oneService))
+		case "/api/v1/status/labs/web":
+			mu.Lock()
+			defer mu.Unlock()
+			_, _ = w.Write([]byte(body))
+		default:
+			_, _ = w.Write([]byte(`{}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return mctlclient.NewClient(srv.URL, ""), func(status string) {
+		mu.Lock()
+		defer mu.Unlock()
+		body = status
+	}
+}
+
+const degradedSynced = `{"argocd":{"name":"labs-web","health":"Degraded","syncStatus":"Synced"}}`
+
+// The flap grace rests on every Degraded observation reaching the poller's
+// own ticket. The dedup lookup returns the newest unresolved ticket for the
+// application whatever its source, so a newer manual investigation of the
+// same application used to take the heartbeat: the poller's ticket kept an
+// hour-old UpdatedAt through a crash loop, and the first Healthy reading
+// between two crashes closed it.
+//
+// Mutation check: delete the TouchUnresolvedBySource call in pollDegraded and
+// the own ticket is neither touched nor kept open; delete the Touch of a
+// duplicate that is not the poller's and the manual ticket is not touched.
+func TestDegradedObservationReachesOwnTicketBehindANewerManualOne(t *testing.T) {
+	client, setStatus := switchingAPI(t)
+	store := newTestStore(t)
+	created := 0
+	p := NewPoller(client, store, func(*ticket.Ticket) { created++ })
+
+	own := degradedTicket(t, store, ticket.SourcePolling, ticket.StatusEscalated)
+	// Newer by creation time, so it is what FindDuplicate returns.
+	manual := &ticket.Ticket{
+		Source: ticket.SourceManual, Type: ticket.TypeArgoCDDegraded, Tenant: "labs", Service: "web",
+		Summary: "operator asked", Severity: "info",
+	}
+	if err := store.Create(ctx, manual); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE tickets SET updated_at=? WHERE id=?`,
+		time.Now().UTC().Add(-time.Hour), manual.ID); err != nil {
+		t.Fatal(err)
+	}
+	if dup, err := store.FindDuplicate(ctx, "labs", "web", ticket.TypeArgoCDDegraded, ""); err != nil || dup == nil || dup.ID != manual.ID {
+		t.Fatalf("precondition: the manual ticket must be the duplicate, got %+v err=%v", dup, err)
+	}
+
+	setStatus(degradedSynced)
+	p.pollDegraded(ctx)
+
+	for name, id := range map[string]string{"own": own.ID, "manual": manual.ID} {
+		got, err := store.Get(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if time.Since(got.UpdatedAt) > time.Minute {
+			t.Errorf("%s ticket was not touched by the Degraded observation: updated_at = %s", name, got.UpdatedAt)
+		}
+	}
+
+	// Healthy between two crashes, one poll later: still inside the grace.
+	setStatus(healthySynced)
+	p.pollDegraded(ctx)
+
+	got, err := store.Get(ctx, own.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != ticket.StatusEscalated {
+		t.Errorf("own ticket: status = %q, want it left escalated inside the flap grace", got.Status)
+	}
+	if created != 0 {
+		t.Errorf("%d new tickets were opened; the open ones must keep deduplicating", created)
+	}
+}
+
+// Closing a recovered application's ticket after RecoveredAfter means the
+// ticket no longer absorbs the next degradation, so the create path needs the
+// flap cooldown the AlertManager path has: an application Degraded again
+// shortly after its ticket was resolved is the same incident, not a new one
+// to announce and diagnose.
+//
+// Mutation check: delete the `if recent != nil { ...; continue }` block in
+// pollDegraded and "resolved within the cooldown" fails; ignore the lookup
+// error (drop its `continue`) and "lookup fails" fails.
+func TestPollerFlapCooldownSuppressesARecentlyResolvedApp(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cooldown    time.Duration
+		resolvedAgo time.Duration // 0: no previous ticket
+		breakLookup bool
+		wantCreated int
+	}{
+		{"resolved within the cooldown", 10 * time.Minute, 2 * time.Minute, false, 0},
+		{"resolved before the cooldown", 10 * time.Minute, 30 * time.Minute, false, 1},
+		{"no previous ticket", 10 * time.Minute, 0, false, 1},
+		{"cooldown disabled", 0, 2 * time.Minute, false, 1},
+		{"lookup fails", 10 * time.Minute, 0, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, setStatus := switchingAPI(t)
+			store := newTestStore(t)
+			var opened []*ticket.Ticket
+			p := NewPoller(client, store, func(tk *ticket.Ticket) { opened = append(opened, tk) })
+			p.FlapCooldown = tc.cooldown
+
+			if tc.resolvedAgo > 0 {
+				prev := degradedTicket(t, store, ticket.SourcePolling, ticket.StatusEscalated)
+				if ok, err := store.ResolveByIDFromStatus(ctx, prev.ID, ticket.StatusEscalated, "recovered"); err != nil || !ok {
+					t.Fatalf("resolve: ok=%v err=%v", ok, err)
+				}
+				if _, err := store.DB().Exec(`UPDATE tickets SET resolved_at=? WHERE id=?`,
+					time.Now().UTC().Add(-tc.resolvedAgo), prev.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.breakLookup {
+				// A resolved row whose resolved_at cannot be read makes the
+				// cooldown lookup fail while every other statement works.
+				bad := degradedTicket(t, store, ticket.SourcePolling, ticket.StatusEscalated)
+				if ok, err := store.ResolveByIDFromStatus(ctx, bad.ID, ticket.StatusEscalated, "recovered"); err != nil || !ok {
+					t.Fatalf("resolve: ok=%v err=%v", ok, err)
+				}
+				if _, err := store.DB().Exec(`UPDATE tickets SET resolved_at='~not a time~' WHERE id=?`, bad.ID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.FindRecentlyResolved(ctx, "labs", "web", ticket.TypeArgoCDDegraded, "", tc.cooldown); err == nil {
+					t.Fatal("precondition: the cooldown lookup must fail")
+				}
+			}
+
+			setStatus(degradedSynced)
+			p.pollDegraded(ctx)
+
+			if len(opened) != tc.wantCreated {
+				t.Fatalf("tickets opened = %d, want %d", len(opened), tc.wantCreated)
+			}
+			dup, err := store.FindDuplicate(ctx, "labs", "web", ticket.TypeArgoCDDegraded, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (dup != nil) != (tc.wantCreated == 1) {
+				t.Errorf("unresolved ticket in the store = %v, want present=%v", dup, tc.wantCreated == 1)
+			}
+		})
 	}
 }

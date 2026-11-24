@@ -64,6 +64,15 @@ type Poller struct {
 	// observation (each one bumps UpdatedAt). Zero or negative disables the
 	// pass. NewPoller sets DefaultRecoveredAfter.
 	RecoveredAfter time.Duration
+	// FlapCooldown suppresses opening a new argocd_app_degraded ticket for an
+	// application whose previous one was resolved within this window, the
+	// same rule AlertHandler.FlapCooldown applies to alerts. Now that a
+	// recovered application's ticket is closed after RecoveredAfter instead
+	// of absorbing re-degradations until its TTL, an application that
+	// degrades again shortly after that close would otherwise get a new
+	// ticket, a new announcement and a new diagnosis each time. Zero or
+	// negative disables it.
+	FlapCooldown time.Duration
 }
 
 // DefaultRecoveredAfter is how long a poller-created argocd_app_degraded
@@ -219,12 +228,42 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 			continue
 		}
 		if existing != nil {
-			// Bump UpdatedAt so stale-ticket GC sees the condition is
-			// still active.
-			if err := p.store.Touch(ctx, existing.ID); err != nil {
-				slog.Error("poller: failed to touch ticket", "error", err, "id", existing.ID)
+			// Bump UpdatedAt so stale-ticket GC and resolveRecovered see
+			// the condition is still active.
+			//
+			// The duplicate is the newest unresolved ticket for the key,
+			// whatever its source. When that is somebody else's — a manual
+			// investigation of the same application — the poller's own
+			// ticket must still get the heartbeat, or its frozen UpdatedAt
+			// reads as "no Degraded observation" and the first Healthy
+			// reading between two crashes closes it.
+			if existing.Source != ticket.SourcePolling {
+				if err := p.store.Touch(ctx, existing.ID); err != nil {
+					slog.Error("poller: failed to touch ticket", "error", err, "id", existing.ID)
+				}
+			}
+			if err := p.store.TouchUnresolvedBySource(ctx, team, app, ticket.TypeArgoCDDegraded, ticket.SourcePolling); err != nil {
+				slog.Error("poller: failed to touch own tickets", "error", err, "team", team, "app", app)
 			}
 			continue
+		}
+
+		// Flap suppression, as in AlertHandler: an application whose ticket
+		// was resolved moments ago and is Degraded again is the same
+		// incident flapping, not a new one to announce and diagnose. A
+		// failed lookup opens nothing this cycle — whether a ticket was just
+		// resolved is unknown, not "no" — and the next cycle asks again.
+		if p.FlapCooldown > 0 {
+			recent, err := p.store.FindRecentlyResolved(ctx, team, app, ticket.TypeArgoCDDegraded, "", p.FlapCooldown)
+			if err != nil {
+				slog.Error("poller: flap cooldown check failed", "error", err, "team", team, "app", app)
+				continue
+			}
+			if recent != nil {
+				slog.Info("poller: suppressing re-degraded application within flap cooldown",
+					"team", team, "app", app, "previous_ticket", recent.ID, "cooldown", p.FlapCooldown)
+				continue
+			}
 		}
 
 		t := &ticket.Ticket{
@@ -311,7 +350,15 @@ func (o *ownDegradedTickets) load(ctx context.Context, store *ticket.Store) {
 //   - a ticket touched within RecoveredAfter: see DefaultRecoveredAfter.
 //
 // The write is guarded on the status that was read, so a transition that
-// landed in between wins.
+// landed in between wins. The other direction is guarded too: an open ticket
+// may still be queued for a pipeline slot, and the pipeline starts its run
+// with Store.SetStatusFromStatus, which refuses a ticket this pass has
+// resolved meanwhile instead of reopening it.
+//
+// The grace only bridges flaps shorter than RecoveredAfter. Once the ticket
+// is closed, FlapCooldown keeps a re-degradation inside that further window
+// from opening a new one; a flap slower than both gets a new ticket each
+// time, which is the same trade the AlertManager path makes.
 func (p *Poller) resolveRecovered(ctx context.Context, team, app string, own *ownDegradedTickets) {
 	if p.RecoveredAfter <= 0 {
 		return

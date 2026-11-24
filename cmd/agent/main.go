@@ -138,6 +138,7 @@ func main() {
 	poller.StaleAfter = cfg.AutoResolveStaleAfter
 	poller.AnalyzingAfter = cfg.AutoResolveAnalyzingAfter
 	poller.EscalatedAfter = cfg.AutoResolveEscalatedAfter
+	poller.FlapCooldown = cfg.AlertFlapCooldown
 	poller.FixProposedAfter = cfg.AutoResolveFixProposedAfter
 	poller.OrphanAfter = cfg.AutoResolveOrphanAfter
 	poller.MaxAnalyzingAge = cfg.MaxAnalyzingAge

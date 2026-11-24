@@ -126,7 +126,11 @@ func (h *GitHubWebhookHandler) processWorkflowRun(ctx context.Context, event wor
 	// Dedup check.
 	existing, err := h.store.FindDuplicate(ctx, tenant, service, ticket.TypeGitHubActionsFailed, "")
 	if err != nil {
-		slog.Error("dedup check failed for github webhook", "error", err)
+		// Whether a ticket already exists is unknown, which is not "none":
+		// falling through would open and announce a duplicate for a failure
+		// that already has one. The next failing run asks again.
+		slog.Error("dedup check failed for github webhook; no ticket opened", "error", err, "repo", repo)
+		return
 	}
 	if existing != nil {
 		// Bump UpdatedAt so the stale-ticket GC recognizes the failure
