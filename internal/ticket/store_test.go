@@ -1147,3 +1147,112 @@ func TestFindByIDPrefix(t *testing.T) {
 		}
 	}
 }
+
+// SetStatusFromStatus is how the pipeline starts a run on a ticket that
+// waited in a queue: it must move the row only while it is still where the
+// queued copy says, and must write nothing else — above all not resolved_at.
+//
+// Mutation check: drop `AND status=?` from the statement and "row moved on"
+// fails.
+func TestStoreSetStatusFromStatus(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct {
+		name        string
+		resolve     bool
+		wantApplied bool
+		wantStatus  string
+	}{
+		{"row still at the expected status", false, true, StatusAnalyzing},
+		{"row moved on", true, false, StatusResolved},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newTestStore(t)
+			tk := &Ticket{Source: SourcePolling, Type: TypeArgoCDDegraded, Tenant: "labs", Service: "web", Summary: "s", AlertFingerprint: "fp1"}
+			if err := store.Create(ctx, tk); err != nil {
+				t.Fatal(err)
+			}
+			if tc.resolve {
+				if ok, err := store.ResolveByIDFromStatus(ctx, tk.ID, StatusOpen, "recovered"); err != nil || !ok {
+					t.Fatalf("resolve: ok=%v err=%v", ok, err)
+				}
+			}
+			applied, err := store.SetStatusFromStatus(ctx, tk.ID, StatusOpen, StatusAnalyzing)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if applied != tc.wantApplied {
+				t.Errorf("applied = %v, want %v", applied, tc.wantApplied)
+			}
+			got, err := store.Get(ctx, tk.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", got.Status, tc.wantStatus)
+			}
+			if (got.ResolvedAt != nil) != tc.resolve {
+				t.Errorf("resolved_at = %v, want set=%v", got.ResolvedAt, tc.resolve)
+			}
+			if got.AlertFingerprint != "fp1" {
+				t.Errorf("alert_fingerprint = %q, want it untouched", got.AlertFingerprint)
+			}
+		})
+	}
+}
+
+// TouchUnresolvedBySource is the poller's heartbeat for its own tickets. It
+// must reach every unresolved ticket of that source for the key and nothing
+// else: a resolved ticket's updated_at is history, and another source,
+// service or type is not this signal.
+//
+// Mutation check: drop any one predicate from the statement's WHERE and the
+// row named after it fails.
+func TestStoreTouchUnresolvedBySource(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	old := time.Now().UTC().Add(-time.Hour)
+
+	mk := func(source, typ, tenant, service, status string) string {
+		t.Helper()
+		tk := &Ticket{Source: source, Type: typ, Tenant: tenant, Service: service, Summary: "s"}
+		if err := store.Create(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+		tk.Status = status
+		if err := store.Update(ctx, tk); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().Exec(`UPDATE tickets SET updated_at=? WHERE id=?`, old, tk.ID); err != nil {
+			t.Fatal(err)
+		}
+		return tk.ID
+	}
+	rows := []struct {
+		name        string
+		id          string
+		wantTouched bool
+	}{
+		{"own escalated", mk(SourcePolling, TypeArgoCDDegraded, "labs", "web", StatusEscalated), true},
+		{"own open", mk(SourcePolling, TypeArgoCDDegraded, "labs", "web", StatusOpen), true},
+		{"own resolved", mk(SourcePolling, TypeArgoCDDegraded, "labs", "web", StatusResolved), false},
+		{"own suppressed", mk(SourcePolling, TypeArgoCDDegraded, "labs", "web", StatusSuppressed), false},
+		{"another source", mk(SourceManual, TypeArgoCDDegraded, "labs", "web", StatusOpen), false},
+		{"another type", mk(SourcePolling, TypePodCrashloop, "labs", "web", StatusOpen), false},
+		{"another service", mk(SourcePolling, TypeArgoCDDegraded, "labs", "worker", StatusOpen), false},
+		{"another tenant", mk(SourcePolling, TypeArgoCDDegraded, "admins", "web", StatusOpen), false},
+	}
+
+	if err := store.TouchUnresolvedBySource(ctx, "labs", "web", TypeArgoCDDegraded, SourcePolling); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, r := range rows {
+		got, err := store.Get(ctx, r.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if touched := time.Since(got.UpdatedAt) < time.Minute; touched != r.wantTouched {
+			t.Errorf("%s: touched = %v, want %v (updated_at = %s)", r.name, touched, r.wantTouched, got.UpdatedAt)
+		}
+	}
+}

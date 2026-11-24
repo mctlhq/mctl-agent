@@ -76,6 +76,10 @@ const (
 	OutcomeFixProposed = "fix_proposed"
 	OutcomeEscalated   = "escalated"
 	OutcomeFailed      = "failed"
+	// OutcomeSuperseded: the run never started, because the ticket had
+	// already left the status it was queued with (resolved while waiting
+	// for a pipeline slot).
+	OutcomeSuperseded = "superseded"
 )
 
 // Tracer is mctl-agent's tracer. Until Setup installs a provider it is the

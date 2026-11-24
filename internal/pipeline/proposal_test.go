@@ -90,12 +90,20 @@ func incidentStatuses(t *testing.T, p *Pipeline) func() []string {
 // Both directions are covered: the PR-less paths must NOT be fix_proposed, and
 // the path that really opens a PR still must be.
 //
+// A response that names only half a pull request is still a pull request:
+// with the number it can be approved, so it is fix_proposed; with only the
+// URL it cannot, so it is escalated — but the URL stays on the ticket, and
+// neither is ever reported as a dry run in which nothing was changed.
+//
 // Mutation check: restore `t.Status = ticket.StatusFixProposed` +
 // persistDiagnosisAndMirror in the MEDIUM branch and "medium suggestion"
 // fails; drop the no-PR guard after CreatePR and "dry run" fails; escalate
 // unconditionally after CreatePR and "pull request opened" fails; drop the
 // ProposedFix assignment in the MEDIUM branch and "medium suggestion" fails
-// on the proposal text.
+// on the proposal text; turn the no-PR guard's `&&` back into `||` and both
+// "pull request without" rows fail; drop the `if p.dryRun` split and "no
+// pull request outside dry run" fails; drop the `prNumber == 0` branch and
+// "pull request without a number" fails.
 func TestFixProposedOnlyWithAPullRequest(t *testing.T) {
 	const valuesPath = "platform-gitops/services/billing/api/values.yaml"
 	appliedFix := &skill.FixResult{Applied: true, FilePath: valuesPath, NewContent: "replicas: 2\n", Summary: "scale to 2 replicas"}
@@ -108,6 +116,9 @@ func TestFixProposedOnlyWithAPullRequest(t *testing.T) {
 		wantPR       int
 		wantProposal []string
 		wantAnalysis string
+		dryRun       bool
+		wantPRURL    string
+		notAnalysis  []string
 	}{
 		{
 			name: "medium suggestion",
@@ -129,9 +140,55 @@ func TestFixProposedOnlyWithAPullRequest(t *testing.T) {
 			github: func(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
 				return stubGitHubFixerMode(t, store, true)
 			},
+			dryRun:       true,
 			wantStatus:   ticket.StatusEscalated,
 			wantProposal: []string{"scale to 2 replicas"},
-			wantAnalysis: "no PR was opened",
+			wantAnalysis: "no PR was opened (dry-run)",
+		},
+		{
+			// CreatePR answers ("", 0, nil) while the pipeline is not in
+			// dry-run: nothing may claim the GitOps repo is untouched.
+			name: "no pull request outside dry run",
+			s: proposingSkill{
+				diag: &skill.DiagnosisResult{Diagnosis: "needs more replicas", Confidence: ticket.ConfidenceHigh, Fixable: true},
+				fix:  appliedFix,
+			},
+			github: func(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
+				return stubGitHubFixerMode(t, store, true)
+			},
+			wantStatus:   ticket.StatusEscalated,
+			wantProposal: []string{"scale to 2 replicas"},
+			wantAnalysis: "returned no pull request",
+			notAnalysis:  []string{"dry-run", "Nothing was changed"},
+		},
+		{
+			name: "pull request without a url",
+			s: proposingSkill{
+				diag: &skill.DiagnosisResult{Diagnosis: "needs more replicas", Confidence: ticket.ConfidenceHigh, Fixable: true},
+				fix:  appliedFix,
+			},
+			github: func(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
+				return stubGitHubFixerPR(t, store, false, map[string]any{"number": 42})
+			},
+			wantStatus:   ticket.StatusFixProposed,
+			wantPR:       42,
+			wantProposal: []string{"scale to 2 replicas"},
+			notAnalysis:  []string{"dry-run", "Nothing was changed"},
+		},
+		{
+			name: "pull request without a number",
+			s: proposingSkill{
+				diag: &skill.DiagnosisResult{Diagnosis: "needs more replicas", Confidence: ticket.ConfidenceHigh, Fixable: true},
+				fix:  appliedFix,
+			},
+			github: func(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
+				return stubGitHubFixerPR(t, store, false, map[string]any{"html_url": "https://github.com/owner/repo/pull/42"})
+			},
+			wantStatus:   ticket.StatusEscalated,
+			wantPRURL:    "https://github.com/owner/repo/pull/42",
+			wantProposal: []string{"scale to 2 replicas"},
+			wantAnalysis: "needs more replicas\n\n[escalated] A PR was opened (https://github.com/owner/repo/pull/42)",
+			notAnalysis:  []string{"dry-run", "Nothing was changed"},
 		},
 		{
 			name: "pull request opened",
@@ -142,6 +199,7 @@ func TestFixProposedOnlyWithAPullRequest(t *testing.T) {
 			github:       stubGitHubFixer,
 			wantStatus:   ticket.StatusFixProposed,
 			wantPR:       42,
+			wantPRURL:    "https://github.com/owner/repo/pull/42",
 			wantProposal: []string{"scale to 2 replicas"},
 		},
 	}
@@ -153,6 +211,7 @@ func TestFixProposedOnlyWithAPullRequest(t *testing.T) {
 			if tc.github != nil {
 				p.github = tc.github(t, store)
 			}
+			p.dryRun = tc.dryRun
 			p.registry.Register(tc.s)
 
 			tk := &ticket.Ticket{
@@ -174,8 +233,18 @@ func TestFixProposedOnlyWithAPullRequest(t *testing.T) {
 			if got.PRNumber != tc.wantPR {
 				t.Errorf("pr_number = %d, want %d", got.PRNumber, tc.wantPR)
 			}
-			if got.Status == ticket.StatusFixProposed && (got.PRNumber == 0 || got.PRURL == "") {
-				t.Errorf("fix_proposed without a recorded PR (number=%d url=%q): nothing can approve it", got.PRNumber, got.PRURL)
+			if got.PRURL != tc.wantPRURL {
+				t.Errorf("pr_url = %q, want %q", got.PRURL, tc.wantPRURL)
+			}
+			// The approve command merges by number, so that is what
+			// fix_proposed must never be without.
+			if got.Status == ticket.StatusFixProposed && got.PRNumber == 0 {
+				t.Errorf("fix_proposed without a PR number (url=%q): nothing can approve it", got.PRURL)
+			}
+			for _, not := range tc.notAnalysis {
+				if strings.Contains(got.Analysis, not) {
+					t.Errorf("analysis = %q, must not contain %q", got.Analysis, not)
+				}
 			}
 			for _, want := range tc.wantProposal {
 				if !strings.Contains(got.ProposedFix, want) {

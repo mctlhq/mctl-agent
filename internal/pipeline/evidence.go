@@ -130,7 +130,7 @@ func (p *Pipeline) collectHistoricalEvidence(ctx context.Context, t *ticket.Tick
 			fmt.Fprintf(&sb, "  Diagnosis: %s\n", past.Analysis)
 		}
 		if past.ProposedFix != "" {
-			fmt.Fprintf(&sb, "  Fix applied: %s\n", past.ProposedFix)
+			fmt.Fprintf(&sb, "  %s: %s\n", pastFixLabel(past), past.ProposedFix)
 		}
 		if past.Confidence != "" {
 			fmt.Fprintf(&sb, "  Confidence: %s\n", past.Confidence)
@@ -142,4 +142,17 @@ func (p *Pipeline) collectHistoricalEvidence(ctx context.Context, t *ticket.Tick
 		Content:     sb.String(),
 		CollectedAt: time.Now().UTC(),
 	})
+}
+
+// pastFixLabel names what a past ticket's ProposedFix is. A resolved ticket
+// does not record whether its fix was applied: ProposedFix is also kept for a
+// suggestion nobody acted on (MEDIUM confidence, dry-run), for a PR that was
+// never merged, and for a ticket the poller closed because the application
+// recovered by itself. Calling all of those "Fix applied" told the next
+// diagnosis that an untried change had worked.
+func pastFixLabel(past *ticket.Ticket) string {
+	if past.PRNumber != 0 || past.PRURL != "" {
+		return "Fix proposed in a PR (not recorded whether it was merged)"
+	}
+	return "Fix proposed, no PR opened (not applied by the agent)"
 }

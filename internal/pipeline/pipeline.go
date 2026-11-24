@@ -362,8 +362,15 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		telemetry.TicketID.String(t.ID),
 		telemetry.TicketType.String(t.Type),
 	))
+	// superseded is set when the run never started because the ticket had
+	// already left the status it was queued with. That is not a processing
+	// failure, and the in-memory status no longer says where the ticket is.
+	superseded := false
 	defer func() {
 		outcome := ticketOutcome(t)
+		if superseded {
+			outcome = telemetry.OutcomeSuperseded
+		}
 		span.SetAttributes(telemetry.TicketOutcome.String(outcome))
 		if outcome == telemetry.OutcomeFailed {
 			span.SetStatus(codes.Error, "ticket processing did not reach a terminal state")
@@ -412,11 +419,27 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	// synchronously) made the accident stop happening, and mctl-api began
 	// receiving `open` with nothing to correct it — leaving every incident
 	// reading `open` for the whole diagnosis, however long that took.
-	t.Status = ticket.StatusAnalyzing
-	if err := p.store.Update(ctx, t); err != nil {
+	//
+	// Guarded on the status this copy was queued with, and narrow: the copy
+	// may have waited for a slot longer than a diagnosis timeout, and a
+	// full-row Update from it would write analyzing and a nil resolved_at over
+	// a resolution that landed meanwhile — reopening the incident here and in
+	// mctl-api, then announcing and diagnosing an application that is fine.
+	started, err := p.store.SetStatusFromStatus(ctx, t.ID, t.Status, ticket.StatusAnalyzing)
+	if err != nil {
 		log.Error("failed to update ticket status", "error", err)
 		return
 	}
+	if !started {
+		log.Info("skipping ticket: it left its queued status before a pipeline slot was free",
+			"queued_status", t.Status)
+		// Nothing to announce either: whatever moved the ticket on has
+		// reported it, or it closed before anyone needed to hear of it.
+		p.telegram.DropNewTicket(t)
+		superseded = true
+		return
+	}
+	t.Status = ticket.StatusAnalyzing
 
 	// Publish to mctl-api alert store.
 	p.publishAlert(t)
@@ -428,7 +451,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	evSpan.End()
 
 	// Reload ticket with evidence.
-	t, err := p.store.Get(ctx, t.ID)
+	t, err = p.store.Get(ctx, t.ID)
 	if err != nil {
 		log.Error("failed to reload ticket", "error", err)
 		return
@@ -880,18 +903,48 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		return
 	}
 
-	// No error and no PR: CreatePR ran in dry-run mode. fix_proposed is only
-	// for a ticket with a PR recorded on it — without one the approve command
-	// has nothing to merge and the ticket would wait for the stale TTL — so
-	// the generated fix goes to a human instead, with its summary kept in
-	// ProposedFix.
-	if prURL == "" || prNumber == 0 {
+	// No error and no PR. fix_proposed is only for a ticket with a PR recorded
+	// on it — without one the approve command has nothing to merge and the
+	// ticket would wait for the stale TTL — so the generated fix goes to a
+	// human instead, with its summary kept in ProposedFix.
+	//
+	// Both coordinates must be missing for this to be "no PR". Dry-run is the
+	// only way CreatePR returns that today, and only then may the message say
+	// so and promise that nothing was changed.
+	if prURL == "" && prNumber == 0 {
 		log.Info("fix generated but no PR was opened", "skill", s.Name(), "dry_run", p.dryRun)
+		if p.dryRun {
+			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+				"[DRY-RUN] Would create PR: "+summary)
+			p.escalate(ctx, t, "[escalated] A fix was generated but no PR was opened (dry-run): "+
+				summary+". Nothing was changed in the GitOps repo; apply it by hand if it is right.")
+			return
+		}
 		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
-			"[DRY-RUN] Would create PR: "+summary)
-		p.escalate(ctx, t, "[escalated] A fix was generated but no PR was opened (dry-run): "+
-			summary+". Nothing was changed in the GitOps repo; apply it by hand if it is right.")
+			"PR creation returned no pull request: "+summary)
+		p.escalate(ctx, t, "[escalated] A fix was generated and PR creation reported no error, but it "+
+			"returned no pull request: "+summary+". A branch or commit may exist in the GitOps repo; "+
+			"check there before applying the fix by hand.")
 		return
+	}
+	// Half a result: a pull request exists, but the response named only its
+	// URL. It is recorded on the ticket, never dropped — but without a number
+	// the approve command cannot merge it, so this is not fix_proposed.
+	if prNumber == 0 {
+		log.Warn("PR created but the response carried no number", "pr", prURL)
+		fromStatus := t.Status
+		t.PRURL = prURL
+		t.Status = ticket.StatusEscalated
+		t.Analysis += "\n\n[escalated] A PR was opened (" + prURL + ") but its number " +
+			"was missing from the response, so it cannot be approved through the agent. Review and merge it by hand."
+		p.recordAndMirrorPR(ctx, t, fromStatus)
+		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+			"PR opened, but its number is unknown to the agent; review and merge it by hand: "+prURL)
+		return
+	}
+	if prURL == "" {
+		// The number is what approve and auto-merge work from; go on.
+		log.Warn("PR created but the response carried no URL", "pr_number", prNumber)
 	}
 
 	fromStatus := t.Status

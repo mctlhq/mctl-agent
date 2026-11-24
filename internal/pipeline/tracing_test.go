@@ -215,6 +215,13 @@ func stubGitHubFixer(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
 // dry-run the file is still read, but CreatePR opens nothing.
 func stubGitHubFixerMode(t *testing.T, store *ticket.Store, dryRun bool) *fixer.GitHubFixer {
 	t.Helper()
+	return stubGitHubFixerPR(t, store, dryRun, map[string]any{"number": 42, "html_url": "https://github.com/owner/repo/pull/42"})
+}
+
+// stubGitHubFixerPR is stubGitHubFixerMode with the body of the create-PR
+// response exposed, for responses that carry only part of a pull request.
+func stubGitHubFixerPR(t *testing.T, store *ticket.Store, dryRun bool, pr map[string]any) *fixer.GitHubFixer {
+	t.Helper()
 	file := map[string]any{"type": "file", "encoding": "base64", "sha": "f1", "content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n"))}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -231,7 +238,7 @@ func stubGitHubFixerMode(t *testing.T, store *ticket.Store, dryRun bool) *fixer.
 			body = map[string]any{}
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/pulls"):
 			w.WriteHeader(http.StatusCreated)
-			body = map[string]any{"number": 42, "html_url": "https://github.com/owner/repo/pull/42"}
+			body = pr
 		default:
 			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusNotFound)
 			return
