@@ -219,9 +219,11 @@ const maxErrorLineLen = 240
 // A startup error often quotes the DSN or URL it failed on, credentials
 // included. The diagnosis goes to the ticket and the operators' chat, so the
 // userinfo of a URL and the value of a secret-looking key are removed first.
+// A header value takes its auth scheme with it: in "Authorization: Bearer x"
+// the credential is x, not the word Bearer.
 var (
 	urlUserinfo  = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@`)
-	secretKeyVal = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|authorization)[a-z0-9_.-]*)("?\s*[=:]\s*)("[^"]*"|\S+)`)
+	secretKeyVal = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|authorization)[a-z0-9_.-]*)("?\s*[=:]\s*)("[^"]*"|(?:(?:bearer|basic|token)\s+)?\S+)`)
 )
 
 func redactCredentials(line string) string {
