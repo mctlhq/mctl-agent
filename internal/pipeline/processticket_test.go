@@ -346,11 +346,12 @@ func TestRecordAndMirrorPRReportsAFailedWrite(t *testing.T) {
 	}
 }
 
-// The fix_proposed writes that follow a failed fix step sit in the same
-// position as escalate: the slow step that failed is usually what spent the
-// context. They used to write under it, discard the error, and mirror to
-// mctl-api regardless — the local row kept `analyzing` while mctl-api was told
-// `fix_proposed` (agy P1 on #113).
+// A diagnosis outcome is usually written after a slow step failed, and that
+// step is what spent the context. Such writes used to go out under it, discard
+// the error, and mirror to mctl-api regardless — the local row kept
+// `analyzing` while mctl-api was told something else (agy P1 on #113).
+// escalate is the helper's caller now, so the outcome written here is
+// escalated; fix_proposed is written only together with a PR.
 func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T) {
 	store, err := ticket.NewStore(context.Background(), ":memory:")
 	if err != nil {
@@ -388,7 +389,7 @@ func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T
 	if err := store.Create(context.Background(), live); err != nil {
 		t.Fatal(err)
 	}
-	live.Status = ticket.StatusFixProposed
+	live.Status = ticket.StatusEscalated
 	live.Analysis = "probe timeout shorter than startup"
 	if !newPipeline().persistDiagnosisAndMirror(expired, live, ticket.StatusAnalyzing) {
 		t.Error("a write that landed must be reported as applied")
@@ -398,9 +399,9 @@ func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != ticket.StatusFixProposed {
+	if got.Status != ticket.StatusEscalated {
 		t.Errorf("the write must survive the spent context: want %q, got %q",
-			ticket.StatusFixProposed, got.Status)
+			ticket.StatusEscalated, got.Status)
 	}
 	if n := atomic.LoadInt32(&mirrored); n != 1 {
 		t.Errorf("a persisted status must be mirrored once, got %d", n)
@@ -422,7 +423,7 @@ func TestPersistDiagnosisAndMirrorSurvivesAnExpiredContextAndGuards(t *testing.T
 		t.Fatalf("setup resolve failed: applied=%v err=%v", applied, err)
 	}
 	atomic.StoreInt32(&mirrored, 0)
-	raced.Status = ticket.StatusFixProposed
+	raced.Status = ticket.StatusEscalated
 	// The return value reports whether the store took the transition:
 	// reporting one it refused would mean a resolved ticket was escalated.
 	if newPipeline().persistDiagnosisAndMirror(expired, raced, ticket.StatusAnalyzing) {

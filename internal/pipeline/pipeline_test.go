@@ -504,8 +504,13 @@ func TestHandleHighConfidenceFixHappyPathReadsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Status != ticket.StatusFixProposed {
-		t.Fatalf("status = %q, want %q, analysis=%q", got.Status, ticket.StatusFixProposed, got.Analysis)
+	// Dry-run opens no PR, so the ticket must not claim one is waiting for
+	// approval: it is escalated with the generated fix kept on it.
+	if got.Status != ticket.StatusEscalated {
+		t.Fatalf("status = %q, want %q, analysis=%q", got.Status, ticket.StatusEscalated, got.Analysis)
+	}
+	if got.ProposedFix != "bump" || got.PRNumber != 0 {
+		t.Errorf("proposed_fix = %q, pr = %d; want the fix summary kept and no PR", got.ProposedFix, got.PRNumber)
 	}
 }
 

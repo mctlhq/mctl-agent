@@ -39,7 +39,8 @@ import (
 )
 
 // mediumSkill diagnoses every ticket as MEDIUM and fixable, and is not
-// auto-merge safe, so the pipeline proposes the fix without opening a PR.
+// auto-merge safe, so the pipeline suggests the fix without opening a PR and
+// hands the ticket to a human.
 type mediumSkill struct{}
 
 func (mediumSkill) Name() string        { return "medium_test" }
@@ -123,7 +124,7 @@ func TestProcessTicketEmitsOneTraceWithOutcome(t *testing.T) {
 }
 
 // Mutation check: remove the confidence/fixable attributes from the
-// diagnose span, or map fix_proposed onto another outcome, and this fails.
+// diagnose span, or leave a PR-less proposal at fix_proposed, and this fails.
 func TestProcessTicketDiagnoseSpanCarriesTheVerdict(t *testing.T) {
 	p, store := newAsyncTestPipeline(t, 1)
 	p.registry.Register(mediumSkill{})
@@ -139,8 +140,8 @@ func TestProcessTicketDiagnoseSpanCarriesTheVerdict(t *testing.T) {
 		!da[telemetry.DiagnosisFixable].AsBool() {
 		t.Errorf("diagnose attributes = %v", da)
 	}
-	if got := telemetrytest.SpanAttrs(spans["mctl_agent.process_ticket"])[telemetry.TicketOutcome].AsString(); got != telemetry.OutcomeFixProposed {
-		t.Errorf("outcome = %q, want %q", got, telemetry.OutcomeFixProposed)
+	if got := telemetrytest.SpanAttrs(spans["mctl_agent.process_ticket"])[telemetry.TicketOutcome].AsString(); got != telemetry.OutcomeEscalated {
+		t.Errorf("outcome = %q, want %q (a proposal without a PR is escalated)", got, telemetry.OutcomeEscalated)
 	}
 	if d.Parent().SpanID() != spans["mctl_agent.process_ticket"].SpanContext().SpanID() {
 		t.Error("diagnose span is not a child of the root span")
@@ -207,6 +208,13 @@ func TestProcessTicketSpanSurvivesAFailedReload(t *testing.T) {
 // serves one file and opens PR #42.
 func stubGitHubFixer(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
 	t.Helper()
+	return stubGitHubFixerMode(t, store, false)
+}
+
+// stubGitHubFixerMode is stubGitHubFixer with the dry-run switch exposed: in
+// dry-run the file is still read, but CreatePR opens nothing.
+func stubGitHubFixerMode(t *testing.T, store *ticket.Store, dryRun bool) *fixer.GitHubFixer {
+	t.Helper()
 	file := map[string]any{"type": "file", "encoding": "base64", "sha": "f1", "content": base64.StdEncoding.EncodeToString([]byte("replicas: 1\n"))}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -232,7 +240,7 @@ func stubGitHubFixer(t *testing.T, store *ticket.Store) *fixer.GitHubFixer {
 	}))
 	t.Cleanup(srv.Close)
 
-	f := fixer.NewGitHubFixer("test-token", "", "owner", "repo", store, false, 10, 10, gitopspath.DefaultAllowlist())
+	f := fixer.NewGitHubFixer("test-token", "", "owner", "repo", store, dryRun, 10, 10, gitopspath.DefaultAllowlist())
 	if err := f.SetBaseURL(srv.URL + "/"); err != nil {
 		t.Fatal(err)
 	}

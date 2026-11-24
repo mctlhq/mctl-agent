@@ -249,10 +249,6 @@ func TestFailurePathLinesCarryTheTrace(t *testing.T) {
 		"diagnosis loses the race": {"diagnosis outcome not persisted: ticket moved on concurrently", func(ctx context.Context, p *Pipeline, _ *ticket.Store, tk *ticket.Ticket) {
 			p.persistDiagnosisAndMirror(ctx, tk, ticket.StatusOpen)
 		}},
-		"escalation write fails": {"failed to persist escalated ticket", func(ctx context.Context, p *Pipeline, store *ticket.Store, tk *ticket.Ticket) {
-			_ = store.Close()
-			p.persistEscalation(ctx, tk, ticket.StatusAnalyzing)
-		}},
 		"escalation loses the race": {"escalation skipped: ticket reached a terminal state concurrently", func(ctx context.Context, p *Pipeline, _ *ticket.Store, tk *ticket.Ticket) {
 			tk.Status = ticket.StatusOpen // stale: the stored row is analyzing
 			p.escalate(ctx, tk, "r")
