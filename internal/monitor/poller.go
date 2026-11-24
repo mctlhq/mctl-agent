@@ -58,11 +58,41 @@ type Poller struct {
 	// measured from CreatedAt. Unlike AnalyzingAfter (which uses UpdatedAt),
 	// this cap is not reset by flapping alert heartbeats. Zero disables the cap.
 	MaxAnalyzingAge time.Duration
+	// RecoveredAfter enables closing the poller's own argocd_app_degraded
+	// tickets once the poller observes the application Healthy and Synced:
+	// the ticket is resolved when it has gone this long without a Degraded
+	// observation (each one bumps UpdatedAt). Zero or negative disables the
+	// pass. NewPoller sets DefaultRecoveredAfter.
+	RecoveredAfter time.Duration
+	// FlapCooldown suppresses opening a new argocd_app_degraded ticket for an
+	// application whose previous one was resolved within this window, the
+	// same rule AlertHandler.FlapCooldown applies to alerts. Now that a
+	// recovered application's ticket is closed after RecoveredAfter instead
+	// of absorbing re-degradations until its TTL, an application that
+	// degrades again shortly after that close would otherwise get a new
+	// ticket, a new announcement and a new diagnosis each time. Zero or
+	// negative disables it.
+	FlapCooldown time.Duration
 }
+
+// DefaultRecoveredAfter is how long a poller-created argocd_app_degraded
+// ticket must have gone without a Degraded observation before a Healthy and
+// Synced reading closes it. An application restarting in a loop reads Healthy
+// between crashes; closing on the first such reading would open and announce
+// a fresh ticket on every cycle.
+const DefaultRecoveredAfter = 10 * time.Minute
+
+// The only ArgoCD reading that counts as recovered. Anything else —
+// Progressing, Suspended, Unknown, an empty field, OutOfSync — is not
+// evidence that the incident is over.
+const (
+	argoHealthHealthy = "Healthy"
+	argoSyncSynced    = "Synced"
+)
 
 // NewPoller creates a new service health poller.
 func NewPoller(client *mctlclient.Client, store *ticket.Store, onTicket func(*ticket.Ticket)) *Poller {
-	return &Poller{client: client, store: store, onTicket: onTicket}
+	return &Poller{client: client, store: store, onTicket: onTicket, RecoveredAfter: DefaultRecoveredAfter}
 }
 
 // propagateResolve fans a local ticket resolution out to mctl-api, mirroring
@@ -144,8 +174,9 @@ func (p *Poller) poll(ctx context.Context) {
 }
 
 // pollDegraded scans all services for ArgoCD Degraded/Missing health,
-// creating or touching tickets, and returns the refresh outcome for
-// downstream GC gating.
+// creating or touching tickets, closes its own tickets for applications it
+// observes Healthy and Synced again (resolveRecovered), and returns the
+// refresh outcome for downstream GC gating.
 func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 	services, err := p.client.ListServices(ctx)
 	if err != nil {
@@ -157,6 +188,7 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 
 	failed := map[string]bool{}
 	known := make(map[string]bool, len(services))
+	var own ownDegradedTickets
 	for _, svc := range services {
 		team := svc.Team
 		app := svc.App
@@ -179,6 +211,13 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 
 		health := status.ArgoCD.Health
 		if health != "Degraded" && health != "Missing" {
+			// Reached only with a status that was fetched and decoded and
+			// that carries an ArgoCD block: a failed read, or one without
+			// the block, took one of the `continue`s above and resolves
+			// nothing.
+			if health == argoHealthHealthy && status.ArgoCD.SyncStatus == argoSyncSynced {
+				p.resolveRecovered(ctx, team, app, &own)
+			}
 			continue
 		}
 
@@ -189,12 +228,42 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 			continue
 		}
 		if existing != nil {
-			// Bump UpdatedAt so stale-ticket GC sees the condition is
-			// still active.
-			if err := p.store.Touch(ctx, existing.ID); err != nil {
-				slog.Error("poller: failed to touch ticket", "error", err, "id", existing.ID)
+			// Bump UpdatedAt so stale-ticket GC and resolveRecovered see
+			// the condition is still active.
+			//
+			// The duplicate is the newest unresolved ticket for the key,
+			// whatever its source. When that is somebody else's — a manual
+			// investigation of the same application — the poller's own
+			// ticket must still get the heartbeat, or its frozen UpdatedAt
+			// reads as "no Degraded observation" and the first Healthy
+			// reading between two crashes closes it.
+			if existing.Source != ticket.SourcePolling {
+				if err := p.store.Touch(ctx, existing.ID); err != nil {
+					slog.Error("poller: failed to touch ticket", "error", err, "id", existing.ID)
+				}
+			}
+			if err := p.store.TouchUnresolvedBySource(ctx, team, app, ticket.TypeArgoCDDegraded, ticket.SourcePolling); err != nil {
+				slog.Error("poller: failed to touch own tickets", "error", err, "team", team, "app", app)
 			}
 			continue
+		}
+
+		// Flap suppression, as in AlertHandler: an application whose ticket
+		// was resolved moments ago and is Degraded again is the same
+		// incident flapping, not a new one to announce and diagnose. A
+		// failed lookup opens nothing this cycle — whether a ticket was just
+		// resolved is unknown, not "no" — and the next cycle asks again.
+		if p.FlapCooldown > 0 {
+			recent, err := p.store.FindRecentlyResolved(ctx, team, app, ticket.TypeArgoCDDegraded, "", p.FlapCooldown)
+			if err != nil {
+				slog.Error("poller: flap cooldown check failed", "error", err, "team", team, "app", app)
+				continue
+			}
+			if recent != nil {
+				slog.Info("poller: suppressing re-degraded application within flap cooldown",
+					"team", team, "app", app, "previous_ticket", recent.ID, "cooldown", p.FlapCooldown)
+				continue
+			}
 		}
 
 		t := &ticket.Ticket{
@@ -226,6 +295,105 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 		}
 	}
 	return refreshState{failedServices: failed, knownServices: known}
+}
+
+// ownDegradedTickets is the poller's own unresolved argocd_app_degraded
+// tickets, keyed "tenant/service", read at most once per poll cycle and only
+// when some application is observed recovered. failed records that the read
+// did not succeed: the set is then unknown, not empty, and nothing is
+// resolved from it this cycle.
+type ownDegradedTickets struct {
+	loaded    bool
+	failed    bool
+	byService map[string][]*ticket.Ticket
+}
+
+func (o *ownDegradedTickets) load(ctx context.Context, store *ticket.Store) {
+	if o.loaded {
+		return
+	}
+	o.loaded = true
+	open, err := store.ListOpen(ctx)
+	if err != nil {
+		o.failed = true
+		slog.Error("poller: failed to list open tickets; recovered ArgoCD tickets stay open this cycle", "error", err)
+		return
+	}
+	o.byService = map[string][]*ticket.Ticket{}
+	for _, t := range open {
+		// Own tickets only. An AlertManager ticket of the same type is
+		// closed by AlertManager's resolve or by reconcileWithAlertManager,
+		// which know whether that alert still fires; a manual one
+		// (TriggerAnalysis) is an investigation somebody asked for.
+		if t.Source != ticket.SourcePolling || t.Type != ticket.TypeArgoCDDegraded {
+			continue
+		}
+		key := t.Tenant + "/" + t.Service
+		o.byService[key] = append(o.byService[key], t)
+	}
+}
+
+// resolveRecovered closes the poller's own argocd_app_degraded tickets for
+// one application the poller has just observed Healthy and Synced.
+//
+// pollDegraded opens these tickets and used to have no way to close them: a
+// recovered application simply stopped being touched, and the ticket waited
+// for whichever TTL matched its status — a week for an app that was healthy
+// again within minutes (ticket 288d5629).
+//
+// What it leaves alone, and why:
+//   - analyzing: the pipeline is mid-run and will land the ticket in a state
+//     the next cycle can judge; resolving under it races its own writes.
+//   - fix_proposed, fix_applied, and any ticket with a PR recorded: a pull
+//     request is open (or merged) against it, and closing the ticket would
+//     strand that PR with no ticket the approve command accepts.
+//   - a ticket touched within RecoveredAfter: see DefaultRecoveredAfter.
+//
+// The write is guarded on the status that was read, so a transition that
+// landed in between wins. The other direction is guarded too: an open ticket
+// may still be queued for a pipeline slot, and the pipeline starts its run
+// with Store.SetStatusFromStatus, which refuses a ticket this pass has
+// resolved meanwhile instead of reopening it.
+//
+// The grace only bridges flaps shorter than RecoveredAfter. Once the ticket
+// is closed, FlapCooldown keeps a re-degradation inside that further window
+// from opening a new one; a flap slower than both gets a new ticket each
+// time, which is the same trade the AlertManager path makes.
+func (p *Poller) resolveRecovered(ctx context.Context, team, app string, own *ownDegradedTickets) {
+	if p.RecoveredAfter <= 0 {
+		return
+	}
+	own.load(ctx, p.store)
+	if own.failed {
+		return
+	}
+	for _, t := range own.byService[team+"/"+app] {
+		switch t.Status {
+		case ticket.StatusOpen, ticket.StatusEscalated:
+		default:
+			continue
+		}
+		if t.PRNumber != 0 || t.PRURL != "" {
+			continue
+		}
+		if time.Since(t.UpdatedAt) < p.RecoveredAfter {
+			continue
+		}
+		const reason = "Auto-resolved: ArgoCD reports the application Healthy and Synced again"
+		resolved, err := p.store.ResolveByIDFromStatus(ctx, t.ID, t.Status, reason)
+		if err != nil {
+			slog.Warn("poller: recovered-app resolve failed", "ticket", t.ID, "err", err)
+			continue
+		}
+		if !resolved {
+			slog.Debug("poller: recovered-app resolve no-op, ticket advanced concurrently", "id", t.ID)
+			continue
+		}
+		metrics.ArgoRecoveredResolved.Inc()
+		p.propagateResolve(t.ID, reason)
+		slog.Info("poller: resolved ticket for a recovered application",
+			"ticket", t.ID, "tenant", t.Tenant, "service", t.Service, "status", t.Status)
+	}
 }
 
 // heartbeatTicketTypes lists ticket types whose creation path has a

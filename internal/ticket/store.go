@@ -284,6 +284,31 @@ func (s *Store) SetDiagnosisFromStatus(ctx context.Context, id, fromStatus, stat
 	return n > 0, nil
 }
 
+// SetStatusFromStatus moves a ticket to status while the stored row is still
+// at fromStatus, writing nothing but the status and updated_at, and reports
+// whether it did.
+//
+// The pipeline starts a run with it. A ticket waits for a pipeline slot as an
+// in-memory copy, possibly for longer than a diagnosis timeout, and anything
+// may close the row meanwhile (the poller's recovered-app pass, the stale GC,
+// an AlertManager resolve). Starting with a full-row Update from that copy
+// wrote status=analyzing and resolved_at=NULL over the resolution and
+// reopened a closed incident.
+func (s *Store) SetStatusFromStatus(ctx context.Context, id, fromStatus, status string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, s.rebind(`
+		UPDATE tickets SET status=?, updated_at=? WHERE id=? AND status=?`),
+		status, time.Now().UTC(), id, fromStatus,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // SetTraceID records the trace of the ticket's current processing run
 // (mctlhq/mctl-agent#97). A narrow write, like SetDiagnosisFromStatus, and
 // for the same reason: Update rewrites every column from an in-memory copy,
@@ -682,6 +707,25 @@ func (s *Store) Touch(ctx context.Context, id string) error {
 	now := time.Now().UTC()
 	query := `UPDATE tickets SET updated_at=? WHERE id=?`
 	_, err := s.db.ExecContext(ctx, s.rebind(query), now, id)
+	return err
+}
+
+// TouchUnresolvedBySource bumps UpdatedAt on every unresolved ticket of one
+// source for (tenant, service, type).
+//
+// The poller's heartbeat needs it. FindDuplicate hands back the newest
+// unresolved ticket for the key whatever its source, so when a manual
+// investigation (TriggerAnalysis) is newer than the poller's own ticket for
+// the same application, touching only the duplicate leaves the poller's
+// ticket with a frozen UpdatedAt while the application is still Degraded —
+// and both the stale GC and the recovered-app pass read a frozen UpdatedAt as
+// "the signal stopped".
+func (s *Store) TouchUnresolvedBySource(ctx context.Context, tenant, service, ticketType, source string) error {
+	now := time.Now().UTC()
+	query := `UPDATE tickets SET updated_at=?
+		WHERE tenant=? AND service=? AND type=? AND source=? AND status NOT IN (?, ?)`
+	_, err := s.db.ExecContext(ctx, s.rebind(query), now,
+		tenant, service, ticketType, source, StatusResolved, StatusSuppressed)
 	return err
 }
 

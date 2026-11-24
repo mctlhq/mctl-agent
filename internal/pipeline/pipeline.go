@@ -190,12 +190,15 @@ func (p *Pipeline) recordAndMirrorPR(ctx context.Context, t *ticket.Ticket, from
 }
 
 // persistDiagnosisAndMirror writes a diagnosis outcome (status, analysis,
-// confidence, proposed fix)
-// and mirrors it to mctl-api only if the store took it. The three call sites it
-// serves all sit after a slow step failed, so ctx there is frequently spent
-// already — and they previously wrote under it, discarded the error, and
-// mirrored regardless, which is the same desync this PR exists to close: the
-// local row keeps analyzing while mctl-api is told fix_proposed.
+// confidence, proposed fix) and mirrors it to mctl-api only if the store took
+// it. Its caller is escalate, which usually runs after a slow step failed, so
+// ctx there is frequently spent already — writing under it, discarding the
+// error and mirroring regardless leaves the local row at analyzing while
+// mctl-api is told something else.
+//
+// It carries no PR coordinates, so it must never be used to move a ticket to
+// fix_proposed: that status promises a pull request someone can approve, and
+// only recordAndMirrorPR, which writes the PR with the status, may set it.
 // Returns whether the store took the transition; when it did not, nothing is
 // mirrored, so mctl-api is never told about a status the store refused.
 func (p *Pipeline) persistDiagnosisAndMirror(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
@@ -213,21 +216,6 @@ func (p *Pipeline) persistDiagnosisAndMirror(parent context.Context, t *ticket.T
 	}
 	p.updateAlert(t)
 	return true
-}
-
-// persistEscalation writes the escalated state only while the row is still at
-// fromStatus, and only the columns an escalation owns. Returns false when
-// something else moved it on, in which case the caller must not mirror or
-// announce an escalation that did not happen.
-func (p *Pipeline) persistEscalation(parent context.Context, t *ticket.Ticket, fromStatus string) bool {
-	ctx, cancel := ctxutil.DetachedWrite(parent)
-	defer cancel()
-	applied, err := p.store.SetDiagnosisFromStatus(ctx, t.ID, fromStatus, t.Status, t.Analysis, t.Confidence, t.ProposedFix)
-	if err != nil {
-		slog.With(telemetry.LogAttrs(ctx)...).Error("failed to persist escalated ticket", "ticket", t.ID, "error", err)
-		return false
-	}
-	return applied
 }
 
 func (p *Pipeline) updateAlert(t *ticket.Ticket) {
@@ -278,14 +266,14 @@ func (p *Pipeline) escalate(ctx context.Context, t *ticket.Ticket, reason string
 	// can. A resolve landing during that slow fix step would otherwise be
 	// overwritten by this stale escalated status and its stale nil
 	// resolved_at, reopening a closed incident.
-	if !p.persistEscalation(ctx, t, fromStatus) {
+	//
+	// The helper mirrors to mctl-api when, and only when, the store took the
+	// write. Without the mirror the incident there keeps the status it was
+	// published with (analyzing), which is what MCP and the dashboards read.
+	if !p.persistDiagnosisAndMirror(ctx, t, fromStatus) {
 		slog.With(telemetry.LogAttrs(ctx)...).Info("escalation skipped: ticket reached a terminal state concurrently",
 			"ticket", t.ID, "from_status", fromStatus)
-		return
 	}
-	// Mirror to mctl-api. Without this the incident there keeps the status it
-	// was published with (analyzing), which is what MCP and the dashboards read.
-	p.updateAlert(t)
 }
 
 // Metrics returns the pipeline's metrics tracker (can be nil).
@@ -374,8 +362,15 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 		telemetry.TicketID.String(t.ID),
 		telemetry.TicketType.String(t.Type),
 	))
+	// superseded is set when the run never started because the ticket had
+	// already left the status it was queued with. That is not a processing
+	// failure, and the in-memory status no longer says where the ticket is.
+	superseded := false
 	defer func() {
 		outcome := ticketOutcome(t)
+		if superseded {
+			outcome = telemetry.OutcomeSuperseded
+		}
 		span.SetAttributes(telemetry.TicketOutcome.String(outcome))
 		if outcome == telemetry.OutcomeFailed {
 			span.SetStatus(codes.Error, "ticket processing did not reach a terminal state")
@@ -424,11 +419,27 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	// synchronously) made the accident stop happening, and mctl-api began
 	// receiving `open` with nothing to correct it — leaving every incident
 	// reading `open` for the whole diagnosis, however long that took.
-	t.Status = ticket.StatusAnalyzing
-	if err := p.store.Update(ctx, t); err != nil {
+	//
+	// Guarded on the status this copy was queued with, and narrow: the copy
+	// may have waited for a slot longer than a diagnosis timeout, and a
+	// full-row Update from it would write analyzing and a nil resolved_at over
+	// a resolution that landed meanwhile — reopening the incident here and in
+	// mctl-api, then announcing and diagnosing an application that is fine.
+	started, err := p.store.SetStatusFromStatus(ctx, t.ID, t.Status, ticket.StatusAnalyzing)
+	if err != nil {
 		log.Error("failed to update ticket status", "error", err)
 		return
 	}
+	if !started {
+		log.Info("skipping ticket: it left its queued status before a pipeline slot was free",
+			"queued_status", t.Status)
+		// Nothing to announce either: whatever moved the ticket on has
+		// reported it, or it closed before anyone needed to hear of it.
+		p.telegram.DropNewTicket(t)
+		superseded = true
+		return
+	}
+	t.Status = ticket.StatusAnalyzing
 
 	// Publish to mctl-api alert store.
 	p.publishAlert(t)
@@ -440,7 +451,7 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 	evSpan.End()
 
 	// Reload ticket with evidence.
-	t, err := p.store.Get(ctx, t.ID)
+	t, err = p.store.Get(ctx, t.ID)
 	if err != nil {
 		log.Error("failed to reload ticket", "error", err)
 		return
@@ -559,14 +570,25 @@ func (p *Pipeline) processTicketSync(ctx context.Context, t *ticket.Ticket) {
 				p.handleHighConfidenceFix(ctx, t, rs.Skill, diag, log)
 				return
 			}
-			// Not auto-merge safe → suggest in Telegram.
-			action := fmt.Sprintf("Fixable but MEDIUM confidence (skill: %s) — sending suggestion to Telegram for review", rs.Skill.Name())
+			// Not auto-merge safe → suggest in Telegram, and hand the ticket
+			// to a human.
+			//
+			// Escalated, not fix_proposed. No PR is opened on this path, and
+			// fix_proposed means "a PR is waiting for approval": the approve
+			// command refuses a ticket without one, so nothing could ever
+			// move it on and it sat until the stale TTL closed it (ticket
+			// 288d5629, skill scale_up, a week for an app that recovered in
+			// minutes). The proposal itself is kept in ProposedFix.
+			action := fmt.Sprintf("Fixable but MEDIUM confidence (skill: %s) — suggestion only, no PR opened; apply it by hand if it is right", rs.Skill.Name())
 			if shouldNotifyDiagnosis(t) {
 				_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence, action)
 			}
-			medFrom := t.Status
-			t.Status = ticket.StatusFixProposed
-			p.persistDiagnosisAndMirror(ctx, t, medFrom)
+			t.ProposedFix = proposalSummary(rs.Skill.Name(), diag)
+			p.escalate(ctx, t, fmt.Sprintf(
+				"[escalated] Skill %s proposed a fix at MEDIUM confidence and is not auto-merge "+
+					"safe, so no PR was created and there is nothing to approve. The proposal is "+
+					"recorded on the ticket; apply it by hand through a GitOps PR if it is right.",
+				rs.Skill.Name()))
 			return
 		}
 
@@ -881,6 +903,50 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		return
 	}
 
+	// No error and no PR. fix_proposed is only for a ticket with a PR recorded
+	// on it — without one the approve command has nothing to merge and the
+	// ticket would wait for the stale TTL — so the generated fix goes to a
+	// human instead, with its summary kept in ProposedFix.
+	//
+	// Both coordinates must be missing for this to be "no PR". Dry-run is the
+	// only way CreatePR returns that today, and only then may the message say
+	// so and promise that nothing was changed.
+	if prURL == "" && prNumber == 0 {
+		log.Info("fix generated but no PR was opened", "skill", s.Name(), "dry_run", p.dryRun)
+		if p.dryRun {
+			_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+				"[DRY-RUN] Would create PR: "+summary)
+			p.escalate(ctx, t, "[escalated] A fix was generated but no PR was opened (dry-run): "+
+				summary+". Nothing was changed in the GitOps repo; apply it by hand if it is right.")
+			return
+		}
+		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+			"PR creation returned no pull request: "+summary)
+		p.escalate(ctx, t, "[escalated] A fix was generated and PR creation reported no error, but it "+
+			"returned no pull request: "+summary+". A branch or commit may exist in the GitOps repo; "+
+			"check there before applying the fix by hand.")
+		return
+	}
+	// Half a result: a pull request exists, but the response named only its
+	// URL. It is recorded on the ticket, never dropped — but without a number
+	// the approve command cannot merge it, so this is not fix_proposed.
+	if prNumber == 0 {
+		log.Warn("PR created but the response carried no number", "pr", prURL)
+		fromStatus := t.Status
+		t.PRURL = prURL
+		t.Status = ticket.StatusEscalated
+		t.Analysis += "\n\n[escalated] A PR was opened (" + prURL + ") but its number " +
+			"was missing from the response, so it cannot be approved through the agent. Review and merge it by hand."
+		p.recordAndMirrorPR(ctx, t, fromStatus)
+		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
+			"PR opened, but its number is unknown to the agent; review and merge it by hand: "+prURL)
+		return
+	}
+	if prURL == "" {
+		// The number is what approve and auto-merge work from; go on.
+		log.Warn("PR created but the response carried no URL", "pr_number", prNumber)
+	}
+
 	fromStatus := t.Status
 	t.PRURL = prURL
 	t.PRNumber = prNumber
@@ -892,46 +958,74 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 	// fromStatus so a resolve that landed during CreatePR is not overwritten.
 	proposedPersisted := p.recordAndMirrorPR(ctx, t, fromStatus)
 
-	if prURL != "" {
-		// Never auto-merge on top of a transition that did not land. If the
-		// write failed — a transient database outage is exactly when this
-		// path is reached — merging anyway puts the change into production
-		// while both incident stores still read `analyzing`, the post-merge
-		// write is then guarded from an in-memory status the row never took,
-		// and Telegram reports a success nobody can find afterwards. The PR
-		// stays open for review instead, which is recoverable.
-		shouldAutoMerge := p.autoMerge && !p.dryRun && proposedPersisted
-		if p.autoMerge && !p.dryRun && !proposedPersisted {
-			log.Warn("skipping auto-merge: the fix_proposed transition was not persisted",
-				"ticket", t.ID, "pr", prURL)
-		}
-		if shouldAutoMerge {
-			if am, ok := s.(skill.AutoMerger); !ok || !am.AutoMergeSafe() {
-				shouldAutoMerge = false
-			}
-		}
-
-		if shouldAutoMerge {
-			if err := p.github.MergePR(ctx, prNumber); err != nil {
-				log.Error("auto-merge failed", "error", err)
-				_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag,
-					"Auto-merge failed: "+err.Error())
-			} else {
-				mergedFrom := t.Status
-				t.Status = ticket.StatusFixApplied
-				// Same reasoning as above: the merge already happened, and the
-				// mirror follows the store rather than our in-memory copy.
-				p.recordAndMirrorPR(ctx, t, mergedFrom)
-				_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
-			}
-		} else {
-			_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag, "")
-		}
-	} else {
-		// Dry-run mode.
-		_ = p.telegram.SendDiagnosis(t, diag.Diagnosis, diag.Confidence,
-			"[DRY-RUN] Would create PR: "+summary)
+	// Never auto-merge on top of a transition that did not land. If the
+	// write failed — a transient database outage is exactly when this
+	// path is reached — merging anyway puts the change into production
+	// while both incident stores still read `analyzing`, the post-merge
+	// write is then guarded from an in-memory status the row never took,
+	// and Telegram reports a success nobody can find afterwards. The PR
+	// stays open for review instead, which is recoverable.
+	shouldAutoMerge := p.autoMerge && !p.dryRun && proposedPersisted
+	if p.autoMerge && !p.dryRun && !proposedPersisted {
+		log.Warn("skipping auto-merge: the fix_proposed transition was not persisted",
+			"ticket", t.ID, "pr", prURL)
 	}
+	if shouldAutoMerge {
+		if am, ok := s.(skill.AutoMerger); !ok || !am.AutoMergeSafe() {
+			shouldAutoMerge = false
+		}
+	}
+
+	if !shouldAutoMerge {
+		_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag, "")
+		return
+	}
+	if err := p.github.MergePR(ctx, prNumber); err != nil {
+		log.Error("auto-merge failed", "error", err)
+		_ = p.telegram.SendPRNeedsReview(t, prURL, summary, p.escalationTag,
+			"Auto-merge failed: "+err.Error())
+		return
+	}
+	mergedFrom := t.Status
+	t.Status = ticket.StatusFixApplied
+	// Same reasoning as above: the merge already happened, and the
+	// mirror follows the store rather than our in-memory copy.
+	p.recordAndMirrorPR(ctx, t, mergedFrom)
+	_ = p.telegram.SendPRAutoMerged(t, prURL, summary)
+}
+
+// proposalSummary renders what a skill proposed for a ticket that will carry
+// no PR, so the suggestion survives on the ticket (ProposedFix) after the
+// Telegram message has scrolled away. It uses only what the diagnosis states;
+// a skill that names no field or value still gets the line saying who
+// proposed and that nothing was applied.
+func proposalSummary(skillName string, d *skill.DiagnosisResult) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Proposed by skill %s at %s confidence; not applied, no PR opened.", skillName, d.Confidence)
+	if d.FixType != "" {
+		fmt.Fprintf(&b, " Fix type: %s.", d.FixType)
+	}
+	if d.YAMLField != "" || d.SuggestedValue != "" {
+		field := d.YAMLField
+		if field == "" {
+			field = "value"
+		}
+		fmt.Fprintf(&b, " Change %s", field)
+		if d.CurrentValue != "" {
+			fmt.Fprintf(&b, " from %s", d.CurrentValue)
+		}
+		if d.SuggestedValue != "" {
+			fmt.Fprintf(&b, " to %s", d.SuggestedValue)
+		}
+		if d.YAMLPath != "" {
+			fmt.Fprintf(&b, " in %s", d.YAMLPath)
+		}
+		b.WriteString(".")
+	}
+	if d.Reasoning != "" {
+		b.WriteString(" " + d.Reasoning)
+	}
+	return b.String()
 }
 
 // candidatePaths returns the ordered, deduplicated GitOps paths to probe for
@@ -1033,6 +1127,10 @@ func currentImageTag(content string) string {
 // ticketOutcome maps where processing left the ticket onto the bounded
 // mctl.ticket.outcome vocabulary. A pull request, merged or not, is
 // pr_created; a ticket still analyzing never reached a terminal state.
+// The pipeline no longer leaves a ticket at fix_proposed without a PR — a
+// proposal with no PR is escalated — so the fix_proposed outcome is kept for
+// the vocabulary's sake and for a ticket that arrives in that state some
+// other way.
 // t is nil when the post-evidence reload failed: processTicketSync
 // reassigns it from store.Get, and that path is a failure too.
 func ticketOutcome(t *ticket.Ticket) string {
