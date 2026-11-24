@@ -147,7 +147,7 @@ func (p *Poller) poll(ctx context.Context) {
 // creating or touching tickets, and returns the refresh outcome for
 // downstream GC gating.
 func (p *Poller) pollDegraded(ctx context.Context) refreshState {
-	services, err := p.client.ListServices()
+	services, err := p.client.ListServices(ctx)
 	if err != nil {
 		slog.Error("poller: failed to list services", "error", err)
 		return refreshState{allUnknown: true}
@@ -165,7 +165,7 @@ func (p *Poller) pollDegraded(ctx context.Context) refreshState {
 		}
 		known[team+"/"+app] = true
 
-		status, err := p.client.GetServiceStatus(team, app)
+		status, err := p.client.GetServiceStatus(ctx, team, app)
 		if err != nil {
 			slog.Warn("poller: failed to get status; will skip stale GC for this service",
 				"team", team, "app", app, "error", err)

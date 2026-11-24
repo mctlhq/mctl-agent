@@ -75,7 +75,7 @@ func TestListServicesParsesItems(t *testing.T) {
 	defer srv.Close()
 
 	c := NewClient(srv.URL, "test-token")
-	got, err := c.ListServices()
+	got, err := c.ListServices(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestListAuditDecodesAPISchema(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	entries, err := NewClient(srv.URL, "tok").ListAudit()
+	entries, err := NewClient(srv.URL, "tok").ListAudit(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,11 +300,11 @@ func TestGetServicePodsAndEvents(t *testing.T) {
 	defer srv.Close()
 	c := NewClient(srv.URL, "tok")
 
-	pods, err := c.GetServicePods("labs", "mctl-telegram")
+	pods, err := c.GetServicePods(context.Background(), "labs", "mctl-telegram")
 	if err != nil {
 		t.Fatal(err)
 	}
-	events, err := c.ListServiceEvents("labs", "mctl-telegram")
+	events, err := c.ListServiceEvents(context.Background(), "labs", "mctl-telegram")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,12 +331,105 @@ func TestGetServicePodsAndEventsFailClosed(t *testing.T) {
 			srv := httptest.NewServer(h)
 			defer srv.Close()
 			c := NewClient(srv.URL, "tok")
-			if body, err := c.GetServicePods("labs", "web"); err == nil {
+			if body, err := c.GetServicePods(context.Background(), "labs", "web"); err == nil {
 				t.Errorf("GetServicePods returned %q without an error", body)
 			}
-			if body, err := c.ListServiceEvents("labs", "web"); err == nil {
+			if body, err := c.ListServiceEvents(context.Background(), "labs", "web"); err == nil {
 				t.Errorf("ListServiceEvents returned %q without an error", body)
 			}
 		})
+	}
+}
+
+// Every read carries the caller's context: once it is cancelled or past its
+// deadline the call returns with that error and no result, while mctl-api is
+// still holding the request open. Without this a diagnosis that has been
+// given up on keeps its slot until the client's own 15s timeout, read after
+// read.
+//
+// Mutation check: build the request in doGet with context.Background(), or
+// hand doGet context.Background() in any one method, and that method's case
+// fails with "still waiting".
+func TestReadsStopWhenContextEnds(t *testing.T) {
+	reads := map[string]func(context.Context, *Client) (any, error){
+		"ListServices": func(ctx context.Context, c *Client) (any, error) { return c.ListServices(ctx) },
+		"GetServiceStatus": func(ctx context.Context, c *Client) (any, error) {
+			return c.GetServiceStatus(ctx, "labs", "web")
+		},
+		"GetServiceConfig": func(ctx context.Context, c *Client) (any, error) {
+			return c.GetServiceConfig(ctx, "labs", "web")
+		},
+		"GetServiceLogs": func(ctx context.Context, c *Client) (any, error) {
+			return c.GetServiceLogs(ctx, "labs", "web", 100, time.Hour)
+		},
+		"GetServicePods": func(ctx context.Context, c *Client) (any, error) {
+			return c.GetServicePods(ctx, "labs", "web")
+		},
+		"ListServiceEvents": func(ctx context.Context, c *Client) (any, error) {
+			return c.ListServiceEvents(ctx, "labs", "web")
+		},
+		"GetResourceUsage": func(ctx context.Context, c *Client) (any, error) { return c.GetResourceUsage(ctx, "labs") },
+		"ListAudit":        func(ctx context.Context, c *Client) (any, error) { return c.ListAudit(ctx) },
+		"GetWorkflow":      func(ctx context.Context, c *Client) (any, error) { return c.GetWorkflow(ctx, "wf-1") },
+	}
+	ends := map[string]struct {
+		// end makes ctx finish once the request has reached the server.
+		end  func(context.Context) (context.Context, context.CancelFunc)
+		want error
+	}{
+		"cancelled": {context.WithCancel, context.Canceled},
+		"deadline": {func(ctx context.Context) (context.Context, context.CancelFunc) {
+			return context.WithTimeout(ctx, 50*time.Millisecond)
+		}, context.DeadlineExceeded},
+	}
+	for name, read := range reads {
+		for endName, e := range ends {
+			t.Run(name+"/"+endName, func(t *testing.T) {
+				arrived := make(chan struct{}, 1)
+				release := make(chan struct{})
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					arrived <- struct{}{}
+					select {
+					case <-r.Context().Done():
+					case <-release:
+						// Answered late, with a body every read would accept.
+						_, _ = w.Write([]byte(`{"items":[]}`))
+					}
+				}))
+				defer srv.Close()
+				defer close(release)
+
+				ctx, cancel := e.end(context.Background())
+				defer cancel()
+				type result struct {
+					got any
+					err error
+				}
+				done := make(chan result, 1)
+				go func() {
+					got, err := read(ctx, NewClient(srv.URL, "tok"))
+					done <- result{got, err}
+				}()
+				select {
+				case <-arrived:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the request never reached the server")
+				}
+				if e.want == context.Canceled {
+					cancel()
+				}
+				select {
+				case r := <-done:
+					if !errors.Is(r.err, e.want) {
+						t.Errorf("err = %v, want %v", r.err, e.want)
+					}
+					if r.err == nil {
+						t.Errorf("returned %v from a read that was abandoned", r.got)
+					}
+				case <-time.After(3 * time.Second):
+					t.Errorf("still waiting on mctl-api 3s after the context ended")
+				}
+			})
+		}
 	}
 }

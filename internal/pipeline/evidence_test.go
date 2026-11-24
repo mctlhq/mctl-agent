@@ -19,7 +19,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/mctlclient"
 	"github.com/mctlhq/mctl-agent/internal/skill/builtin"
@@ -136,5 +138,71 @@ func TestUnreadablePodStateLeavesNoEvidence(t *testing.T) {
 	}
 	if !strings.Contains(got.Analysis, "no skill matched") {
 		t.Errorf("analysis = %q; an unreadable pod state must not be diagnosed", got.Analysis)
+	}
+}
+
+// Evidence collection stops with the ticket's context. The first read is cut
+// off while mctl-api is still holding it, and none of the later ones is sent:
+// a diagnosis that was cancelled or ran out of time does not sit through one
+// client timeout per read, and nothing is stored for a read that did not
+// finish.
+//
+// Mutation check: pass context.Background() to any one client call in
+// collectEvidence. As the first call it is never cut off ("not cancelled");
+// as a later one it reaches the server after the cancellation.
+func TestEvidenceCollectionStopsWithContext(t *testing.T) {
+	tests := []struct {
+		name, typ, first string
+	}{
+		// status, config, logs, pods, events, resources, audit
+		{"service ticket", ticket.TypePodCrashloop, "/api/v1/status/billing/api"},
+		// workflow, config, logs, resources, audit
+		{"workflow ticket", ticket.TypeWorkflowFailed, "/api/v1/workflows/api"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, store := newAsyncTestPipeline(t, 1)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			var mu sync.Mutex
+			var reached []string
+			notCancelled := false
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				reached = append(reached, r.URL.Path)
+				mu.Unlock()
+				cancel()
+				select {
+				case <-r.Context().Done():
+				case <-time.After(3 * time.Second):
+					mu.Lock()
+					notCancelled = true
+					mu.Unlock()
+				}
+				_, _ = w.Write([]byte(`{"items":[]}`))
+			}))
+			t.Cleanup(srv.Close)
+			p.apiClient = mctlclient.NewClient(srv.URL, "test-token")
+
+			tk := &ticket.Ticket{Source: ticket.SourceAlertManager, Type: tt.typ, Tenant: "billing", Service: "api", Summary: "x", Status: ticket.StatusAnalyzing}
+			if err := store.Create(context.Background(), tk); err != nil {
+				t.Fatal(err)
+			}
+
+			p.collectEvidence(ctx, tk)
+
+			mu.Lock()
+			defer mu.Unlock()
+			if notCancelled {
+				t.Error("a read was not cancelled with the context; it waited for mctl-api")
+			}
+			if len(reached) != 1 || reached[0] != tt.first {
+				t.Errorf("requests that reached mctl-api = %q, want only %q", reached, tt.first)
+			}
+			if ev := evidenceTypes(t, store, tk.ID); len(ev) != 0 {
+				t.Errorf("evidence stored from reads that did not finish: %v", ev)
+			}
+		})
 	}
 }
