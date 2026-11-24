@@ -285,3 +285,58 @@ func TestResolveAlertsLogsFailureAndContinues(t *testing.T) {
 		t.Errorf("log missing ERROR with alert_id=bad: %q", out)
 	}
 }
+
+// The pod and event reads hit mctl-api's workload routes, ask only for the
+// service's own Warning events, and hand the body back untouched.
+//
+// Mutation check: drop the app or type parameter, or change a path, and this
+// fails.
+func TestGetServicePodsAndEvents(t *testing.T) {
+	var gotPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.Path+"?"+r.URL.Query().Encode())
+		_, _ = w.Write([]byte(`{"items":[{"name":"x"}]}`))
+	}))
+	defer srv.Close()
+	c := NewClient(srv.URL, "tok")
+
+	pods, err := c.GetServicePods("labs", "mctl-telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := c.ListServiceEvents("labs", "mctl-telegram")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(pods) != `{"items":[{"name":"x"}]}` || string(events) != string(pods) {
+		t.Errorf("bodies altered: %s / %s", pods, events)
+	}
+	want := []string{
+		"/api/v1/pods/labs/mctl-telegram?",
+		"/api/v1/events/labs?app=mctl-telegram&since=1h&type=Warning",
+	}
+	if len(gotPaths) != 2 || gotPaths[0] != want[0] || gotPaths[1] != want[1] {
+		t.Errorf("requests = %q, want %q", gotPaths, want)
+	}
+}
+
+// A failed or malformed read is an error, never an empty listing: the caller
+// stores no evidence for it.
+func TestGetServicePodsAndEventsFailClosed(t *testing.T) {
+	for name, h := range map[string]http.HandlerFunc{
+		"503":      func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) },
+		"not JSON": func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"items":[`)) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := httptest.NewServer(h)
+			defer srv.Close()
+			c := NewClient(srv.URL, "tok")
+			if body, err := c.GetServicePods("labs", "web"); err == nil {
+				t.Errorf("GetServicePods returned %q without an error", body)
+			}
+			if body, err := c.ListServiceEvents("labs", "web"); err == nil {
+				t.Errorf("ListServiceEvents returned %q without an error", body)
+			}
+		})
+	}
+}

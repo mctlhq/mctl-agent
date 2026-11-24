@@ -284,8 +284,8 @@ func TestAllSkillsRegistered(t *testing.T) {
 	RegisterAll(reg, "test-key")
 
 	infos := reg.List()
-	if len(infos) != 12 {
-		t.Fatalf("expected 12 skills, got %d", len(infos))
+	if len(infos) != 13 {
+		t.Fatalf("expected 13 skills, got %d", len(infos))
 	}
 
 	names := map[string]bool{}
@@ -303,6 +303,7 @@ func TestAllSkillsRegistered(t *testing.T) {
 		"oomkilled", "imagepull", "post_deploy_rollback", "argocd_drift",
 		"argocd_sync_failed", "llm_diagnosis", "probe_fix", "cpu_throttle",
 		"quota_adjust", "scale_up", "github_actions", "workflow_fixer",
+		"crashloop",
 	}
 	for _, name := range expected {
 		if !names[name] {

@@ -31,6 +31,7 @@ func RegisterAll(reg *skill.Registry, anthropicKey string) {
 	reg.Register(NewArgoCDDriftSkill())
 	reg.Register(NewArgoCDSyncFailedSkill())
 	reg.Register(NewProbeFixSkill())
+	reg.Register(NewCrashLoopSkill())
 	reg.Register(NewCPUThrottleSkill())
 	reg.Register(NewQuotaAdjustSkill())
 	reg.Register(NewScaleUpSkill())

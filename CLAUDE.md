@@ -31,7 +31,7 @@ The agent uses a modular **skills architecture**:
   other way.
 
 ### Skill Types
-- `internal/skill/builtin/` — 12 compiled Go skills (OOMKilled, ImagePullBackOff, PostDeployRollback, ArgoCDDrift, ArgoCDSyncFailed, ProbeFix, CPUThrottle, QuotaAdjust, ScaleUp, GitHubActions, WorkflowFixer, LLMDiagnosis — the last only when an Anthropic key is set). Keep this count in sync with `builtin/register.go`
+- `internal/skill/builtin/` — 13 compiled Go skills (OOMKilled, ImagePullBackOff, PostDeployRollback, ArgoCDDrift, ArgoCDSyncFailed, ProbeFix, CrashLoop, CPUThrottle, QuotaAdjust, ScaleUp, GitHubActions, WorkflowFixer, LLMDiagnosis — the last only when an Anthropic key is set). Keep this count in sync with `builtin/register.go`
 - `internal/skill/yaml/` — YAML-defined skills loaded from `skills/custom/` (hot-reload, no code)
 - `internal/skill/remote/` — HTTP-delegating skills registered at runtime via REST API
 
