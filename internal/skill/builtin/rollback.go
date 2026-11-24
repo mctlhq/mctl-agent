@@ -18,7 +18,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"regexp"
+	"sort"
 	"time"
 
 	"github.com/mctlhq/mctl-agent/internal/fixer"
@@ -53,13 +54,18 @@ func (s *PostDeployRollbackSkill) Match(_ context.Context, t *ticket.Ticket, ev 
 	// Both sources carry the same weight: each one names exactly this
 	// service and a deploy inside the window. Either outranks the crashloop
 	// skill (0.78), which only reports how the container died.
-	if bump, ok := recentImageBump(t.Tenant, t.Service, ev.Get(gitopsBumpsEvidence)); ok {
+	if rollout, ok := recentImageRollout(t.Tenant, t.Service, ev.Get(gitopsBumpsEvidence)); ok {
+		reason := fmt.Sprintf("Pod crash-looping within 30 minutes of a GitOps image bump (%s, %s -> %s)",
+			shortSHA(rollout.Last.SHA), rollout.From(), rollout.To())
+		if rollout.Count > 1 {
+			reason = fmt.Sprintf("Pod crash-looping within 30 minutes of %d GitOps image bumps (%s to %s, %s -> %s)",
+				rollout.Count, shortSHA(rollout.First.SHA), shortSHA(rollout.Last.SHA), rollout.From(), rollout.To())
+		}
 		return skill.MatchResult{
 			Matched:    true,
 			Confidence: 0.90,
 			Priority:   95,
-			Reason: fmt.Sprintf("Pod crash-looping within 30 minutes of a GitOps image bump (%s, %s -> %s)",
-				shortSHA(bump.SHA), bump.FromTag, bump.ToTag),
+			Reason:     reason,
 		}
 	}
 	if hasRecentDeploy(t.Tenant, t.Service, ev.Get("audit")) {
@@ -74,21 +80,39 @@ func (s *PostDeployRollbackSkill) Match(_ context.Context, t *ticket.Ticket, ev 
 }
 
 func (s *PostDeployRollbackSkill) Diagnose(_ context.Context, t *ticket.Ticket, ev skill.EvidenceSet) (*skill.DiagnosisResult, error) {
-	diagnosis := "Pod crash-looping after recent deployment. Rollback to previous version recommended."
-	if bump, ok := recentImageBump(t.Tenant, t.Service, ev.Get(gitopsBumpsEvidence)); ok {
-		diagnosis = fmt.Sprintf(
-			"Pod crash-looping after a GitOps image bump of %s/%s from %s to %s (commit %s, %s). "+
-				"Rollback to the previous image recommended.",
-			t.Tenant, t.Service, bump.FromTag, bump.ToTag, shortSHA(bump.SHA),
-			bump.CommittedAt.UTC().Format("2006-01-02 15:04 UTC"))
-	}
-	return &skill.DiagnosisResult{
-		Diagnosis:  diagnosis,
+	result := &skill.DiagnosisResult{
+		Diagnosis:  "Pod crash-looping after recent deployment. Rollback to previous version recommended.",
 		Confidence: ticket.ConfidenceHigh,
 		Fixable:    true,
 		FixType:    "rollback_image",
 		SkillName:  s.Name(),
-	}, nil
+	}
+	rollout, ok := recentImageRollout(t.Tenant, t.Service, ev.Get(gitopsBumpsEvidence))
+	if !ok {
+		return result, nil
+	}
+	const stamp = "2006-01-02 15:04 UTC"
+	if rollout.Count == 1 {
+		result.Diagnosis = fmt.Sprintf(
+			"Pod crash-looping after a GitOps image bump of %s/%s from %s to %s (commit %s, %s). "+
+				"Rollback to the previous image recommended.",
+			t.Tenant, t.Service, rollout.From(), rollout.To(), shortSHA(rollout.Last.SHA),
+			rollout.Last.CommittedAt.UTC().Format(stamp))
+	} else {
+		result.Diagnosis = fmt.Sprintf(
+			"Pod crash-looping after %d GitOps image bumps of %s/%s inside 30 minutes, from %s to %s "+
+				"(first: commit %s, %s; last: commit %s, %s). Which of them started the crash-loop is not known, "+
+				"so rollback to %s, the image that ran before the first of them, is recommended.",
+			rollout.Count, t.Tenant, t.Service, rollout.From(), rollout.To(),
+			shortSHA(rollout.First.SHA), rollout.First.CommittedAt.UTC().Format(stamp),
+			shortSHA(rollout.Last.SHA), rollout.Last.CommittedAt.UTC().Format(stamp),
+			rollout.From())
+	}
+	// Both ends of the rollback, so the patch is made for exactly the change
+	// this diagnosis describes and for no other.
+	result.CurrentValue = rollout.To()
+	result.SuggestedValue = rollout.From()
+	return result, nil
 }
 
 func (s *PostDeployRollbackSkill) Fix(_ context.Context, t *ticket.Ticket, _ *skill.DiagnosisResult) (*skill.FixResult, error) {
@@ -161,9 +185,27 @@ func hasRecentDeploy(tenant, service, auditJSON string) bool {
 // fixer.ImageBumpHistory under.
 const gitopsBumpsEvidence = "gitops_bumps"
 
-// recentImageBump returns the image bump to blame a crash-loop on: the
-// newest change of the service's own values file, when it is inside
-// deployWindow and is not itself a rollback.
+// commitClockSkew is how far ahead of this process's clock a bump's commit
+// time may be. Committer dates are set by whoever made the commit; one in
+// the future would stay "recent", and the newest change, until that date.
+const commitClockSkew = fixer.MaxCommitClockSkew
+
+// imageRollout is the run of image bumps a crash-loop is blamed on: every
+// tag change of the service's values file inside deployWindow, back to the
+// last rollback. First is the oldest of them, Last the newest; they are the
+// same bump when Count is 1.
+type imageRollout struct {
+	First, Last fixer.ImageBump
+	Count       int
+}
+
+// From is the image that ran before the rollout, the rollback target.
+func (r imageRollout) From() string { return r.First.FromTag }
+
+// To is the image the rollout left the service on.
+func (r imageRollout) To() string { return r.Last.ToTag }
+
+// recentImageRollout returns the image bumps to blame a crash-loop on.
 //
 // The evidence is the JSON of a fixer.ImageBumpHistory, written only after a
 // complete read of the file's history. Absent or unparseable evidence means
@@ -171,47 +213,103 @@ const gitopsBumpsEvidence = "gitops_bumps"
 // only when its path is exactly this service's values file: a bump of
 // "api-gateway" is not a bump of "api".
 //
-// Only the newest change is considered. If that one put an older image back
-// (the agent's own rollback PR, or a revert), the service is already on the
-// image it ran before, and the bump underneath it is not the running one:
-// proposing a "rollback" from there would re-deploy the image that crashed.
-func recentImageBump(tenant, service, historyJSON string) (fixer.ImageBump, bool) {
+// The newest change decides whether there is anything to blame. It has to be
+// inside deployWindow, not dated ahead of the clock, and a deploy: if it put
+// an older image back (see returnsToOlderImage), the service already runs
+// what it ran before, and a "rollback" from there would re-deploy the image
+// that crashed.
+//
+// Then every earlier bump inside the window belongs to the same rollout, as
+// far back as the last rollback. Nothing in the evidence says which of them
+// the crash-loop began with: the alert fires only after its `for` period, so
+// with bumps 15 minutes apart the newest one is routinely younger than the
+// crash. Blaming the newest would roll back one step, onto the image that
+// may have started it. The only image the window gives no reason to suspect
+// is the one before the first bump, and that is From().
+//
+// A history that does not chain (one bump's FromTag is not the ToTag of the
+// bump before it) or holds an incomplete bump was not understood, and is not
+// a match either.
+func recentImageRollout(tenant, service, historyJSON string) (imageRollout, bool) {
 	if historyJSON == "" || tenant == "" || service == "" {
-		return fixer.ImageBump{}, false
+		return imageRollout{}, false
 	}
 	var history fixer.ImageBumpHistory
 	if err := json.Unmarshal([]byte(historyJSON), &history); err != nil {
-		return fixer.ImageBump{}, false
+		return imageRollout{}, false
 	}
 	path := fixer.DetectFilePath(tenant, service)
-	if path == "" || history.Path != path {
-		return fixer.ImageBump{}, false
+	if path == "" || history.Path != path || len(history.Bumps) == 0 {
+		return imageRollout{}, false
 	}
 
-	var newest fixer.ImageBump
-	for _, b := range history.Bumps {
-		if b.CommittedAt.After(newest.CommittedAt) {
-			newest = b
+	bumps := append([]fixer.ImageBump(nil), history.Bumps...)
+	sort.SliceStable(bumps, func(i, j int) bool { return bumps[i].CommittedAt.After(bumps[j].CommittedAt) })
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-deployWindow)
+	if bumps[0].CommittedAt.After(now.Add(commitClockSkew)) {
+		return imageRollout{}, false
+	}
+
+	rollout := imageRollout{}
+	for i, b := range bumps {
+		if !b.CommittedAt.After(cutoff) || returnsToOlderImage(bumps, i) {
+			break
 		}
+		if b.SHA == "" || b.FromTag == "" || b.ToTag == "" {
+			return imageRollout{}, false
+		}
+		if rollout.Count > 0 && b.ToTag != rollout.First.FromTag {
+			return imageRollout{}, false
+		}
+		if rollout.Count == 0 {
+			rollout.Last = b
+		}
+		rollout.First = b
+		rollout.Count++
 	}
-	if newest.SHA == "" || newest.FromTag == "" || newest.ToTag == "" {
-		return fixer.ImageBump{}, false
-	}
-	if !newest.CommittedAt.After(time.Now().UTC().Add(-deployWindow)) {
-		return fixer.ImageBump{}, false
-	}
-	if isRollbackSubject(newest.Subject) {
-		return fixer.ImageBump{}, false
-	}
-	return newest, true
+	return rollout, rollout.Count > 0
 }
 
+// returnsToOlderImage reports whether bumps[i] (bumps is newest first) put
+// an older image back instead of deploying a new one. Two signs, either is
+// enough:
+//   - its subject says so (isRollbackSubject), which is all there is to go
+//     on when the image it returned to left the file before the history
+//     starts;
+//   - the tag it wrote is one an older bump in the history moved away from.
+//     That catches a downgrade made by hand under an ordinary "bump" subject.
+func returnsToOlderImage(bumps []fixer.ImageBump, i int) bool {
+	if isRollbackSubject(bumps[i].Subject) {
+		return true
+	}
+	if bumps[i].ToTag == "" {
+		return false
+	}
+	for _, older := range bumps[i+1:] {
+		if older.FromTag == bumps[i].ToTag {
+			return true
+		}
+	}
+	return false
+}
+
+// rollbackSubjectPattern matches a subject whose description, after an
+// optional conventional-commit "type(scope):" prefix, begins with rollback,
+// roll back or revert.
+var rollbackSubjectPattern = regexp.MustCompile(`(?i)^\s*(?:[a-z]+(?:\([^)]*\))?!?:\s*)?(?:rollback|roll back|revert)`)
+
 // isRollbackSubject reports whether a commit subject says the commit put an
-// older version back: the agent's own "Rollback image tag from X to Y", or a
-// revert.
+// older version back: the agent's own "fix(<service>): Rollback image tag
+// from X to Y", the platform's "chore: rollback ...", or a git revert.
+//
+// Only the start of the description counts. The bots write the service name
+// into the subject ("chore: bump <team>/<service> to <tag>"), so looking for
+// the words anywhere would make every bump of a service called
+// "revert-proxy" a rollback, and the skill would never match for it.
 func isRollbackSubject(subject string) bool {
-	s := strings.ToLower(subject)
-	return strings.Contains(s, "rollback") || strings.Contains(s, "roll back") || strings.Contains(s, "revert")
+	return rollbackSubjectPattern.MatchString(subject)
 }
 
 func shortSHA(sha string) string {

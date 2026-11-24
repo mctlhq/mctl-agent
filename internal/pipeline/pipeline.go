@@ -822,7 +822,7 @@ func (p *Pipeline) handleHighConfidenceFix(ctx context.Context, t *ticket.Ticket
 		// transform against a tenant values.yaml.
 		patchErr = fmt.Errorf("fix type %q targets an ArgoCD AppProject manifest, which is not patched automatically", diag.FixType)
 	case "rollback_image":
-		newContent, summary, patchErr = p.rollbackImage(ctx, filePath, content)
+		newContent, summary, patchErr = p.rollbackImage(ctx, filePath, content, diag)
 	default:
 		// For LLM-generated fixes, try to apply from diagnosis fields.
 		if diag.CurrentValue != "" && diag.SuggestedValue != "" {
@@ -1006,19 +1006,48 @@ func toLegacyDiag(d *skill.DiagnosisResult) *legacyDiag {
 // legacyDiag mirrors diagnosis.DiagnosisResult for backward compatibility with fixer.
 type legacyDiag = fixer.DiagnosisCompat
 
-// rollbackImage resolves the previous distinct image from the GitOps
-// history of valuesPath and produces a patch flipping the current one back:
-// the tag and, where the file pins one, the digest of that same revision.
+// rollbackImage produces a patch flipping the chart-level image of
+// valuesPath back to an older one: the tag and, where the file pins one, the
+// digest of the revision that carried that tag.
+//
+// A diagnosis made from an observed image bump names both ends of the
+// rollback: CurrentValue is the tag the file carried when the evidence was
+// read, SuggestedValue the tag to return to. The patch is then bound to
+// them. If main no longer carries CurrentValue, somebody deployed or fixed
+// something after the evidence was read and the diagnosis is about a file
+// that is gone, so nothing is patched. Without them (a deploy seen only in
+// the mctl-api audit, which names no image) the target is the previous
+// distinct tag in the file's history.
+//
 // On any miss (no prior commit, network error, file not parseable) it
 // returns a non-nil error so the caller surfaces "Fix identified but
 // patch generation failed" via Telegram instead of silently no-oping.
-func (p *Pipeline) rollbackImage(ctx context.Context, valuesPath, content string) (string, string, error) {
-	prev, err := p.github.LookupPreviousImage(ctx, valuesPath, currentImageTag(content))
+func (p *Pipeline) rollbackImage(ctx context.Context, valuesPath, content string, diag *skill.DiagnosisResult) (string, string, error) {
+	current := currentImageTag(content)
+	if diag == nil || (diag.CurrentValue == "" && diag.SuggestedValue == "") {
+		prev, err := p.github.LookupPreviousImage(ctx, valuesPath, current)
+		if err != nil {
+			return "", "", fmt.Errorf("looking up previous image tag: %w", err)
+		}
+		if prev.Tag == "" {
+			return "", "", fmt.Errorf("no prior distinct image tag found in last %d commits of %s", fixer.PreviousTagLookupCommitCap, valuesPath)
+		}
+		return fixer.GenerateImageRollback(content, prev)
+	}
+
+	if diag.CurrentValue == "" || diag.SuggestedValue == "" || diag.CurrentValue == diag.SuggestedValue {
+		return "", "", fmt.Errorf("diagnosis names an incomplete rollback (from %q to %q)", diag.CurrentValue, diag.SuggestedValue)
+	}
+	if current != diag.CurrentValue {
+		return "", "", fmt.Errorf("%s now carries image tag %q, but the diagnosis was made for %q: "+
+			"the file changed after the evidence was read", valuesPath, current, diag.CurrentValue)
+	}
+	prev, err := p.github.LookupImageByTag(ctx, valuesPath, diag.SuggestedValue)
 	if err != nil {
-		return "", "", fmt.Errorf("looking up previous image tag: %w", err)
+		return "", "", fmt.Errorf("looking up image tag %s: %w", diag.SuggestedValue, err)
 	}
 	if prev.Tag == "" {
-		return "", "", fmt.Errorf("no prior distinct image tag found in last %d commits of %s", fixer.PreviousTagLookupCommitCap, valuesPath)
+		return "", "", fmt.Errorf("image tag %s not found in last %d commits of %s", diag.SuggestedValue, fixer.PreviousTagLookupCommitCap, valuesPath)
 	}
 	return fixer.GenerateImageRollback(content, prev)
 }
