@@ -1,5 +1,25 @@
 # Changelog
 
+## [2.10.1](https://github.com/mctlhq/mctl-agent/compare/2.10.0...2.10.1) (2026-11-24)
+
+
+### Bug Fixes
+
+* **crashloop:** close review gaps in credential redaction ([9f637f4](https://github.com/mctlhq/mctl-agent/commit/9f637f4295bfce7fc01f0d8f877ba82356765379))
+* **crashloop:** redact quoted credentials whole ([7b675cf](https://github.com/mctlhq/mctl-agent/commit/7b675cf00e6678f7e907dccec2a525bb5a182825))
+* **crashloop:** redact quoted credentials whole; carry context on reads ([7a5281e](https://github.com/mctlhq/mctl-agent/commit/7a5281e7271380f95bdd4f35d532190481dff69a))
+* **fixer:** fail closed on image history that was not understood ([e234177](https://github.com/mctlhq/mctl-agent/commit/e2341776b5cdc4330f8cd027f76f6a9ea048ffc1))
+* **fixer:** restore the pinned digest when rolling an image back ([46b076b](https://github.com/mctlhq/mctl-agent/commit/46b076b066c12e30be6a4c4c4eb6aa68f0fc5dcf))
+* **mctlclient:** carry the caller's context on reads ([ea6e65d](https://github.com/mctlhq/mctl-agent/commit/ea6e65df3e4339699a833eef53720b9a91621deb))
+* **monitor:** close poller tickets once the app is healthy again ([5999c9e](https://github.com/mctlhq/mctl-agent/commit/5999c9e79ab459c89de1c49e8112e75f34df76a4))
+* **monitor:** heartbeat own tickets and damp re-degradation ([1fe1e9d](https://github.com/mctlhq/mctl-agent/commit/1fe1e9d0f29bef88d676a0aaf5a149f38418f298))
+* **pipeline:** escalate a proposal that has no pull request ([5880140](https://github.com/mctlhq/mctl-agent/commit/58801408635f2667aad5d2b8072d08ffc411e4d2))
+* **pipeline:** fix_proposed only with a pull request; poller closes its tickets ([ce3c3c0](https://github.com/mctlhq/mctl-agent/commit/ce3c3c0dde8314495422b379af16a47d987b7340))
+* **pipeline:** keep a resolved ticket closed, label proposals honestly ([646e713](https://github.com/mctlhq/mctl-agent/commit/646e71309768b48e3cc17a22486f42c84ba0bb82))
+* **skill:** roll back past every bump in the window, bound to it ([edbbac4](https://github.com/mctlhq/mctl-agent/commit/edbbac479b2654c6872fd2b91cd65aec16a392e8))
+* **skill:** treat a gitops image bump as a deploy for rollback ([723c41c](https://github.com/mctlhq/mctl-agent/commit/723c41c40f81f80c84c06da9800f0f460442056e))
+* **skill:** treat a gitops image bump as a deploy for rollback ([2223296](https://github.com/mctlhq/mctl-agent/commit/22232960c84c25ca12091db37f24c02a62d10bc8))
+
 ## [2.10.0](https://github.com/mctlhq/mctl-agent/compare/2.9.6...2.10.0) (2026-11-24)
 
 
