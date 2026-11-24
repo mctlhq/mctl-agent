@@ -154,8 +154,12 @@ func TestCrashLoopSkillDiagnoseWithoutLogsOrEvents(t *testing.T) {
 // Quoted error lines lose URL userinfo and the values of secret-looking keys;
 // the rest of the line, which names the failure, stays.
 //
-// Mutation check: drop either replacement in redactCredentials and a case
-// fails.
+// A quoted value goes whole, spaces included, whichever quote it uses, and
+// ordinary lines come through untouched.
+//
+// Mutation check: drop any replacement in redactCredentials, or any one
+// alternative of a pattern (the single-quoted value, the raw-slash userinfo,
+// the port exception, ...), and a case fails.
 func TestCrashLoopDiagnosisRedactsCredentials(t *testing.T) {
 	tests := []struct {
 		name, line, want string
@@ -175,10 +179,81 @@ func TestCrashLoopDiagnosisRedactsCredentials(t *testing.T) {
 			`error: proxy said authorization=[redacted] retry`, []string{"dXNlcjpwYXNz"}},
 		{"quoted bearer in JSON", `{"level":"error","authorization":"Bearer abc123","msg":"denied"}`,
 			`{"level":"error","authorization":[redacted],"msg":"denied"}`, []string{"abc123"}},
+		// A quoted value is one credential however many words it holds.
+		{"single-quoted value with spaces", `error: login failed token='secret value' user=bob`,
+			`error: login failed token=[redacted] user=bob`, []string{"secret", "value"}},
+		{"single-quoted YAML value", `fatal: config password: 'a b c' rejected`,
+			`fatal: config password: [redacted] rejected`, []string{"a b c", "b c"}},
+		{"Python dict repr", `error: connect({'user': 'app', 'password': 'hunter two'}) failed`,
+			`error: connect({'user': 'app', 'password': [redacted]}) failed`, []string{"hunter", "two"}},
+		{"single-quoted bearer header", `error: request headers {'Authorization': 'Bearer abc def'} rejected`,
+			`error: request headers {'Authorization': [redacted]} rejected`, []string{"abc", "def", "Bearer"}},
+		{"backtick-quoted value", "error: bad value for secret=`s3 cr3t` in config",
+			`error: bad value for secret=[redacted] in config`, []string{"s3", "cr3t"}},
+		{"escaped quote inside a value", `error: {"password":"pa\"ss word","user":"bob"}`,
+			`error: {"password":[redacted],"user":"bob"}`, []string{"ss word"}},
+		{"JSON nested in a string", `level=error msg="rejected {\"token\":\"abc def\",\"user\":\"bob\"}"`,
+			`level=error msg="rejected {\"token\":[redacted],\"user\":\"bob\"}"`, []string{"abc", "def"}},
+		{"quote that never closes", `error: parse config: password="hunter two`,
+			`error: parse config: password=[redacted]`, []string{"hunter", "two"}},
+		{"single quote that never closes", `error: parse config: password='hunter two`,
+			`error: parse config: password=[redacted]`, []string{"hunter", "two"}},
+		// What follows a JSON value stays, and so does the next field.
+		{"JSON value before a comma", `{"level":"error","api_key":"k-1","msg":"denied","code":7}`,
+			`{"level":"error","api_key":[redacted],"msg":"denied","code":7}`, []string{"k-1"}},
+		{"JSON value before a brace", `{"level":"error","msg":"denied","client_secret":"s 1"}`,
+			`{"level":"error","msg":"denied","client_secret":[redacted]}`, []string{"s 1"}},
+		// The key may carry a prefix, a suffix, a bracket, another operator.
+		{"prefixed env key", `fatal: DB_PASSWORD=hunter2 is not valid for PGHOST=db`,
+			`fatal: DB_PASSWORD=[redacted] is not valid for PGHOST=db`, []string{"hunter2"}},
+		{"suffixed key", `error: AWS_SECRET_ACCESS_KEY=abc/def+ghi rejected`,
+			`error: AWS_SECRET_ACCESS_KEY=[redacted] rejected`, []string{"abc/def"}},
+		{"bracketed key", `error: os.environ['DB_PASSWORD'] = 'hunter two' is too short`,
+			`error: os.environ['DB_PASSWORD'] = [redacted] is too short`, []string{"hunter", "two"}},
+		{"hash rocket", `error: connect {:user=>"app", :password=>"hunter two"} refused`,
+			`error: connect {:user=>"app", :password=>[redacted]} refused`, []string{"hunter", "two"}},
+		{"walrus", `panic: token := "abc def" is expired`,
+			`panic: token := [redacted] is expired`, []string{"abc", "def"}},
+		{"passphrase key", `error: key passphrase="open sesame" is wrong`,
+			`error: key passphrase=[redacted] is wrong`, []string{"sesame"}},
+		{"private key", `error: private_key='MIIEvQ IBADAN' unreadable`,
+			`error: private_key=[redacted] unreadable`, []string{"MIIEvQ", "IBADAN"}},
+		{"negotiate header", `error: upstream rejected Authorization: Negotiate YIIabc123 (401)`,
+			`error: upstream rejected Authorization: [redacted] (401)`, []string{"YIIabc123", "Negotiate"}},
+		{"JWT with no key", `error: verify eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl: expired`,
+			`error: verify [redacted]: expired`, []string{"eyJ", "c2lnbmF0dXJl"}},
+		// URL userinfo, whatever the password holds.
+		{"userinfo with an encoded @", `error: connect postgres://app:p%40ss@db.internal:5432/app: refused`,
+			`error: connect postgres://[redacted]@db.internal:5432/app: refused`, []string{"p%40ss", "//app"}},
+		{"userinfo with a raw @", `error: connect postgres://app:p@ss@db.internal:5432/app: refused`,
+			`error: connect postgres://[redacted]@db.internal:5432/app: refused`, []string{"p@", "ss@", "//app"}},
+		{"userinfo with a raw slash", `error: parse "postgres://app:pa/ss@db.internal/app": invalid port ":pa" after host`,
+			`error: parse "postgres://[redacted]@db.internal/app": invalid port ":pa" after host`, []string{"pa/ss", "//app"}},
+		{"token-only userinfo", `fatal: clone https://ghp_abc123@github.com/o/r.git failed`,
+			`fatal: clone https://[redacted]@github.com/o/r.git failed`, []string{"ghp_abc123"}},
+		{"MySQL DSN without a scheme", `error: dial root:s3cr3t@tcp(db.internal:3306)/app: refused`,
+			`error: dial [redacted]@tcp(db.internal:3306)/app: refused`, []string{"s3cr3t", "root"}},
+		// Ordinary lines come through untouched.
 		{"nothing to redact", `error: dial tcp 10.0.0.5:5432: connection refused`,
 			`error: dial tcp 10.0.0.5:5432: connection refused`, nil},
 		{"plain URL keeps its host", `error: GET https://idp.example.com/.well-known: HTTP 503`,
 			`error: GET https://idp.example.com/.well-known: HTTP 503`, nil},
+		{"URL with a port and an @ in the path", `error: GET http://users.internal:8080/users/bob@example.com: HTTP 404`,
+			`error: GET http://users.internal:8080/users/bob@example.com: HTTP 404`, nil},
+		{"URL next to an e-mail address", `error: {"url":"https://idp.example.com","contact":"ops@example.com"}`,
+			`error: {"url":"https://idp.example.com","contact":"ops@example.com"}`, nil},
+		{"e-mail address", `error: user bob@example.com: not found in tcp(10.0.0.5:3306)`,
+			`error: user bob@example.com: not found in tcp(10.0.0.5:3306)`, nil},
+		{"secret word with no value", `error: token expired, password authentication failed for user "app"`,
+			`error: token expired, password authentication failed for user "app"`, nil},
+		{"quoted prose", `level=error msg="can't open 'config.yaml'" path='/etc/app' code=2`,
+			`level=error msg="can't open 'config.yaml'" path='/etc/app' code=2`, nil},
+		{"key=value pairs", `level=error ts=2026-11-24T10:00:00Z caller=main.go:42 user='bob smith' retries=3`,
+			`level=error ts=2026-11-24T10:00:00Z caller=main.go:42 user='bob smith' retries=3`, nil},
+		{"Go panic", `panic: runtime error: invalid memory address or nil pointer dereference [signal SIGSEGV: code=0x1 addr=0x0]`,
+			`panic: runtime error: invalid memory address or nil pointer dereference [signal SIGSEGV: code=0x1 addr=0x0]`, nil},
+		{"base64-looking word", `error: decode eyJub3QgYSBqd3Q: illegal base64 data at input byte 4`,
+			`error: decode eyJub3QgYSBqd3Q: illegal base64 data at input byte 4`, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

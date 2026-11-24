@@ -230,14 +230,45 @@ const maxErrorLineLen = 240
 // userinfo of a URL and the value of a secret-looking key are removed first.
 // A header value takes its auth scheme with it: in "Authorization: Bearer x"
 // the credential is x, not the word Bearer.
+//
+// Every pattern errs towards removing too much. A value that is quoted is
+// removed up to its closing quote, whichever quote that is, because a quoted
+// secret may hold spaces; one whose quote never closes is removed to the end
+// of the line. An unquoted value runs to the next space.
 var (
-	urlUserinfo  = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@`)
-	secretKeyVal = regexp.MustCompile(`(?i)\b([a-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|authorization)[a-z0-9_.-]*)("?\s*[=:]\s*)("[^"]*"|(?:(?:bearer|basic|token)\s+)?\S+)`)
+	// The first form is the authority of a URL up to its last "@", so a
+	// password holding a raw "@" goes whole. The second covers a password
+	// holding a raw "/", which ends the authority early: it wants
+	// "user:password" where the password is not a port number, so
+	// "http://host:8080/users/a@b" is left alone.
+	urlUserinfo = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://)(?:[^/\s"]+|[^/\s?#@:\["]+:[0-9]*[^0-9/\s?#@"][^\s?#@"]*)@`)
+	// Go's MySQL DSN has no scheme: user:password@tcp(host:3306)/db.
+	schemelessDSN = regexp.MustCompile("[^\\s:@/\"'`=(]+:\\S*@((?:tcp|unix)\\()")
+	// A JWT is a credential wherever it stands, key or no key.
+	bareJWT      = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*`)
+	secretKeyVal = regexp.MustCompile(`(?i)\b(` +
+		// The key, with whatever prefix or suffix it carries (DB_PASSWORD,
+		// x-api-key, client_secret_v2).
+		`[a-z0-9_.-]*(?:password|passwd|pwd|passphrase|secret|token|credentials?|api[_-]?key|access[_-]?key|private[_-]?key|authorization)[a-z0-9_.-]*` +
+		`)(` +
+		// The separator: the key's own closing quote or bracket, escaped
+		// when the line is JSON inside a string, then = : := or =>.
+		`\\?["'` + "`" + `]?\]?\s*(?:=>|:=|=|:)\s*` +
+		`)(` +
+		`"(?:[^"\\]|\\.)*"` + // "double quoted", \" inside
+		`|'(?:[^'\\]|\\.)*'` + // 'single quoted'
+		"|`[^`]*`" + // `backtick quoted`
+		`|\\"[^"]*"` + // \"quoted inside a JSON string\"
+		"|\"[^\"]*$|'[^']*$|`[^`]*$" + // a quote that never closes
+		`|(?:(?:bearer|basic|token|digest|negotiate|ntlm|apikey)\s+)?\S+` +
+		`)`)
 )
 
 func redactCredentials(line string) string {
 	line = urlUserinfo.ReplaceAllString(line, "${1}[redacted]@")
-	return secretKeyVal.ReplaceAllString(line, "${1}${2}[redacted]")
+	line = schemelessDSN.ReplaceAllString(line, "[redacted]@${1}")
+	line = secretKeyVal.ReplaceAllString(line, "${1}${2}[redacted]")
+	return bareJWT.ReplaceAllString(line, "[redacted]")
 }
 
 // lastErrorLines returns up to n of the most recent log lines that look like
