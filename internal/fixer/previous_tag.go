@@ -194,14 +194,92 @@ func ExtractImageTag(content string) (string, bool) {
 	return val, true
 }
 
-// LookupPreviousImageTag walks the GitHub history of valuesPath and returns
-// the most recent prior distinct value of `image.tag`.
+// ImageRef is the chart-level image pin of a values file: image.tag and,
+// when the file carries one, image.digest.
+//
+// The base-service chart renders repository:tag@digest when image.digest is
+// set, and the runtime then pulls by digest: the tag is only a label. A
+// rollback that moves the tag alone therefore changes nothing in the cluster,
+// so the two travel together.
+type ImageRef struct {
+	Tag    string `json:"tag"`
+	Digest string `json:"digest,omitempty"`
+}
+
+// imageDigestPattern is the only digest shape a rollback may write.
+var imageDigestPattern = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+
+// chartImageDigestLineIndex returns the index of the `digest:` line that is
+// a sibling of the chart-level tag line at tagIdx, or -1 when the image
+// block has none.
+func chartImageDigestLineIndex(lines []string, tagIdx int) int {
+	if tagIdx < 0 || tagIdx >= len(lines) {
+		return -1
+	}
+	tagIndent := len(indentOf(lines[tagIdx]))
+	scan := func(from, step int) int {
+		for j := from; j >= 0 && j < len(lines); j += step {
+			trimmed := strings.TrimSpace(lines[j])
+			if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+				continue
+			}
+			ind := len(indentOf(lines[j]))
+			if ind < tagIndent {
+				return -1 // left the image block
+			}
+			if ind > tagIndent {
+				continue // nested under a sibling key
+			}
+			if k, ok := mappingKey(trimmed); ok && k == "digest" {
+				return j
+			}
+		}
+		return -1
+	}
+	if idx := scan(tagIdx+1, 1); idx >= 0 {
+		return idx
+	}
+	return scan(tagIdx-1, -1)
+}
+
+// ExtractImageRef returns the chart-level image.tag together with
+// image.digest. Digest is "" when the image block has no digest line or the
+// line is empty, which is when the chart falls back to the tag. Returns
+// ok=false exactly when ExtractImageTag does.
+func ExtractImageRef(content string) (ImageRef, bool) {
+	lines := strings.Split(content, "\n")
+	idx := chartImageTagLineIndex(lines)
+	if idx < 0 {
+		return ImageRef{}, false
+	}
+	tag, _, _, ok := parseTagLine(lines[idx])
+	if !ok {
+		return ImageRef{}, false
+	}
+	ref := ImageRef{Tag: tag}
+	if d := chartImageDigestLineIndex(lines, idx); d >= 0 {
+		ref.Digest = parseScalarLine(lines[d]).value
+	}
+	return ref, true
+}
+
+// LookupPreviousImageTag is LookupPreviousImage for a caller that needs the
+// tag alone.
+func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, currentTag string) (string, error) {
+	ref, err := f.LookupPreviousImage(ctx, valuesPath, currentTag)
+	return ref.Tag, err
+}
+
+// LookupPreviousImage walks the GitHub history of valuesPath and returns the
+// most recent prior distinct value of `image.tag`, with the image.digest the
+// file carried at that same revision.
 //
 // currentTag is the tag we want to roll back FROM — commits whose file
 // content carries the same tag are skipped (they predate the bad bump too).
-// Returns ("", nil) when no prior distinct tag exists in the cap window;
-// the caller should degrade to diagnosis-only Telegram in that case.
-func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, currentTag string) (string, error) {
+// Returns a zero ImageRef and a nil error when no prior distinct tag exists
+// in the cap window; the caller should degrade to diagnosis-only Telegram in
+// that case.
+func (f *GitHubFixer) LookupPreviousImage(ctx context.Context, valuesPath, currentTag string) (ImageRef, error) {
 	commits, _, err := f.client.Repositories.ListCommits(ctx, f.owner, f.repo, &github.CommitsListOptions{
 		Path: valuesPath,
 		ListOptions: github.ListOptions{
@@ -209,7 +287,7 @@ func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, cu
 		},
 	})
 	if err != nil {
-		return "", fmt.Errorf("listing commits for %s: %w", valuesPath, err)
+		return ImageRef{}, fmt.Errorf("listing commits for %s: %w", valuesPath, err)
 	}
 
 	for _, c := range commits {
@@ -221,7 +299,7 @@ func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, cu
 		if err != nil {
 			if ctx.Err() != nil {
 				// Context was cancelled or timed out — stop immediately.
-				return "", ctx.Err()
+				return ImageRef{}, ctx.Err()
 			}
 			// 404 = file didn't exist at this revision (e.g. service
 			// was onboarded after this commit). Skip and keep walking.
@@ -229,20 +307,27 @@ func (f *GitHubFixer) LookupPreviousImageTag(ctx context.Context, valuesPath, cu
 			// trust the rest of the walk — propagate so the caller
 			// degrades to diagnosis-only Telegram instead of silently
 			// returning "no previous tag found".
-			var ghErr *github.ErrorResponse
-			if errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == 404 {
+			if isGitHubNotFound(err) {
 				continue
 			}
-			return "", fmt.Errorf("reading %s at %s: %w", valuesPath, sha, err)
+			return ImageRef{}, fmt.Errorf("reading %s at %s: %w", valuesPath, sha, err)
 		}
-		tag, ok := ExtractImageTag(content)
-		if !ok || tag == "" {
+		ref, ok := ExtractImageRef(content)
+		if !ok || ref.Tag == "" {
 			continue
 		}
-		if tag != currentTag {
-			return tag, nil
+		if ref.Tag != currentTag {
+			return ref, nil
 		}
 	}
 
-	return "", nil
+	return ImageRef{}, nil
+}
+
+// isGitHubNotFound reports whether err is GitHub's 404, its documented
+// signal that a path does not exist at a revision. Every other failure is a
+// read that did not happen, not an absence.
+func isGitHubNotFound(err error) bool {
+	var ghErr *github.ErrorResponse
+	return errors.As(err, &ghErr) && ghErr.Response != nil && ghErr.Response.StatusCode == 404
 }

@@ -1006,20 +1006,21 @@ func toLegacyDiag(d *skill.DiagnosisResult) *legacyDiag {
 // legacyDiag mirrors diagnosis.DiagnosisResult for backward compatibility with fixer.
 type legacyDiag = fixer.DiagnosisCompat
 
-// rollbackImage resolves the previous distinct image tag from the GitOps
-// history of valuesPath and produces a patch flipping the current tag back.
+// rollbackImage resolves the previous distinct image from the GitOps
+// history of valuesPath and produces a patch flipping the current one back:
+// the tag and, where the file pins one, the digest of that same revision.
 // On any miss (no prior commit, network error, file not parseable) it
 // returns a non-nil error so the caller surfaces "Fix identified but
 // patch generation failed" via Telegram instead of silently no-oping.
 func (p *Pipeline) rollbackImage(ctx context.Context, valuesPath, content string) (string, string, error) {
-	prevTag, err := p.github.LookupPreviousImageTag(ctx, valuesPath, currentImageTag(content))
+	prev, err := p.github.LookupPreviousImage(ctx, valuesPath, currentImageTag(content))
 	if err != nil {
 		return "", "", fmt.Errorf("looking up previous image tag: %w", err)
 	}
-	if prevTag == "" {
+	if prev.Tag == "" {
 		return "", "", fmt.Errorf("no prior distinct image tag found in last %d commits of %s", fixer.PreviousTagLookupCommitCap, valuesPath)
 	}
-	return fixer.GenerateImageRollback(content, prevTag)
+	return fixer.GenerateImageRollback(content, prev)
 }
 
 // currentImageTag is a thin wrapper around fixer.ExtractImageTag exposed

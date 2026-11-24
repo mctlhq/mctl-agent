@@ -335,3 +335,32 @@ func TestLookupPreviousImageTag(t *testing.T) {
 		}
 	})
 }
+
+// The previous image is the tag and the digest of one and the same revision.
+func TestLookupPreviousImageReturnsDigestOfThatRevision(t *testing.T) {
+	const path = "platform-gitops/services/labs/mctl-telegram/values.yaml"
+	file := func(tag, digest string) string {
+		return "image:\n  repository: ghcr.io/mctlhq/mctl-telegram\n  tag: \"" + tag + "\"\n  digest: \"" + digest + "\"\n"
+	}
+	f, cleanup := fakeGH(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasSuffix(r.URL.Path, "/commits") {
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"sha": "head"}, {"sha": "pre-bump"}})
+			return
+		}
+		body := file("0.148.0", digestNew)
+		if r.URL.Query().Get("ref") == "pre-bump" {
+			body = file("0.147.0", digestOld)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"type": "file", "encoding": "base64", "sha": "b", "content": encodeContent(body)})
+	})
+	defer cleanup()
+
+	got, err := f.LookupPreviousImage(context.Background(), path, "0.148.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (ImageRef{Tag: "0.147.0", Digest: digestOld}); got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}

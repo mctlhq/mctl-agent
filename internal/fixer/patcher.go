@@ -113,18 +113,32 @@ func GenerateMemoryBump(content string) (string, string, error) {
 	return bumpChartLimit(content, "memory", bumpMemory, "memory limit")
 }
 
-// GenerateImageRollback creates a patch that rolls back the chart-level
-// image tag. Only the `tag:` line that's a direct child of the top-level
-// `image:` block is rewritten — values files routinely embed sidecar /
-// initContainer images deeper in the document, and unrelated tag keys
-// like `global.tag` may appear earlier in the file. Inline comments on
+// GenerateImageRollback creates a patch that rolls the chart-level image
+// back to previous. Only the `tag:` line that's a direct child of the
+// top-level `image:` block is rewritten — values files routinely embed
+// sidecar / initContainer images deeper in the document, and unrelated tag
+// keys like `global.tag` may appear earlier in the file. Inline comments on
 // the tag line (e.g. `tag: "1.2.3"  # bumped 2026-04-30`) are preserved.
+//
+// When the file pins image.digest the digest is restored together with the
+// tag. The chart then pulls by digest and the tag is only a label, so
+// moving the tag alone would leave the crashing image running under the old
+// version's name. If the previous revision carried no usable digest there is
+// nothing correct to write, and the rollback is refused.
+//
+// A file that configures prepull verification is refused as well: the
+// chart's PreSync verifier stops the sync unless prepull.ref was first moved
+// to the older image and the DaemonSet holds it, a two-step change this
+// function does not make.
 //
 // chartImageTagLineIndex (location), parseTagLine (read), and the rewrite
 // here all agree on what counts as the chart image, so the
 // read-then-rewrite invariant holds.
-func GenerateImageRollback(content, previousTag string) (string, string, error) {
+func GenerateImageRollback(content string, previous ImageRef) (string, string, error) {
 	lines := strings.Split(content, "\n")
+	if err := refusePrepull(lines); err != nil {
+		return content, "", err
+	}
 	idx := chartImageTagLineIndex(lines)
 	if idx < 0 {
 		return content, "", fmt.Errorf("could not find chart-level image.tag to rollback")
@@ -133,10 +147,47 @@ func GenerateImageRollback(content, previousTag string) (string, string, error) 
 	if !ok {
 		return content, "", fmt.Errorf("chart-level tag line is not parseable: %q", lines[idx])
 	}
+	summary := fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previous.Tag)
+	if d := chartImageDigestLineIndex(lines, idx); d >= 0 {
+		if sc := parseScalarLine(lines[d]); sc.value != "" {
+			if !imageDigestPattern.MatchString(previous.Digest) {
+				return content, "", fmt.Errorf(
+					"image is pinned by digest, but the revision carrying tag %s has no usable digest (%q); "+
+						"moving the tag alone would not change the running image", previous.Tag, previous.Digest)
+			}
+			lines[d] = sc.render(previous.Digest)
+			summary += " (digest restored)"
+		}
+	}
 	indent := prefix[:len(prefix)-len(strings.TrimLeft(prefix, " \t"))]
-	lines[idx] = fmt.Sprintf(`%stag: "%s"%s`, indent, previousTag, comment)
-	summary := fmt.Sprintf("Rollback image tag from %s to %s", currentTag, previousTag)
+	lines[idx] = fmt.Sprintf(`%stag: "%s"%s`, indent, previous.Tag, comment)
 	return strings.Join(lines, "\n"), summary, nil
+}
+
+// refusePrepull returns an error when the values file has a top-level
+// prepull block that is not provably disabled. A block whose `enabled` key
+// is missing or unreadable is refused too: not being able to read the
+// switch is not the same as reading it off.
+func refusePrepull(lines []string) error {
+	present := false
+	for _, l := range lines {
+		if len(indentOf(l)) != 0 {
+			continue
+		}
+		if k, ok := mappingKey(strings.TrimSpace(l)); ok && k == "prepull" {
+			present = true
+			break
+		}
+	}
+	if !present {
+		return nil
+	}
+	if idx, err := findScalarLine(lines, []string{"prepull", "enabled"}); err == nil &&
+		parseScalarLine(lines[idx]).value == "false" {
+		return nil
+	}
+	return fmt.Errorf("values file configures prepull verification (prepull.enabled is not false): " +
+		"a rollback must first move prepull.ref to the older image, which is not automated")
 }
 
 // GenerateFromDiagnosis applies a Claude-suggested fix.
