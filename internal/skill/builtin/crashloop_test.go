@@ -157,9 +157,10 @@ func TestCrashLoopSkillDiagnoseWithoutLogsOrEvents(t *testing.T) {
 // A quoted value goes whole, spaces included, whichever quote it uses, and
 // ordinary lines come through untouched.
 //
-// Mutation check: drop any replacement in redactCredentials, or any one
-// alternative of a pattern (the single-quoted value, the raw-slash userinfo,
-// the port exception, ...), and a case fails.
+// Mutation check: drop any replacement in redactCredentials, either reading
+// in redactSecretValues, or any one alternative of a pattern (the
+// single-quoted value, the raw-slash userinfo, the port exception, the
+// bracketed value, the quote inside userinfo, ...), and a case fails.
 func TestCrashLoopDiagnosisRedactsCredentials(t *testing.T) {
 	tests := []struct {
 		name, line, want string
@@ -233,6 +234,54 @@ func TestCrashLoopDiagnosisRedactsCredentials(t *testing.T) {
 			`fatal: clone https://[redacted]@github.com/o/r.git failed`, []string{"ghp_abc123"}},
 		{"MySQL DSN without a scheme", `error: dial root:s3cr3t@tcp(db.internal:3306)/app: refused`,
 			`error: dial [redacted]@tcp(db.internal:3306)/app: refused`, []string{"s3cr3t", "root"}},
+		// A double quote inside the userinfo is part of the password.
+		{"userinfo with a raw double quote", `error: connect postgres://app:pa"ss@db.internal:5432/app: refused`,
+			`error: connect postgres://[redacted]@db.internal:5432/app: refused`, []string{`pa"`, "ss@", "//app"}},
+		{"userinfo ending in a double quote", `error: connect https://user:p"@db/x: refused`,
+			`error: connect https://[redacted]@db/x: refused`, []string{"user", `p"`}},
+		{"token-only userinfo with a double quote", `fatal: clone https://ghp"abc123@github.com/o/r.git failed`,
+			`fatal: clone https://[redacted]@github.com/o/r.git failed`, []string{"ghp", "abc123"}},
+		{"token-only userinfo ending in a double quote", `fatal: clone https://ghp_abc123"@github.com/o/r.git failed`,
+			`fatal: clone https://[redacted]@github.com/o/r.git failed`, []string{"ghp_abc123"}},
+		{"userinfo with a double quote and a raw slash", `error: connect postgres://app:p"a/ss@db.internal/app: refused`,
+			`error: connect postgres://[redacted]@db.internal/app: refused`, []string{`p"a`, "ss@", "//app"}},
+		{"raw-slash password ending in a double quote", `error: connect postgres://app:pa/ss"@db.internal/app: refused`,
+			`error: connect postgres://[redacted]@db.internal/app: refused`, []string{"pa/", `ss"`, "//app"}},
+		{"raw-slash password opening with a double quote", `error: connect postgres://app:"pa/ss@db.internal/app: refused`,
+			`error: connect postgres://[redacted]@db.internal/app: refused`, []string{`"pa`, "ss@", "//app"}},
+		// A backslash before a quote is read both ways: an escape, and the
+		// last character of the value.
+		{"value ending in a backslash", `error: password="ab\" token2="x y" end`,
+			`error: password=[redacted] end`, []string{"ab", "x y", `y"`}},
+		{"single-quoted value ending in a backslash", `error: password='ab\' api_key='-x y' end`,
+			`error: password=[redacted] end`, []string{"ab", "x y", "y'"}},
+		{"escaped quote in a value that never closes", `error: parse config: password="pa\"ss word`,
+			`error: parse config: password=[redacted]`, []string{`pa\`, "ss word"}},
+		{"apostrophe inside a single-quoted value", `error: bad password='it's a secret' given`,
+			`error: bad password=[redacted] given`, []string{"it", "a secret"}},
+		{"unclosed value ending in a backslash", `error: parse config: password="hunter two\`,
+			`error: parse config: password=[redacted]`, []string{"hunter", "two"}},
+		{"unclosed single-quoted value ending in a backslash", `error: parse config: password='hunter two\`,
+			`error: parse config: password=[redacted]`, []string{"hunter", "two"}},
+		{"unclosed nested JSON value ending in a backslash", `level=error msg="rejected {\"token\":\"abc def\`,
+			`level=error msg="rejected {\"token\":[redacted]`, []string{"abc", "def"}},
+		{"escaped quote inside nested JSON", `level=error msg="rejected {\"token\":\"abc \\\"def\\\" ghi\",\"user\":\"bob\"}"`,
+			`level=error msg="rejected {\"token\":[redacted],\"user\":\"bob\"}"`, []string{"abc", "def", "ghi"}},
+		{"nested JSON value that never closes", `level=error msg="rejected {\"token\":\"abc def`,
+			`level=error msg="rejected {\"token\":[redacted]`, []string{"abc", "def"}},
+		{"escaped opening quote, bare closing quote", `error: token=\"abc def" rejected`,
+			`error: token=[redacted] rejected`, []string{"abc", "def"}},
+		// Go prints a header map with the values in brackets.
+		{"Go header map, bearer", `error: request failed headers=map[Authorization:[Bearer abc123secret] Content-Type:[application/json]]`,
+			`error: request failed headers=map[Authorization:[redacted] Content-Type:[application/json]]`, []string{"abc123secret", "Bearer"}},
+		{"Go header map, basic", `error: request failed headers=map[Accept:[*/*] Proxy-Authorization:[Basic dXNlcjpwYXNz]]`,
+			`error: request failed headers=map[Accept:[*/*] Proxy-Authorization:[redacted]]`, []string{"dXNlcjpwYXNz"}},
+		{"Go header map, two values", `error: headers=map[X-Api-Key:[k1 abc k2 def] Accept:[*/*]]`,
+			`error: headers=map[X-Api-Key:[redacted] Accept:[*/*]]`, []string{"abc", "def"}},
+		{"JSON header array", `{"level":"error","headers":{"Authorization":["Bearer abc def"],"Accept":["*/*"]}}`,
+			`{"level":"error","headers":{"Authorization":[redacted],"Accept":["*/*"]}}`, []string{"abc", "def"}},
+		{"bracket that never closes", `error: headers=map[Authorization:[Bearer abc def`,
+			`error: headers=map[Authorization:[redacted]`, []string{"abc", "def"}},
 		// Ordinary lines come through untouched.
 		{"nothing to redact", `error: dial tcp 10.0.0.5:5432: connection refused`,
 			`error: dial tcp 10.0.0.5:5432: connection refused`, nil},
@@ -242,6 +291,10 @@ func TestCrashLoopDiagnosisRedactsCredentials(t *testing.T) {
 			`error: GET http://users.internal:8080/users/bob@example.com: HTTP 404`, nil},
 		{"URL next to an e-mail address", `error: {"url":"https://idp.example.com","contact":"ops@example.com"}`,
 			`error: {"url":"https://idp.example.com","contact":"ops@example.com"}`, nil},
+		{"URL with a port next to an e-mail address", `error: {"url":"http://idp.example.com:8080","contact":"ops/sre@example.com"}`,
+			`error: {"url":"http://idp.example.com:8080","contact":"ops/sre@example.com"}`, nil},
+		{"quoted URL before an address", `error: fetch("https://idp.example.com")>ops@example.com`,
+			`error: fetch("https://idp.example.com")>ops@example.com`, nil},
 		{"e-mail address", `error: user bob@example.com: not found in tcp(10.0.0.5:3306)`,
 			`error: user bob@example.com: not found in tcp(10.0.0.5:3306)`, nil},
 		{"secret word with no value", `error: token expired, password authentication failed for user "app"`,
